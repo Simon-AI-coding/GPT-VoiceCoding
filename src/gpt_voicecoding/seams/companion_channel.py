@@ -34,6 +34,15 @@ seam's own carrier in `seams/call.py`, filled by `briefing.spoken`. `BriefState`
 is the one non-string field, so an adapter can key a state light on a closed
 enum instead of on English words — the words stay Core's; the light is layout.
 
+**Options are labels, and a surface that can draw buttons draws one per label**
+(ADR 0021 §6). Every notice that offers choices carries them as `options`, in
+order — a question's labels, a permission's `allow` / `deny`, a roster's
+Session names, a menu screen's words — and a numeral picks one by position.
+`send` grows no `options` argument and this seam has no word for a button: an
+adapter that draws them draws the labels as it draws everything else, and a
+press comes back as the numeral it stood for. `MenuNotice` is the third kind,
+for the screens the command menu opens.
+
 Adapters: Telegram is the generic public one.
 """
 
@@ -174,11 +183,48 @@ class RosterNotice:
 
     rows: tuple[RosterRowNotice, ...]
     counts: str
+    #: One label per row, in row order, for a surface that draws choices (ADR
+    #: 0021 §6): the roster is an Anchor whose choices are the live Sessions,
+    #: and a numeral picks one by position. Core words the labels — the name,
+    #: with an address after it where two rows share one — and the adapter
+    #: draws them verbatim. Empty for a roster that offers nothing to pick.
+    options: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.options and len(self.options) != len(self.rows):
+            raise ValueError(
+                f"a roster's labels are its rows: {len(self.options)} label(s) cannot "
+                f"stand for {len(self.rows)} row(s)"
+            )
 
 
-#: What `send` may be handed beside its text. Two kinds, and an adapter lays
-#: each out in one visual language (ADR 0021 §5).
-Notice = SessionNotice | RosterNotice
+@dataclass(frozen=True, slots=True)
+class MenuNotice:
+    """A menu screen as this seam carries it: a heading, and the labels a numeral picks from.
+
+    The screens the command menu opens (ADR 0021 §6, #264) — a greeting for one
+    Session, the config screen, the switch screen, the `Say to <name>:` prompt
+    — are one shape: a heading in Core's words and the option labels in order,
+    each of which a numeral picks by position. `expects_words` is the prompt:
+    the screen asks for the user's words rather than a choice, so a surface
+    with a reply bar opens it and one without prints the heading and waits.
+    Every string is Core's; the adapter numbers, draws, and chooses none.
+    """
+
+    heading: str
+    options: tuple[str, ...] = ()
+    expects_words: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.heading.strip():
+            raise ValueError("a menu screen says what it is for")
+        if self.expects_words and self.options:
+            raise ValueError("a screen asks for words or offers choices, never both")
+
+
+#: What `send` may be handed beside its text. Three kinds, and an adapter lays
+#: each out in one visual language (ADR 0021 §5, §6).
+Notice = SessionNotice | RosterNotice | MenuNotice
 
 
 #: The closed set of events this seam raises. Nothing else may appear.

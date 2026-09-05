@@ -84,6 +84,9 @@ class ControlPlane:
             Action.RELAY: self._relay,
             Action.APPROVE: self._approve,
             Action.VERIFY: self._verify,
+            Action.SESSIONS: self._sessions,
+            Action.CONFIG: self._config,
+            Action.ASSISTANT: self._assistant,
         }
 
     @property
@@ -205,3 +208,21 @@ class ControlPlane:
 
     async def _verify(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return payloads.verification_document(await self._core.verify())
+
+    async def _sessions(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The Session list as a screen: Briefing's roster text and its labels (ADR 0021 §6).
+
+        The text is `brief`'s own roster rendering — the one renderer there is —
+        and `options` are the labels a surface that draws choices draws, one
+        per live Session, in row order. A surface that draws none prints the
+        text and ignores them; nothing is lost, because the rows are the text.
+        """
+        return payloads.screen_document(await self._core.sessions_screen())
+
+    async def _config(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The configuration screen: `switch`, `verify` and `live` as labels."""
+        return payloads.screen_document(self._core.config_screen())
+
+    async def _assistant(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Open an Assistant Conversation (ADR 0021 §7). The hub refuses until #265 builds it."""
+        return {"text": await self._core.open_assistant()}

@@ -50,6 +50,13 @@ DEFAULT_RETRY_SECONDS = 5.0
 #: `len()` is the wrong ruler and an emoji costs two.
 MESSAGE_LIMIT_UTF16_UNITS = 4096
 
+#: How wide a button's label may be, in UTF-16 code units, and how wide one
+#: row of buttons is: a label past it is cut on the button (whole on the
+#: notice line), and a row holds as many buttons as fit inside it (ADR 0021
+#: §6). One dial for both, because they are one fact — how much a row can
+#: show. Layout, so it defaults; a phone screen is the reason for the number.
+DEFAULT_BUTTON_LABEL_WIDTH = 32
+
 
 #: The two keys with no default, because neither is a location or a mechanism
 #: identity: which variable holds the token, and which chat this channel reaches.
@@ -72,8 +79,19 @@ class TelegramSettings:
     poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     retry_seconds: float = DEFAULT_RETRY_SECONDS
+    #: The width a button's label is cut to, and a row of buttons wrapped at.
+    button_label_width: int = DEFAULT_BUTTON_LABEL_WIDTH
 
     def __post_init__(self) -> None:
+        if isinstance(self.button_label_width, bool) or not isinstance(
+            self.button_label_width, int
+        ):
+            raise SettingsError("button_label_width must be a whole number of characters")
+        if self.button_label_width < 1:
+            raise SettingsError(
+                "button_label_width must show at least one character; a button with no "
+                "label is a button the user cannot read"
+            )
         if not self.token_env.strip():
             raise SettingsError("token_env must name the environment variable holding the token")
         if not self.chat_id.strip():
@@ -171,6 +189,10 @@ def _typed(key: str, value: Any) -> Any:
         if not isinstance(value, str) or not value.strip():
             raise SettingsError(f"{key} must be a non-empty string")
         return value.strip()
+    if key == "button_label_width":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SettingsError("button_label_width must be a whole number of characters")
+        return value
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise SettingsError(f"{key} must be a number of seconds")
     return float(value)

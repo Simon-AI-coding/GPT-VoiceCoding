@@ -164,6 +164,65 @@ def say_to(name: str) -> str:
     return SAY_TO_TEMPLATE.format(name=name)
 
 
+class MenuWord(StrEnum):
+    """The fixed words the menu screens need (ADR 0021 §6, #264): keys into `MENU_WORDING`."""
+
+    #: The three choices a greeting offers about one Session.
+    BRIEF = "brief"
+    HISTORY = "history"
+    SEND_MESSAGE = "send_message"
+    #: The three choices the config screen offers.
+    SWITCH = "switch"
+    VERIFY = "verify"
+    LIVE = "live"
+    #: What the config screen and the switch screen are headed with.
+    CONFIG = "config"
+    SWITCHES = "switches"
+    #: The two states a switch label carries.
+    ON = "on"
+    OFF = "off"
+
+
+#: The words themselves, held here for the reason `NOTICE_WORDING` is: a menu
+#: label is a sentence the user reads and presses, so it is Core's to choose,
+#: and every surface prints the same one. Three of them are also control-plane
+#: verbs, spelled as the shared set spells them so that a label and the typed
+#: command read alike.
+MENU_WORDING: Mapping[MenuWord, str] = {
+    MenuWord.BRIEF: "brief",
+    MenuWord.HISTORY: "history",
+    MenuWord.SEND_MESSAGE: "send message",
+    MenuWord.SWITCH: "switch",
+    MenuWord.VERIFY: "verify",
+    MenuWord.LIVE: "live",
+    MenuWord.CONFIG: "config",
+    MenuWord.SWITCHES: "switches — press one to flip it",
+    MenuWord.ON: "on",
+    MenuWord.OFF: "off",
+}
+
+#: One switch's label: its name and the state it holds now. A press means
+#: "flip", whatever the label still says (ADR 0021 §6).
+SWITCH_LABEL_TEMPLATE = "{name}: {state}"
+
+
+def switch_label(name: str, on: bool) -> str:
+    """`<name>: on|off`, in this module's words."""
+    return SWITCH_LABEL_TEMPLATE.format(
+        name=name, state=MENU_WORDING[MenuWord.ON if on else MenuWord.OFF]
+    )
+
+
+#: How two roster labels that would read alike are told apart: the address,
+#: after the name (ADR 0021 §6, #264). The label is still resolved by position;
+#: the suffix is for the user's eyes, not for Core's.
+DISAMBIGUATED_LABEL_TEMPLATE = "{name} ({address})"
+
+#: What the `sessions` screen says when there is no live Session to list — text
+#: only, no Anchor, because a screen with nothing to pick is not a screen.
+NOTHING_RUNNING_HINT = "nothing is running — start a Session at the terminal and it appears here"
+
+
 #: What the user hears back when their message carried no text at all — a voice
 #: note, a photo, a file. The Companion Channel is text only this iteration (ADR
 #: 0021 §4): the adapter raises such a message as empty text, and the router's
@@ -1049,6 +1108,16 @@ def _roster_lines(brief: RosterBrief) -> list[str]:
     lines.append(_counts_line(brief))
     lines.extend(f"  {_row_line(row)}" for row in rows)
     return lines
+
+
+def greeting(session: Session) -> str:
+    """The one line a menu greets one Session with: `text`'s own header for it (#264).
+
+    The screen that offers `brief` / `history` / `send message` about a Session
+    names it the way every other surface does, so the header is the headline
+    `text` prints and nothing composed here.
+    """
+    return _headline(session.name, session.target, _state(session))
 
 
 def _headline(name: SessionName | None, target: SessionTarget, state: BriefState) -> str:

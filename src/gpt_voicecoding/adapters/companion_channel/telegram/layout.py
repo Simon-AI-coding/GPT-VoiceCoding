@@ -26,19 +26,31 @@ a headline that alone fills the cap leaves an original of the marker and
 nothing else. **This is the one place a message text is cut** (ADR 0021 §5,
 amending ADR 0016 to that extent): the brief still carries the original whole,
 and `split_message` is for the messages that are not notices.
+
+**One button per option label** (ADR 0021 §6). Whatever kind the notice is, its
+`options` become an inline keyboard — `keyboard` — with the 1-based position as
+`callback_data`, so a press comes back as the numeral typed in a reply and the
+label's words are never read. A label wider than the configured width is cut
+on the button and ended with a mark; **the numbered line in the text carries it
+whole**, which is what lets the user tell two buttons apart when the cut left
+them reading alike. A menu screen is the heading in bold and the labels
+numbered; the prompt that asks for words carries a ForceReply instead of
+buttons.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Final
 
 from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
+    DEFAULT_BUTTON_LABEL_WIDTH,
     MESSAGE_LIMIT_UTF16_UNITS,
 )
 from gpt_voicecoding.seams.companion_channel import (
     BriefState,
+    MenuNotice,
     Notice,
     RosterNotice,
     SessionNotice,
@@ -60,6 +72,10 @@ SEPARATOR: Final = " · "
 #: The Bot API's entity types this layout uses, and no others.
 BOLD: Final = "bold"
 EXPANDABLE_BLOCKQUOTE: Final = "expandable_blockquote"
+
+#: What ends a label cut for a button. A symbol, not a word: the whole label is
+#: on the notice line, and the button only has to be recognisable as it.
+CUT_MARK: Final = "…"
 
 
 def utf16_length(text: str) -> int:
@@ -92,24 +108,104 @@ class LaidOut:
     text: str
     #: `MessageEntity` objects, offsets and lengths in UTF-16 code units.
     entities: tuple[dict[str, object], ...] = ()
+    #: The `reply_markup` — an inline keyboard drawn from the labels, or a
+    #: ForceReply for the prompt — or None when the message offers nothing.
+    reply_markup: dict[str, object] | None = None
 
     def payload(self) -> dict[str, object]:
-        """The two fields of the API call this layout decides."""
+        """The fields of the API call this layout decides."""
         body: dict[str, object] = {"text": self.text}
         if self.entities:
             body["entities"] = list(self.entities)
+        if self.reply_markup is not None:
+            body["reply_markup"] = self.reply_markup
         return body
 
 
-def lay_out(notice: Notice, *, limit: int = MESSAGE_LIMIT_UTF16_UNITS) -> LaidOut:
-    """Arrange one brief in this surface's shape, inside one message."""
+def lay_out(
+    notice: Notice,
+    *,
+    limit: int = MESSAGE_LIMIT_UTF16_UNITS,
+    label_width: int = DEFAULT_BUTTON_LABEL_WIDTH,
+) -> LaidOut:
+    """Arrange one brief in this surface's shape, inside one message.
+
+    **One button per option label, in order** (ADR 0021 §6): every kind of
+    notice that carries labels gets the same keyboard, and one that carries
+    none gets no markup. The prompt that asks for words gets a ForceReply.
+    """
     if isinstance(notice, RosterNotice):
-        return _roster(notice, limit=limit)
-    return _session(notice, limit=limit)
+        # **The keyboard follows the rows that survived the cap** (#264 review).
+        # A roster is one message and its rows go from the back (#262), so a
+        # long one shows the first N; a button for a row the user cannot see is
+        # a button they cannot match to anything, and 60 Sessions drew 60
+        # buttons under 30 lines. Positions are unaffected: the rows that stay
+        # are the leading ones, so label N is still row N.
+        laid_out, kept = _roster(notice, limit=limit)
+        return replace(
+            laid_out, reply_markup=keyboard(notice.options[:kept], label_width=label_width)
+        )
+    if isinstance(notice, MenuNotice):
+        laid_out = _menu(notice)
+        if notice.expects_words:
+            return replace(laid_out, reply_markup={"force_reply": True})
+    else:
+        laid_out = _session(notice, limit=limit)
+    return replace(laid_out, reply_markup=keyboard(notice.options, label_width=label_width))
 
 
-def _roster(notice: RosterNotice, *, limit: int) -> LaidOut:
-    """One line per Session — light, name, agent, state word — and the counts under it.
+def keyboard(
+    labels: Sequence[str], *, label_width: int = DEFAULT_BUTTON_LABEL_WIDTH
+) -> dict[str, object] | None:
+    """One inline button per label, `callback_data` its 1-based position.
+
+    The position, never the label: a press comes back as the numeral typed
+    in a reply (ADR 0021 §4), and the label's words are never read. Within
+    the API's 64-byte bound by construction — a position is a few digits.
+    A label wider than `label_width` is cut on the button and ended with the
+    cut mark; **the notice line carries it whole, and that is what tells two
+    buttons apart** — the cut takes the end of a label, which is exactly where
+    a roster puts the address that distinguishes two Sessions sharing a name
+    (#264 review). Rows wrap: a row holds as many buttons as fit inside
+    `label_width` counted together, so short labels share a row and a long one
+    sits alone. Order is preserved, and the order is the numbering.
+    """
+    if not labels:
+        return None
+    rows: list[list[dict[str, str]]] = []
+    row: list[dict[str, str]] = []
+    width = 0
+    for position, label in enumerate(labels, 1):
+        shown = _fitted_label(label, label_width)
+        cost = utf16_length(shown)
+        if row and width + cost > label_width:
+            rows.append(row)
+            row, width = [], 0
+        row.append({"text": shown, "callback_data": str(position)})
+        width += cost
+    rows.append(row)
+    return {"inline_keyboard": rows}
+
+
+def _fitted_label(label: str, width: int) -> str:
+    """The label whole when it fits the button, else cut and ended with the mark."""
+    if utf16_length(label) <= width:
+        return label
+    room = max(0, width - utf16_length(CUT_MARK))
+    return label[: prefix_within(label, room)].rstrip() + CUT_MARK
+
+
+def _menu(notice: MenuNotice) -> LaidOut:
+    """The heading in bold, then the labels numbered — the shape a question block has."""
+    lines = [notice.heading, *(f"{n}. {label}" for n, label in enumerate(notice.options, 1))]
+    return LaidOut(
+        text="\n".join(lines),
+        entities=(_entity(BOLD, before="", covers=notice.heading),),
+    )
+
+
+def _roster(notice: RosterNotice, *, limit: int) -> tuple[LaidOut, int]:
+    """One numbered line per Session — light, name, agent, state word — and the counts under it.
 
     **The counts line never goes; rows go from the back.** The same rule the
     hand-over applies at the Call seam's ceiling (`briefing.handover`): the
@@ -122,12 +218,25 @@ def _roster(notice: RosterNotice, *, limit: int) -> LaidOut:
     be a second Anchor with its own numbering (Advisor ruling on #262).
     """
     rows = [
+        f"{_position(index, notice.options)}"
         f"{STATE_LIGHT[row.state]} {row.name}{SEPARATOR}{row.agent}{SEPARATOR}{row.state_word}"
-        for row in notice.rows
+        for index, row in enumerate(notice.rows, 1)
     ]
     while rows and utf16_length("\n".join([*rows, notice.counts])) > limit:
         rows.pop()
-    return LaidOut(text="\n".join([*rows, notice.counts]))
+    return LaidOut(text="\n".join([*rows, notice.counts])), len(rows)
+
+
+def _position(index: int, options: Sequence[str]) -> str:
+    """`<n>. ` on a roster that offers its rows to be picked, nothing on one that does not.
+
+    A roster with labels is an Anchor whose rows resolve by position, so the
+    number is on the line the user reads — it is what a typed numeral answers
+    and what tells them which of two buttons reading alike is which. A roster
+    with no labels offers nothing to pick, and numbering it would invite a
+    numeral that gets refused.
+    """
+    return f"{index}. " if options else ""
 
 
 def _session(notice: SessionNotice, *, limit: int) -> LaidOut:

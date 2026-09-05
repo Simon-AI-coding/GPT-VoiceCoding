@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from gpt_voicecoding.core import briefing
-from gpt_voicecoding.core.briefing import BriefState, Newest, NewestState, NoticeWord
+from gpt_voicecoding.core.briefing import BriefState, MenuWord, Newest, NewestState, NoticeWord
 from gpt_voicecoding.core.lifecycle import RelayReason
 from gpt_voicecoding.core.sessions import Session, UndeliveredRelay
 from gpt_voicecoding.seams.agent import (
@@ -1023,3 +1023,29 @@ class TestTheWordingTable:
         assert briefing.NOTICE_WORDING[NoticeWord.DENY] == "deny"
         assert briefing.NOTICE_WORDING[NoticeWord.TRUNCATED]
         assert briefing.say_to("gpt-voicecoding · a task") == "Say to gpt-voicecoding · a task:"
+
+
+class TestTheMenuWording:
+    """The words the menu screens print, held once in English (ADR 0021 §6, #264)."""
+
+    def test_the_menu_words_are_english_entries_of_one_table(self) -> None:
+        assert briefing.MENU_WORDING[MenuWord.BRIEF] == "brief"
+        assert briefing.MENU_WORDING[MenuWord.HISTORY] == "history"
+        assert briefing.MENU_WORDING[MenuWord.SEND_MESSAGE] == "send message"
+        assert briefing.MENU_WORDING[MenuWord.SWITCH] == "switch"
+        assert briefing.MENU_WORDING[MenuWord.VERIFY] == "verify"
+        assert briefing.MENU_WORDING[MenuWord.LIVE] == "live"
+        assert set(briefing.MENU_WORDING) == set(MenuWord)
+
+    def test_a_switch_label_carries_its_state(self) -> None:
+        assert briefing.switch_label("duty", True) == "duty: on"
+        assert briefing.switch_label("auto_hangup", False) == "auto_hangup: off"
+
+    def test_the_greeting_is_the_headline_text_prints(self) -> None:
+        """One Session, one line, on every surface: the greeting is `text`'s header."""
+        session = row(CLAUDE, state=SessionState.RUNNING)
+
+        header = briefing.text(briefing.session(session)).splitlines()[0]
+        assert briefing.greeting(session) == header
+
+        assert briefing.greeting(session) == "gpt-voicecoding · a task — claude:abc:1234 — running"

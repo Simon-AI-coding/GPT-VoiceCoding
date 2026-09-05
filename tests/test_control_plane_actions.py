@@ -23,7 +23,7 @@ import pytest
 from fakes import FakeAgent, FakeCall, FakeCompanionChannel, instruction_context
 from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
-from gpt_voicecoding.core.bridge import BridgeCore
+from gpt_voicecoding.core.bridge import ASSISTANT_NOT_BUILT, BridgeCore
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import RelayQueue
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
@@ -181,6 +181,8 @@ class TestWithEverySwitchOff:
             Action.RELAY: surface.ask(Action.RELAY, target=CODEX_ADDRESS, text="carry on"),
             Action.APPROVE: surface.ask(Action.APPROVE, approval_id="a1", verdict="allow"),
             Action.VERIFY: surface.ask(Action.VERIFY),
+            Action.SESSIONS: surface.ask(Action.SESSIONS),
+            Action.CONFIG: surface.ask(Action.CONFIG),
         }
 
         refused = {action: reply.error for action, reply in replies.items() if not reply.ok}
@@ -1060,8 +1062,9 @@ class TestBrief:
         assert reply.error is not None
         assert reply.error.code is ErrorCode.INVALID_PAYLOAD
 
-    def test_the_retired_roster_verb_is_an_unknown_action(self) -> None:
-        reply = asyncio.run(surface_asking_raw("sessions"))
+    def test_the_retired_exact_progress_verb_is_an_unknown_action(self) -> None:
+        """`progress` retired with protocol 7; `sessions` came back in 9 as a screen."""
+        reply = asyncio.run(surface_asking_raw("progress"))
 
         assert reply.error is not None
         assert reply.error.code is ErrorCode.UNKNOWN_ACTION
@@ -1140,3 +1143,44 @@ class TestTheFocusSession:
         assert roster["focus"] == CODEX_ADDRESS
         assert roster["rows"][0]["focus"] is True
         assert sum(roster["counts"].values()) == 1
+
+
+class TestTheMenuScreens:
+    """`sessions` and `config` answer with a screen: text, and labels in order (ADR 0021 §6).
+
+    On this surface the labels travel beside the text and are never drawn; the
+    text is the screen, with the numbered lines a typed numeral is read against.
+    `assistant` is in the set so one parser accepts it, and refused by the hub
+    until #265 builds the conversation.
+    """
+
+    def test_sessions_is_the_roster_text_with_one_label_per_live_session(self) -> None:
+        surface = Surface()
+        surface.register()
+
+        data = surface.ask(Action.SESSIONS).data
+
+        assert data["text"] == surface.ask(Action.BRIEF).data["text"]
+        assert data["options"] == [str(NAME)]
+
+    def test_sessions_with_nothing_live_has_no_labels(self) -> None:
+        data = Surface().ask(Action.SESSIONS).data
+
+        assert data["options"] == []
+        assert data["text"].startswith("sessions: none")
+
+    def test_config_offers_switch_verify_and_live(self) -> None:
+        data = Surface().ask(Action.CONFIG).data
+
+        assert data == {
+            "text": "config\n1. switch\n2. verify\n3. live",
+            "options": ["switch", "verify", "live"],
+        }
+
+    def test_assistant_is_refused_in_the_hubs_words_until_it_is_built(self) -> None:
+        reply = Surface().ask(Action.ASSISTANT)
+
+        assert not reply.ok
+        assert reply.error is not None
+        assert reply.error.code is ErrorCode.REFUSED
+        assert reply.error.message == ASSISTANT_NOT_BUILT

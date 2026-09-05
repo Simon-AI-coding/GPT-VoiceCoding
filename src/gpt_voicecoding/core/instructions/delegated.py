@@ -47,6 +47,9 @@ ACTION_GIST: dict[Action, str] = {
     Action.RELAY: "carry the user's own words into one exact session",
     Action.APPROVE: "carry the user's verdict on one pending permission request",
     Action.VERIFY: "what this engine actually loaded behind each seam",
+    Action.SESSIONS: "the session list as a menu screen — `brief` says the same in words",
+    Action.CONFIG: "the configuration screen — switches, seams and the live call, as choices",
+    Action.ASSISTANT: "open an assistant conversation from the companion channel's menu",
 }
 
 

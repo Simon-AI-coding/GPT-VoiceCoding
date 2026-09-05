@@ -63,7 +63,13 @@ from typing import Any
 #: the same question. A version-7 surface would count an absent field as zero
 #: and show "0 pending approvals" over a dialog that is on screen — a silent
 #: wrong number, which is exactly what this gate exists to prevent.
-PROTOCOL_VERSION = 8
+#:
+#: 9 adds `sessions`, `config` and `assistant`, the three verbs the Companion
+#: Channel's command menu opens screens with (#264, ADR 0021 §6). One parser
+#: serves `bridgectl` and every `/`, so the menu's verbs are the shared set's
+#: or they are nowhere; a version-8 surface would send `sessions` to an engine
+#: that answers it and be unable to tell that from one that refuses it.
+PROTOCOL_VERSION = 9
 
 #: The longest line either side will read. Generous for a roster, small enough
 #: that a peer cannot make the engine hold an unbounded buffer.
@@ -100,6 +106,15 @@ class Action(StrEnum):
     APPROVE = "approve"
     #: What the engine actually loaded behind each seam — ADR 0003.
     VERIFY = "verify"
+    #: The Session list as a screen: Briefing's roster text, and one option
+    #: label per live Session for a surface that draws choices (ADR 0021 §6).
+    #: Not the protocol-6 `sessions`, which was a second rendering of the
+    #: roster; this one answers in Briefing's own words and adds only labels.
+    SESSIONS = "sessions"
+    #: The configuration screen: `switch`, `verify` and `live` as labels.
+    CONFIG = "config"
+    #: Open an Assistant Conversation (ADR 0021 §7, #265).
+    ASSISTANT = "assistant"
 
 
 #: How each action is said on a command line, one form apiece. Vocabulary
@@ -122,6 +137,22 @@ USAGE: dict[Action, str] = {
     Action.RELAY: "relay <agent>:<session id>[:<pid>] [--supplement] <words>",
     Action.APPROVE: "approve <approval id> allow|deny|ask",
     Action.VERIFY: "verify",
+    Action.SESSIONS: "sessions",
+    Action.CONFIG: "config",
+    Action.ASSISTANT: "assistant",
+}
+
+#: What a surface with a command menu advertises, in menu order, each with the
+#: one sentence the menu shows beside it (ADR 0021 §6, #253). Vocabulary, here,
+#: for the reason `USAGE` is: a surface that kept its own list could advertise
+#: a verb the shared parser refuses, and a description is a sentence the user
+#: reads, so it is Core's to choose and never an adapter's. Every entry is an
+#: `Action`, so the menu cannot name what the engine does not accept.
+MENU: dict[Action, str] = {
+    Action.ASSISTANT: "talk to the assistant",
+    Action.SESSIONS: "the sessions, and what each is doing",
+    Action.STATUS: "switches, call and roster, in one answer",
+    Action.CONFIG: "switches, seams and the live call",
 }
 
 

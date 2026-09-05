@@ -53,7 +53,17 @@ def build_request(command: str, arguments: Sequence[str]) -> Request:
 
 def _payload(action: Action, arguments: list[str]) -> dict[str, object]:
     match action:
-        case Action.STATUS | Action.LIVE | Action.VERIFY:
+        case (
+            Action.STATUS
+            | Action.LIVE
+            | Action.VERIFY
+            | Action.SESSIONS
+            | Action.CONFIG
+            | Action.ASSISTANT
+        ):
+            # None of these takes an argument. A screen is opened, never
+            # addressed: the roster's rows are its labels, and picking one is a
+            # numeral on the screen (ADR 0021 §6).
             return {}
         case Action.BRIEF:
             return _brief(arguments)
@@ -242,6 +252,14 @@ def render(reply: Reply) -> str:
             return f"verdict={data['verdict']} " + _relay_line(data)
         case Action.VERIFY:
             return "\n".join(_verify_lines(data["seams"]))
+        case Action.SESSIONS | Action.CONFIG:
+            # A screen, on a surface that draws no buttons: the text alone. The
+            # labels travel beside it for a surface that does, and this one
+            # ignores them the way ADR 0021 §6 says it may — the numbered lines
+            # are already in the text, so nothing is lost.
+            return str(data["text"])
+        case Action.ASSISTANT:
+            return str(data["text"])
     return ""
 
 

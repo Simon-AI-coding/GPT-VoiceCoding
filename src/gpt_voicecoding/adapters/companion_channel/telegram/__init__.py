@@ -6,6 +6,7 @@
     [adapters.settings.companion_channel]
     token_env = "GPT_VOICECODING_TELEGRAM_TOKEN"
     chat_id = "123456789"
+    button_label_width = 32      # optional: how wide one button is, and a row
 
 Generic and public: a bot token, a chat id, and nothing about any particular
 deployment. The credentials themselves are not here and never will be — the

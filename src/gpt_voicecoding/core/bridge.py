@@ -46,10 +46,15 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 
-from gpt_voicecoding.core import briefing
+from gpt_voicecoding.core import briefing, menu
 from gpt_voicecoding.core.adjudication import Outlet, SwitchAdjudicator
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable
-from gpt_voicecoding.core.briefing import PERMISSION_ALREADY_SETTLED_HINT, RosterBrief, SessionBrief
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorPick, AnchorTable, Screen
+from gpt_voicecoding.core.briefing import (
+    PERMISSION_ALREADY_SETTLED_HINT,
+    MenuWord,
+    RosterBrief,
+    SessionBrief,
+)
 from gpt_voicecoding.core.call_keeper import CallKeeper
 from gpt_voicecoding.core.clock import Clock, default_clock, wall_clock
 from gpt_voicecoding.core.errors import (
@@ -64,6 +69,7 @@ from gpt_voicecoding.core.errors import (
 from gpt_voicecoding.core.events import EventQueue
 from gpt_voicecoding.core.instructions import InstructionContext, Instructions, generate
 from gpt_voicecoding.core.lifecycle import Lifecycle
+from gpt_voicecoding.core.menu import MenuScreen
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import PendingRelay
 from gpt_voicecoding.core.relays import (
@@ -127,6 +133,7 @@ from gpt_voicecoding.seams.companion_channel import (
     InboundText,
     Notice,
 )
+from gpt_voicecoding.seams.control_plane import Action
 from gpt_voicecoding.seams.events import Event
 from gpt_voicecoding.seams.identity import (
     AgentKind,
@@ -139,6 +146,36 @@ _log = logging.getLogger(__name__)
 
 #: Answers an inbound command when no control-plane surface is wired to this hub.
 NO_CONTROL_SURFACE = "I recognised that command, but no control surface is wired up here"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAnswer:
+    """What the wired control surface said, and whether it was a refusal.
+
+    The words are what the user is told either way, so most callers use `text`
+    and nothing else. `ok` is the one fact that cannot be recovered from them:
+    a refusal reads as ordinary prose, and a path that registers an Anchor on
+    the answer has to know which of the two it got — **a refusal is never an
+    Anchor** (ADR 0021 §2, #263). The surface holds that fact already
+    (`Reply.ok`) and used to drop it on the way back, which is how the menu's
+    `history` choice came to anchor a Session to a refusal (#264 review).
+    """
+
+    text: str
+    ok: bool
+
+
+#: What `assistant` answers until the Assistant Conversation is built (#265).
+#: The verb is in the shared set now (ADR 0021 §6) so the command menu can name
+#: it and one parser accepts it; the conversation behind it is that issue's.
+ASSISTANT_NOT_BUILT = "the assistant is not on this engine yet"
+
+#: The two menu verbs this hub answers with a screen of its own (ADR 0021 §6,
+#: #264) rather than through the control-plane surface: a screen is an Anchor,
+#: and the row is registered inside the one send site, which the surface's
+#: text answer cannot reach. The same two verbs answer `bridgectl` in text
+#: through `sessions_screen` / `config_screen`, so there is one screen apiece.
+SCREEN_VERBS: frozenset[str] = frozenset({str(Action.SESSIONS), str(Action.CONFIG)})
 
 #: Answers an inbound delegation when no Delegated Turn handler is wired.
 NO_DELEGATE_HANDLER = "I can't take a delegated turn right now — nothing is wired to answer it"
@@ -422,7 +459,7 @@ class BridgeCore:
         grammar: TextGrammar | None = None,
         clock: Clock = default_clock,
         stamp: Clock = wall_clock,
-        control: Callable[[Classification], Awaitable[str]] | None = None,
+        control: Callable[[Classification], Awaitable[ControlAnswer]] | None = None,
         delegate: Callable[[Classification], Awaitable[str]] | None = None,
         inventory: tuple[SeamLoad, ...] = (),
         instruction_context: InstructionContext | None = None,
@@ -622,11 +659,28 @@ class BridgeCore:
         """
         if target is None:
             return briefing.roster(self._state.sessions.all(), self._state.sessions.focus)
+        brief, _ = await self._session_brief_now(target)
+        return brief
+
+    async def _session_brief_now(self, target: SessionTarget) -> tuple[SessionBrief, Session]:
+        """One Session Brief, and the reading it was made from.
+
+        Two callers need the reading itself and not only its words: `brief`
+        returns the brief alone, and the Companion Channel's `brief` choice
+        registers an Anchor whose labels must be *this* reading's wait. Taking
+        the wait off a Session resolved before the read would let the row's
+        labels disagree with the ones the notice printed — the same fault the
+        unbidden Stop Notice path avoids by passing one reading to both
+        (`_notice_anchor`, ADR 0021 §2).
+        """
         row = await self._inspect_now(target)
         read = self._state.sessions.observed_one(row, now=self._stamp())
-        return briefing.session(
-            _as_read_now(read, row.progress),
-            question_answerable=self._question_answerable(read.target),
+        return (
+            briefing.session(
+                _as_read_now(read, row.progress),
+                question_answerable=self._question_answerable(read.target),
+            ),
+            read,
         )
 
     async def _inspect_now(self, target: SessionTarget) -> SessionInspection:
@@ -853,6 +907,29 @@ class BridgeCore:
             if request is not None and request.approval_id == approval_id:
                 return session, request
         return None
+
+    async def sessions_screen(self) -> MenuScreen:
+        """`sessions`: the roster as a menu screen — text, brief and Anchor (ADR 0021 §6).
+
+        The rows are the Roster Brief's, so the screen says what `brief` says
+        and adds only labels; with no live Session it is the roster text and
+        the nothing-running hint, and no Anchor.
+        """
+        brief = await self.brief()
+        assert isinstance(brief, RosterBrief)  # `brief` with no target is the roster
+        return menu.roster_screen(brief)
+
+    def config_screen(self) -> MenuScreen:
+        """`config`: `switch` / `verify` / `live` as choices."""
+        return menu.config_screen()
+
+    def switches_screen(self) -> MenuScreen:
+        """The switch screen: one label per switch carrying its state now."""
+        return menu.switches_screen(self._state.switches)
+
+    async def open_assistant(self) -> str:
+        """`assistant`: refused until the Assistant Conversation is built (#265)."""
+        raise BridgeCoreError(ASSISTANT_NOT_BUILT)
 
     async def verify(self) -> tuple[SeamVerification, ...]:
         """What configuration named, against what this engine actually loaded.
@@ -1190,11 +1267,14 @@ class BridgeCore:
         # Every answer goes back the way the text came: the event's `origin` is
         # echoed onto the reply (ADR 0021 §4), which is what the field promised.
         match found.kind:
+            case InboundClass.CONTROL if found.command in SCREEN_VERBS:
+                # A menu verb answers with a screen, which is an Anchor: sent
+                # from here so its row is registered (ADR 0021 §6, #264).
+                await self._reply_screen(await self._screen_for(found.command), event.origin)
             case InboundClass.CONTROL:
-                await self._reply(
-                    await self._control(found) if self._control else NO_CONTROL_SURFACE,
-                    origin=event.origin,
-                )
+                await self._reply((await self._answer_command(found)).text, origin=event.origin)
+            case InboundClass.MENU_PICK:
+                await self._menu_pick(found, origin=event.origin)
             case InboundClass.DELEGATION:
                 # Not an Anchor: a top-level `>` is a one-shot Delegated Turn with
                 # no Session context (ADR 0021 §3), so its answer names no target
@@ -1218,6 +1298,157 @@ class BridgeCore:
             )
         else:
             _log.info("handled inbound Companion Channel message kind=%s", found.kind)
+
+    async def _screen_for(self, command: str) -> MenuScreen:
+        """The screen one of `SCREEN_VERBS` opens."""
+        if command == str(Action.SESSIONS):
+            return await self.sessions_screen()
+        return self.config_screen()
+
+    async def _answer_command(self, found: Classification) -> ControlAnswer:
+        """One control-plane command, answered by the surface wired to this hub.
+
+        A hub with no surface refuses in its own words: an answer, and not a
+        successful one — nothing ran.
+        """
+        if self._control is None:
+            return ControlAnswer(NO_CONTROL_SURFACE, ok=False)
+        return await self._control(found)
+
+    async def _run(self, action: Action, arguments: str = "", *, origin: str) -> None:
+        """A press that means a control-plane verb: run it at once and answer with its words.
+
+        `verify`, `live` and the switch flip are the same actions typed as
+        `/verify` and the rest would be, so they go through the same surface
+        and come back in the same words — as a toast, when the press is still
+        waiting for one (ADR 0021 §4). Neither answer is an Anchor.
+        """
+        found = Classification(kind=InboundClass.CONTROL, command=str(action), text=arguments)
+        await self._reply((await self._answer_command(found)).text, origin=origin)
+
+    async def _reply_screen(self, screen: MenuScreen, origin: str) -> None:
+        """Send one menu screen as the answer to what opened it, registering its row."""
+        await self._reply(screen.text, origin=origin, notice=screen.notice, anchor=screen.anchor)
+
+    async def _menu_pick(self, found: Classification, *, origin: str = "") -> None:
+        """A numeral on a menu screen: what the row says that position stands for (#264).
+
+        Read off the row's `picks`, never the label's text (ADR 0021 §6). Which
+        screen it was decides what the pick is: a Session on the roster, a
+        menu word on the config screen or a greeting, a switch name on the
+        switch screen. A pick whose Session the roster no longer holds is
+        refused in `resolve`'s own words — the refusal `relay` gives.
+        """
+        assert found.anchor is not None and found.position  # the router sets both
+        row = found.anchor
+        pick: AnchorPick | None = row.picks[found.position - 1] if row.picks else None
+        match row.target:
+            case Screen.ROSTER:
+                assert isinstance(pick, SessionTarget)
+                await self._greet(pick, origin=origin)
+            case Screen.CONFIG:
+                await self._config_pick(pick, origin=origin)
+            case Screen.SWITCHES:
+                await self._flip_pick(str(pick), origin=origin)
+            case SessionTarget() as target:
+                await self._session_pick(target, pick, origin=origin)
+            case _:  # an Assistant Conversation's row (#265) offers nothing to pick
+                await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
+
+    async def _greet(self, target: SessionTarget, *, origin: str) -> None:
+        """A Session picked off the roster: its greeting screen, or why it cannot be reached."""
+        try:
+            session = self._state.sessions.resolve(target)
+        except BridgeCoreError as refusal:
+            await self._reply(str(refusal), origin=origin)
+            return
+        await self._reply_screen(menu.greeting_screen(session), origin)
+
+    async def _session_pick(self, target: SessionTarget, word: AnchorPick, *, origin: str) -> None:
+        """`brief`, `history` or `send message`, about one Session."""
+        try:
+            session = self._state.sessions.resolve(target)
+        except BridgeCoreError as refusal:
+            await self._reply(str(refusal), origin=origin)
+            return
+        match word:
+            case MenuWord.BRIEF:
+                await self._brief_as_anchor(session, origin=origin)
+            case MenuWord.HISTORY:
+                # The newest page, in the surface's own rendering; an Anchor of
+                # that Session with nothing to pick, so words replying to it
+                # are more words for the Session.
+                #
+                # **The page is the Anchor; a refusal is not** (#264 review).
+                # This is the one menu choice answered through the control
+                # surface rather than read here, so it is the one that can be
+                # handed a refusal, and it used to register a row on one.
+                # Words are not the harm — with no row they fall through to the
+                # newest Anchor and reach the Session anyway (ADR 0021 §2).
+                # What the row cost was a slot: each Session keeps its newest N
+                # (`anchor_rows_per_session`), so a failed read could evict a
+                # real Stop Notice from the table. A numeral gets the right
+                # hint of the two for the same reason.
+                found = Classification(
+                    kind=InboundClass.CONTROL, command=str(Action.HISTORY), text=str(target)
+                )
+                answer = await self._answer_command(found)
+                await self._reply(
+                    answer.text,
+                    origin=origin,
+                    anchor=Anchor(kind=AnchorKind.HISTORY, target=target) if answer.ok else None,
+                )
+            case MenuWord.SEND_MESSAGE:
+                await self._reply_screen(menu.prompt_screen(session), origin)
+            case _:  # a word a greeting never offers; the row's picks are this hub's own
+                await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
+
+    async def _brief_as_anchor(self, session: Session, *, origin: str) -> None:
+        """That Session's brief, sent as a notice: the same Anchor a Stop Notice is.
+
+        The row's labels come from the reading the brief was made from, never
+        from the Session resolved before it: the read is an `await`, the wait
+        can move under it, and a row carrying the older wait would offer a
+        numeral a label the notice never printed.
+        """
+        try:
+            brief, read = await self._session_brief_now(session.target)
+        except BridgeCoreError as refusal:
+            await self._reply(str(refusal), origin=origin)
+            return
+        await self._reply(
+            briefing.text(brief),
+            origin=origin,
+            notice=briefing.notice(brief),
+            anchor=_notice_anchor(read.target, read.waiting_for),
+        )
+
+    async def _config_pick(self, word: AnchorPick, *, origin: str) -> None:
+        """`switch` opens the switch screen; `verify` and `live` run at once."""
+        match word:
+            case MenuWord.SWITCH:
+                await self._reply_screen(self.switches_screen(), origin)
+            case MenuWord.VERIFY:
+                await self._run(Action.VERIFY, origin=origin)
+            case MenuWord.LIVE:
+                await self._run(Action.LIVE, origin=origin)
+            case _:
+                await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
+
+    async def _flip_pick(self, name: str, *, origin: str) -> None:
+        """A press on a switch label means flip — against the board as it stands now.
+
+        The label may be stale: flipped elsewhere since the screen was sent,
+        it still says the old state. The row carries the name alone, and the
+        state to flip *from* is read here (ADR 0021 §6). The flip itself is the
+        `switch` action, so it answers in the words `/switch` would.
+        """
+        try:
+            on = self._state.switches.is_set(name)
+        except BridgeCoreError as refusal:
+            await self._reply(str(refusal), origin=origin)
+            return
+        await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
 
     async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
         """Carry a typed relay in, and answer it with the receipt as one sentence.
@@ -1411,7 +1642,14 @@ class BridgeCore:
             receipt.reason,
         )
 
-    async def _reply(self, text: str, *, origin: str = "", anchor: Anchor | None = None) -> None:
+    async def _reply(
+        self,
+        text: str,
+        *,
+        origin: str = "",
+        notice: Notice | None = None,
+        anchor: Anchor | None = None,
+    ) -> None:
         """Answer text the user sent. **Never gated** — a reply is not a push.
 
         ADR 0002 is absolute, and the Companion Channel is one of the surfaces it
@@ -1438,7 +1676,7 @@ class BridgeCore:
         """
         if not text:
             return
-        receipt = await self._send(text, origin=origin, anchor=anchor)
+        receipt = await self._send(text, origin=origin, notice=notice, anchor=anchor)
         if receipt.is_delivered:
             return
         _log.warning(
@@ -1482,8 +1720,10 @@ class BridgeCore:
 
         `origin` is echoed from the inbound event when this is a reply, and
         empty for an unbidden push. `notice` is the structured brief the text
-        renders, for a push that is one (ADR 0021 §5); a reply carries none.
-        Nothing here revises: editing a notice in place (ADR 0021 §8) is #266's.
+        renders, for a push that is one (ADR 0021 §5) and for a reply that is
+        a menu screen or a re-sent brief (§6); a receipt or a refusal carries
+        none. Nothing here revises: editing a notice in place (ADR 0021 §8) is
+        #266's.
         """
         request_id = new_request_id()
         receipt = await self._channel.send(

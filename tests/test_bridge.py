@@ -26,12 +26,14 @@ from fakes import PROGRESS_CAPTURE, FakeCall, UnreachableFarSide, handed_over, s
 from gpt_voicecoding.adapters.agent.claude import adapter as claude_adapter
 from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, SessionReport
 from gpt_voicecoding.core import briefing
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, Screen
 from gpt_voicecoding.core.bridge import (
+    ASSISTANT_NOT_BUILT,
     NO_CONTROL_SURFACE,
     NO_DELEGATE_HANDLER,
     VOICE_QUIET_LINE,
     VOICE_SPEAKING_LINE,
+    ControlAnswer,
 )
 from gpt_voicecoding.core.briefing import (
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
@@ -81,7 +83,12 @@ from gpt_voicecoding.seams.call import (
     UserSpeech,
     VoiceSpeech,
 )
-from gpt_voicecoding.seams.companion_channel import InboundText, SessionNotice
+from gpt_voicecoding.seams.companion_channel import (
+    InboundText,
+    MenuNotice,
+    RosterNotice,
+    SessionNotice,
+)
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from hub import CLAUDE, CODEX, TEN_MINUTES, Hub
@@ -1579,9 +1586,9 @@ class TestEverySendWritesOneRecord:
     def test_a_command_reaches_the_wired_control_surface(self) -> None:
         seen: list[Classification] = []
 
-        async def control(found: Classification) -> str:
+        async def control(found: Classification) -> ControlAnswer:
             seen.append(found)
-            return "duty is on"
+            return ControlAnswer("duty is on", ok=True)
 
         hub = Hub(control=control)
 
@@ -3408,3 +3415,435 @@ class TestTheAnchorTableEndToEnd:
         from gpt_voicecoding.core.persistence import PersistedState
 
         assert set(PersistedState.__dataclass_fields__) == {"switches"}
+
+
+class TestEveryMenuScreenIsAnAnchor:
+    """ADR 0021 §6 (#264): the command menu opens screens, every screen is an
+    Anchor with option labels, and a press is a numeral on that screen resolved
+    by position. Proved through the hub against the seam fakes, with a control
+    surface that journals what it was asked and answers in a fixed line.
+
+    Voice is off so every send is on the one surface and its id is the fake
+    channel's count. `sessions` and `config` are in the hub's grammar because
+    the composition root builds it from the whole action set.
+    """
+
+    TWO = ((CODEX, "port the log"), (CLAUDE, "build the shell"))
+    COMMANDS = frozenset({"status", "sessions", "config", "assistant", "switch", "history"})
+
+    @staticmethod
+    def question(*labels: str) -> WaitingFor:
+        return WaitingFor(
+            kind=WaitingKind.QUESTION,
+            prompt="Which base?",
+            options=tuple(Option(text=label) for label in labels),
+        )
+
+    #: Whether the fake control surface answers or refuses. A refusal's words
+    #: read like any other answer, so this is what tells them apart.
+    control_ok = True
+
+    def hub(self, **overrides: object) -> tuple[Hub, list[Classification]]:
+        asked: list[Classification] = []
+
+        async def control(found: Classification) -> ControlAnswer:
+            asked.append(found)
+            return ControlAnswer(f"ran {found.command} {found.text}".strip(), ok=self.control_ok)
+
+        overrides.setdefault("sessions", self.TWO)
+        overrides.setdefault("window", ReplyWindow.OPEN)
+        hub = Hub(voice=False, control=control, **overrides)  # type: ignore[arg-type]
+
+        hub.core.router._grammar = hub.core.router._grammar.__class__(  # noqa: SLF001
+            control_commands=self.COMMANDS
+        )
+        return hub, asked
+
+    def anchor(self, hub: Hub, message_id: str) -> Anchor:
+        row = hub.core.anchors.lookup(message_id)
+        assert row is not None, f"nothing registered under {message_id}"
+        return row
+
+    # --- /sessions --------------------------------------------------------
+
+    def test_sessions_answers_with_the_roster_screen_and_registers_it(self) -> None:
+        hub, _ = self.hub()
+
+        hub.emit(InboundText(text="/sessions"))
+
+        assert hub.channel.sent[-1] == briefing.text(asyncio.run(hub.core.brief()))
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, RosterNotice)
+        assert notice.options == (
+            "GPT-VoiceCoding · port the log",
+            "GPT-VoiceCoding · build the shell",
+        )
+        row = self.anchor(hub, "1")
+        assert row.kind is AnchorKind.MENU
+        assert row.target is Screen.ROSTER
+        assert row.picks == (CODEX, CLAUDE)
+
+    def test_sessions_with_nothing_live_is_text_and_the_hint_and_no_anchor(self) -> None:
+        hub, _ = self.hub(sessions=())
+
+        hub.emit(InboundText(text="/sessions"))
+
+        assert hub.channel.sent[-1].endswith(briefing.NOTHING_RUNNING_HINT)
+        assert hub.channel.notices[-1] is None
+        assert hub.core.anchors.lookup("1") is None
+
+    def test_sessions_lists_live_sessions_only(self) -> None:
+        hub, _ = self.hub()
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        hub.emit(InboundText(text="/sessions"))
+
+        assert self.anchor(hub, "1").picks == (CODEX,)
+
+    def test_a_press_on_the_roster_greets_that_session(self) -> None:
+        hub, _ = self.hub()
+        hub.emit(InboundText(text="/sessions"))
+
+        hub.emit(InboundText(text="2", in_reply_to="1", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == (
+            "GPT-VoiceCoding · build the shell — claude:def:100 — finished\n"
+            "1. brief\n"
+            "2. history\n"
+            "3. send message"
+        )
+        assert hub.channel.notices[-1] == MenuNotice(
+            heading="GPT-VoiceCoding · build the shell — claude:def:100 — finished",
+            options=("brief", "history", "send message"),
+        )
+
+        assert hub.channel.origins[-1] == "callback:9"
+        row = self.anchor(hub, "2")
+        assert row.kind is AnchorKind.MENU
+        assert row.target == CLAUDE
+
+    def test_a_press_on_the_roster_resolves_by_position_when_names_collide(self) -> None:
+        hub, _ = self.hub(sessions=((CODEX, "same"), (CLAUDE, "same")))
+        hub.emit(InboundText(text="/sessions"))
+        assert self.anchor(hub, "1").options == (
+            "GPT-VoiceCoding · same (codex:abc)",
+            "GPT-VoiceCoding · same (claude:def:100)",
+        )
+
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+
+        assert self.anchor(hub, "2").target == CLAUDE
+
+    def test_a_session_that_ended_between_roster_and_press_is_refused_in_relays_words(
+        self,
+    ) -> None:
+        hub, _ = self.hub()
+        hub.emit(InboundText(text="/sessions"))
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        hub.emit(InboundText(text="2", in_reply_to="1", origin="callback:9"))
+
+        assert "ended" in hub.channel.sent[-1]
+        assert hub.channel.notices[-1] is None
+        assert hub.channel.origins[-1] == "callback:9"
+        assert hub.core.anchors.lookup("2") is None
+
+    # --- the greeting -----------------------------------------------------
+
+    def greeted(self) -> tuple[Hub, list[Classification]]:
+        hub, asked = self.hub()
+        hub.emit(InboundText(text="/sessions"))
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+        asked.clear()
+        return hub, asked
+
+    def asking(self, hub: Hub, *labels: str) -> None:
+        """CLAUDE stops on a question, and its lane holds that row for `brief` to re-read."""
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CLAUDE,
+                    workspace=Path("/tmp/workspace"),
+                    state=SessionState.WAITING,
+                    waiting_for=self.question(*labels),
+                ),
+            )
+        )
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question(*labels)))
+
+    def test_brief_sends_that_sessions_brief_as_a_notice_anchor(self) -> None:
+        hub, _ = self.greeted()
+        self.asking(hub, "main", "feature")
+
+        hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
+
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, SessionNotice)
+        assert notice.options == ("main", "feature")
+        assert hub.channel.sent[-1] == briefing.text(asyncio.run(hub.core.brief(CLAUDE)))
+        row = self.anchor(hub, "4")
+        assert row.kind is AnchorKind.NOTICE
+        assert row.target == CLAUDE
+        assert row.options == ("main", "feature")
+
+    def test_the_brief_press_anchors_the_wait_it_printed_and_not_the_earlier_one(self) -> None:
+        """The row's labels come from the reading the notice was made from (#264 review).
+
+        The brief is an `await` on the Session's own lane, so the wait can move
+        under it. Taking the labels off the Session resolved before that read
+        would register a row offering a numeral a label the notice never
+        printed — and the numeral would answer the wrong question.
+        """
+        hub, _ = self.greeted()
+        self.asking(hub, "main", "feature")
+        # The lane's next reading — what the brief will print — is a different
+        # question from the one the greeting was standing on.
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CLAUDE,
+                    workspace=Path("/tmp/workspace"),
+                    state=SessionState.WAITING,
+                    waiting_for=self.question("rebase"),
+                ),
+            )
+        )
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, SessionNotice)
+        assert notice.options == ("rebase",)
+        assert self.anchor(hub, "4").options == ("rebase",)
+
+    def test_a_numeral_on_the_re_sent_brief_picks_its_option(self) -> None:
+        hub, _ = self.greeted()
+        self.asking(hub, "main", "feature")
+        hub.agent.answerable_questions.add(CLAUDE)
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        hub.emit(InboundText(text="2", in_reply_to="4"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "feature")]
+
+    def test_history_runs_the_history_verb_and_the_page_is_an_anchor(self) -> None:
+        hub, asked = self.greeted()
+
+        hub.emit(InboundText(text="2", in_reply_to="2", origin="callback:9"))
+
+        assert [(found.command, found.text) for found in asked] == [("history", "claude:def:100")]
+        assert hub.channel.sent[-1] == "ran history claude:def:100"
+        assert hub.channel.origins[-1] == "callback:9"
+        row = self.anchor(hub, "3")
+        assert row.kind is AnchorKind.HISTORY
+        assert row.target == CLAUDE
+        assert row.options == ()
+
+    def test_a_refused_history_is_not_an_anchor(self) -> None:
+        """A refusal is never an Anchor (ADR 0021 §2, #264 review).
+
+        `history` is the one menu choice answered through the control surface
+        instead of read here, so it is the one that can be handed a refusal —
+        a Session read that failed, a lane that is down. Anchoring that would
+        make the next words the user typed a Relay into the Session, answering
+        something they never saw.
+        """
+        self.control_ok = False
+        hub, _ = self.greeted()
+
+        hub.emit(InboundText(text="2", in_reply_to="2", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == "ran history claude:def:100"
+        assert hub.core.anchors.lookup("3") is None
+
+    def test_a_numeral_on_a_refused_history_gets_the_unknown_anchor_hint(self) -> None:
+        """With no row there, the numeral is refused as an unknown Anchor (#263).
+
+        Not the picks-nothing hint a registered page would have given: the
+        refusal is not a message with options, and it is not in the table at
+        all. Words are a different matter — with no row they fall through to
+        the newest Anchor, which is why the harm of anchoring a refusal is the
+        row it evicts and the hint it changes, not a misdirected relay.
+        """
+        self.control_ok = False
+        hub, _ = self.greeted()
+        hub.emit(InboundText(text="2", in_reply_to="2"))
+
+        hub.emit(InboundText(text="1", in_reply_to="3"))
+
+        assert hub.channel.sent[-1] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert [(call.target, call.text) for call in hub.agent.calls] == []
+
+    def test_words_replying_to_the_history_page_reach_that_session(self) -> None:
+        hub, _ = self.greeted()
+        hub.emit(InboundText(text="2", in_reply_to="2"))
+
+        hub.emit(InboundText(text="carry on", in_reply_to="3"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "carry on")]
+
+    def test_send_message_opens_the_say_to_prompt_and_words_replying_to_it_are_relayed(
+        self,
+    ) -> None:
+        hub, _ = self.greeted()
+
+        hub.emit(InboundText(text="3", in_reply_to="2", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == "Say to GPT-VoiceCoding · build the shell:"
+        assert hub.channel.notices[-1] == MenuNotice(
+            heading="Say to GPT-VoiceCoding · build the shell:", expects_words=True
+        )
+        row = self.anchor(hub, "3")
+        assert row.kind is AnchorKind.PROMPT
+        assert row.target == CLAUDE
+
+        hub.emit(InboundText(text="ship it", in_reply_to="3"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "ship it")]
+
+    def test_the_prompt_has_no_expiry_of_its_own_and_a_later_notice_supersedes_it(self) -> None:
+        """Words replying to nothing go to the newest Anchor, which a Stop Notice becomes."""
+        hub, _ = self.greeted()
+        hub.emit(InboundText(text="3", in_reply_to="2"))
+        hub.emit(SessionStopped(target=CODEX, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert [call.target for call in hub.agent.calls] == [CODEX]
+
+    def test_words_replying_to_the_greeting_are_words_for_that_session(self) -> None:
+        hub, _ = self.greeted()
+
+        hub.emit(InboundText(text="ship it", in_reply_to="2"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "ship it")]
+
+    # --- /config ----------------------------------------------------------
+
+    def test_config_answers_with_switch_verify_and_live(self) -> None:
+        hub, _ = self.hub()
+
+        hub.emit(InboundText(text="/config"))
+
+        assert hub.channel.sent[-1] == "config\n1. switch\n2. verify\n3. live"
+        assert hub.channel.notices[-1] == MenuNotice(
+            heading="config", options=("switch", "verify", "live")
+        )
+        assert self.anchor(hub, "1").target is Screen.CONFIG
+
+    def test_switch_opens_the_switch_screen_with_each_state(self) -> None:
+        hub, _ = self.hub()
+        hub.emit(InboundText(text="/config"))
+
+        hub.emit(InboundText(text="1", in_reply_to="1", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == (
+            "switches — press one to flip it\n"
+            "1. duty: on\n"
+            "2. voice: off\n"
+            "3. message: on\n"
+            "4. auto_hangup: on"
+        )
+        row = self.anchor(hub, "2")
+        assert row.target is Screen.SWITCHES
+        assert row.picks == ("duty", "voice", "message", "auto_hangup")
+
+    def test_a_press_on_a_switch_label_means_flip(self) -> None:
+        hub, asked = self.hub()
+        hub.emit(InboundText(text="/config"))
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+        asked.clear()
+
+        hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
+
+        assert [(found.command, found.text) for found in asked] == [("switch", "duty off")]
+        assert hub.channel.sent[-1] == "ran switch duty off"
+        assert hub.channel.origins[-1] == "callback:9"
+
+    def test_a_stale_switch_label_still_means_flip_from_the_state_now(self) -> None:
+        """Duty was flipped off elsewhere after the screen went out: the press turns it on."""
+        hub, asked = self.hub()
+        hub.emit(InboundText(text="/config"))
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+        hub.flip("duty", False)
+        asked.clear()
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert [(found.command, found.text) for found in asked] == [("switch", "duty on")]
+
+    def test_verify_and_live_run_at_once_and_answer_in_text(self) -> None:
+        hub, asked = self.hub()
+        hub.emit(InboundText(text="/config"))
+        asked.clear()
+
+        hub.emit(InboundText(text="2", in_reply_to="1", origin="callback:9"))
+        hub.emit(InboundText(text="3", in_reply_to="1"))
+
+        assert [found.command for found in asked] == ["verify", "live"]
+        assert hub.channel.sent[-2:] == ["ran verify", "ran live"]
+        assert hub.channel.notices[-2:] == [None, None]
+        assert hub.core.anchors.lookup("2") is None
+        assert hub.core.anchors.lookup("3") is None
+
+    # --- what is not a screen ---------------------------------------------
+
+    def test_status_is_plain_text_and_not_an_anchor(self) -> None:
+        hub, _ = self.hub()
+
+        hub.emit(InboundText(text="/status"))
+
+        assert hub.channel.sent[-1] == "ran status"
+        assert hub.channel.notices[-1] is None
+        assert hub.core.anchors.lookup("1") is None
+
+    def test_assistant_goes_to_the_control_surface_like_any_typed_verb(self) -> None:
+        hub, asked = self.hub()
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert [found.command for found in asked] == ["assistant"]
+
+    def test_the_hub_refuses_to_open_an_assistant_until_265(self) -> None:
+        hub, _ = self.hub()
+
+        with pytest.raises(Exception, match=ASSISTANT_NOT_BUILT):
+            asyncio.run(hub.core.open_assistant())
+
+    def test_a_press_on_an_expired_screen_gets_the_one_fixed_hint(self) -> None:
+        hub, _ = self.hub(anchor_rows_per_session=1)
+        hub.emit(InboundText(text="/sessions"))
+        hub.emit(InboundText(text="/sessions"))
+
+        hub.emit(InboundText(text="1", in_reply_to="1", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert hub.channel.origins[-1] == "callback:9"
+        assert hub.core.anchors.lookup("3") is None
+
+    def test_a_press_on_a_codex_permission_notice_gets_approves_own_refusal(self) -> None:
+        """The buttons are drawn for a Codex Session too; the press is answered honestly."""
+        hub, _ = self.hub()
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "codex has no hook route for a verdict"
+        hub.emit(
+            SessionStopped(
+                target=CODEX,
+                waiting_for=WaitingFor(
+                    kind=WaitingKind.PERMISSION, tool_name="Bash", approval_id="a1"
+                ),
+            )
+        )
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, SessionNotice)
+        assert notice.options == ("allow", "deny")
+
+        hub.emit(InboundText(text="1", in_reply_to="1", origin="callback:9"))
+
+        assert [call.verb for call in hub.agent.calls] == ["approval_relay"]
+        # The receipt sentence for an attempt that did not arrive — `approve`'s
+        # own honest answer (#262), worded once in Core — shown as the toast.
+        assert hub.channel.sent[-1] == (
+            "The attempt did not arrive; your words wait for the Session's next turn."
+        )
+        assert hub.channel.origins[-1] == "callback:9"

@@ -73,6 +73,15 @@ characters, so a longer reply, a second one, or one to a callback this process
 never saw goes as an ordinary message; a toast Telegram refuses is logged and the
 reply goes as a message too. Core never learns the word "button".
 
+**Buttons are drawn from labels, and the menu from the shared set** (ADR 0021
+§6). Every notice that carries option labels — a question, a permission's
+`allow` / `deny`, the roster, a menu screen — is sent with one inline button
+per label, `callback_data` its position, laid out by `layout.keyboard`; the
+labels are Core's and this adapter cuts them to `button_label_width` on the
+button alone. The bot's command menu is set at first contact from
+`seams/control_plane.py::MENU`, so it advertises exactly what the one parser
+accepts and this file holds no command list of its own.
+
 **The adapter reports facts about a message, never what it means.** Which message
 the user replied to (`reply_to_message.message_id`), and which ids a push landed
 under (`sendMessage`'s `message_id`, one per part), are read off the wire and
@@ -101,6 +110,7 @@ from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     TelegramSettings,
 )
 from gpt_voicecoding.seams.companion_channel import ChannelReceipt, InboundText, Notice
+from gpt_voicecoding.seams.control_plane import MENU
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId
@@ -136,6 +146,21 @@ NOT_MODIFIED = "message is not modified"
 #: What `getUpdates` is passed to make it hand back the last pending update and
 #: nothing else, which is how the backlog's far end is found in one call.
 LAST_UPDATE = -1
+
+#: The command menu as `setMyCommands` takes it: the shared set's menu entries,
+#: in menu order, each with the sentence Core chose for it (ADR 0021 §6). Built
+#: from the seam's table and never from a list of this adapter's own, so the
+#: menu cannot advertise a verb the one parser refuses.
+COMMAND_MENU: list[dict[str, str]] = [
+    {"command": str(action), "description": description} for action, description in MENU.items()
+]
+
+#: How many times one process tries to set the command menu before it gives up.
+#: The retry is paid in front of a poll, so a persistently refused call is a
+#: fixed delay on every inbound message rather than a one-off cost. Three:
+#: enough to ride out a transient refusal, few enough that a permanent one is
+#: paid briefly and then dropped.
+MENU_ATTEMPTS = 3
 
 #: How long `aclose` gives the reader to notice it was stopped. Short on purpose:
 #: it covers the ordinary case, where the reader is between polls, and it is
@@ -191,6 +216,14 @@ class TelegramCompanionChannel:
         #: Whether this process has already thrown the backlog away. Once, at
         #: first contact — never again on a mid-run reconnect.
         self._joined = False
+        #: Whether the command menu has been set on the bot. Once per process,
+        #: at first contact, and retried at the next contact when it was refused:
+        #: a menu that persists on the bot is still worth setting again, because
+        #: the entries are what this engine accepts and an older engine's may not be.
+        self._advertised = False
+        #: How many times setting it has been tried. Bounds the retry, which is
+        #: paid in front of a poll (`_advertise_menu`).
+        self._menu_attempts = 0
         self._reader: threading.Thread | None = None
         #: How the reader is told to stop, and the only thing `aclose` waits on.
         self._stop = threading.Event()
@@ -281,7 +314,7 @@ class TelegramCompanionChannel:
         whether a later outlet transition should reconcile the current Session
         state; this adapter never replays the notice object.
         """
-        parts = _parts(text, notice)
+        parts = _parts(text, notice, label_width=self._settings.button_label_width)
         if revises:
             return await self._revise(parts, request_id=request_id, revises=revises)
         if not parts:
@@ -481,6 +514,8 @@ class TelegramCompanionChannel:
                 if not self._joined:
                     self._skip_backlog()
                     self._joined = True
+                if not self._advertised and self._menu_attempts < MENU_ATTEMPTS:
+                    self._advertise_menu()
                 updates = self._transport(
                     "getUpdates", self._poll(), timeout_seconds=self._patience()
                 )
@@ -526,6 +561,40 @@ class TelegramCompanionChannel:
             _log.info(
                 "discarded %d message(s) that arrived before this engine started", len(pending)
             )
+
+    def _advertise_menu(self) -> None:
+        """Set the command menu on the bot: the four entries the shared set advertises.
+
+        On the reader thread, at first contact, like the backlog skip: the menu
+        is part of being reachable, and a refusal is logged and tried again at
+        the next contact rather than ending the reader. `getUpdates` is not
+        held up by it — the call is bounded by the request timeout.
+
+        **Bounded, because the retry is paid before every poll** (#264 review).
+        A refusal leaves the menu unset, and the next pass through the reader's
+        loop is the next contact — so a call that is refused *persistently*
+        would add one request's wait in front of every `getUpdates` for the life
+        of the process, and delay every inbound message by it. After
+        `MENU_ATTEMPTS` the adapter says so once and stops trying; the menu is a
+        convenience, and every verb it advertises stays typeable without it.
+        """
+        self._menu_attempts += 1
+        try:
+            self._transport(
+                "setMyCommands",
+                {"commands": COMMAND_MENU},
+                timeout_seconds=self._settings.request_timeout_seconds,
+            )
+        except TelegramError as refused:
+            _log.warning("the command menu could not be set: %s", refused.detail)
+            if self._menu_attempts >= MENU_ATTEMPTS:
+                _log.warning(
+                    "the command menu was refused %d times and will not be tried again; "
+                    "every verb it advertises is still typeable",
+                    self._menu_attempts,
+                )
+            return
+        self._advertised = True
 
     def _poll(self) -> dict[str, object]:
         """One long poll's request, carrying the cursor when there is one."""
@@ -672,14 +741,15 @@ class TelegramCompanionChannel:
         return await answer
 
 
-def _parts(text: str, notice: Notice | None) -> tuple[dict[str, object], ...]:
+def _parts(text: str, notice: Notice | None, *, label_width: int) -> tuple[dict[str, object], ...]:
     """What goes on the wire, as `sendMessage` bodies without the chat: one per part.
 
-    A notice is laid out and is one part; anything else is the text, cut to the
-    cap into as many parts as it needs (`split_message`).
+    A notice is laid out and is one part — its keyboard, when it carries
+    labels, is part of that body; anything else is the text, cut to the cap
+    into as many parts as it needs (`split_message`).
     """
     if notice is not None:
-        return (lay_out(notice).payload(),)
+        return (lay_out(notice, label_width=label_width).payload(),)
     return tuple({"text": part} for part in split_message(text))
 
 

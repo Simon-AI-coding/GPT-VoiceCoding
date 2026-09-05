@@ -64,7 +64,17 @@ AGENT_ACTIONS: tuple[Action, ...] = (
 
 #: The actions it is not given, written down rather than merely absent — the
 #: two look identical otherwise, and only one of them is a decision.
-WITHHELD_ACTIONS: tuple[Action, ...] = (Action.STATUS, Action.SWITCH, Action.VERIFY)
+#: The three menu verbs (#264) are withheld with them: a screen is a surface's
+#: way of offering the user choices to press, and the acting half of a call has
+#: `brief` for the roster and no screen to press anything on.
+WITHHELD_ACTIONS: tuple[Action, ...] = (
+    Action.STATUS,
+    Action.SWITCH,
+    Action.VERIFY,
+    Action.SESSIONS,
+    Action.CONFIG,
+    Action.ASSISTANT,
+)
 
 #: What each given action answers, in one line. Total over `AGENT_ACTIONS`.
 #:

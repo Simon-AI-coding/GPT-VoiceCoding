@@ -26,13 +26,20 @@ from fakes import PROGRESS_CAPTURE, FakeCall, UnreachableFarSide, handed_over, s
 from gpt_voicecoding.adapters.agent.claude import adapter as claude_adapter
 from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, SessionReport
 from gpt_voicecoding.core import briefing
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind
 from gpt_voicecoding.core.bridge import (
     NO_CONTROL_SURFACE,
     NO_DELEGATE_HANDLER,
     VOICE_QUIET_LINE,
     VOICE_SPEAKING_LINE,
 )
-from gpt_voicecoding.core.briefing import BriefState
+from gpt_voicecoding.core.briefing import (
+    NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
+    NUMERAL_PICKS_NOTHING_HINT,
+    PERMISSION_ALREADY_SETTLED_HINT,
+    QUESTION_ALREADY_ANSWERED_HINT,
+    BriefState,
+)
 from gpt_voicecoding.core.call_keeper import USER_OPENED
 from gpt_voicecoding.core.errors import CallInstructionsMissing, ChildSessionError
 from gpt_voicecoding.core.lifecycle import Lifecycle
@@ -3091,3 +3098,313 @@ class TestARelayThatFinallyFailedReachesTheUser:
         assert hub.call.spoken == []
         assert hub.call.cues.count(Cue.EVENT) == 1
         assert hub.state.sessions.resolve(self.OTHER).undelivered is not None
+
+
+class TestTheAnchorTableEndToEnd:
+    """ADR 0021 §2, §3 (#263): a reply is targeted by the message it answers, and a
+    numeral picks that message's option. Proved through the hub against the seam
+    fakes: the notice goes out under an id, the reply comes back naming it.
+
+    Voice is off throughout so every send is on the one surface and its id is
+    the fake channel's count: the Stop Notice is `1`, the reply to it `2`.
+    """
+
+    TWO = ((CODEX, "port the log"), (CLAUDE, "build the shell"))
+
+    @staticmethod
+    def question(*labels: str) -> WaitingFor:
+        return WaitingFor(
+            kind=WaitingKind.QUESTION,
+            prompt="Which base?",
+            options=tuple(Option(text=label) for label in labels),
+        )
+
+    @staticmethod
+    def permission(approval_id: str | None = "a1") -> WaitingFor:
+        return WaitingFor(
+            kind=WaitingKind.PERMISSION,
+            tool_name="Bash",
+            detail="push the branch",
+            approval_id=approval_id,
+        )
+
+    def test_words_replying_to_a_stop_notice_reach_that_session(self) -> None:
+        """Two live Sessions; no name typed; the reply says which one."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "ship it")]
+
+    def test_a_reply_to_any_part_of_a_split_notice_reaches_the_same_session(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.channel.message_ids = ("40", "41")
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+        hub.channel.message_ids = None
+
+        hub.emit(InboundText(text="ship it", in_reply_to="41"))
+
+        assert [call.target for call in hub.agent.calls] == [CLAUDE]
+
+    def test_words_replying_to_nothing_go_to_the_newest_notice(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CODEX, waiting_for=WaitingFor()))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert [call.target for call in hub.agent.calls] == [CLAUDE]
+
+    def test_with_no_notice_out_two_live_sessions_still_ask_which(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.agent.calls == []
+        (reply,) = hub.channel.sent
+        assert "port the log" in reply and "build the shell" in reply
+
+    def test_a_numeral_on_an_answerable_question_relays_that_label(self) -> None:
+        """The Answer Relay, on the held-hook route the lane already owns (ADR 0015)."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "feature")))
+        hub.agent.answerable_questions.add(CLAUDE)
+
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [(CLAUDE, "feature")]
+        assert hub.channel.sent[-1] == "Your words arrived."
+
+    def test_a_numeral_after_the_question_was_answered_on_screen_relays_nothing(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "feature")))
+
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == QUESTION_ALREADY_ANSWERED_HINT
+
+    def test_a_numeral_on_an_unknown_anchor_is_refused_and_nothing_is_relayed(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "feature")))
+        hub.agent.answerable_questions.add(CLAUDE)
+
+        hub.emit(InboundText(text="2", in_reply_to="pre-restart", origin="callback:9"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        # A press's refusal goes back as its toast (ADR 0021 §4).
+        assert hub.channel.origins[-1] == "callback:9"
+
+    def test_words_replying_to_the_users_own_message_take_the_newest_notice(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="ship it", in_reply_to="the-users-own"))
+
+        assert [call.target for call in hub.agent.calls] == [CLAUDE]
+
+    def test_a_numeral_on_a_receipt_is_refused(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))  # its receipt is send 2
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert len(hub.agent.calls) == 1
+        assert hub.channel.sent[-1] == NUMERAL_PICKS_NOTHING_HINT
+
+    def test_words_replying_to_a_receipt_reach_the_same_session(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        hub.emit(InboundText(text="and run the tests", in_reply_to="2"))
+
+        assert [call.target for call in hub.agent.calls] == [CLAUDE, CLAUDE]
+
+    def test_one_on_a_permission_notice_is_allow_on_that_dialog(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        (call,) = hub.agent.calls
+        assert (call.verb, call.target, call.verdict) == (
+            "approval_relay",
+            CLAUDE,
+            ApprovalVerdict.ALLOW,
+        )
+        assert hub.channel.sent[-1] == "Your words arrived."
+
+    def test_two_on_a_permission_notice_is_deny(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+
+        assert [call.verdict for call in hub.agent.calls] == [ApprovalVerdict.DENY]
+
+    def test_three_on_a_two_option_permission_is_refused(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+
+        hub.emit(InboundText(text="3", in_reply_to="1"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == NUMERAL_PICKS_NOTHING_HINT
+
+    def test_a_verdict_on_a_dialog_the_keyboard_already_settled_is_refused(self) -> None:
+        """The roster no longer carries the handle: nothing is sent, and the reply
+        says the question was answered on screen (ADR 0021 §3)."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == PERMISSION_ALREADY_SETTLED_HINT
+
+    def test_a_numeral_on_an_older_question_notice_never_answers_the_newer_one(self) -> None:
+        """Q1 answered at the terminal, Q2 now held and answerable: "2" on Q1's
+        notice relays nothing, and "2" on Q2's relays Q2's label."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("keep", "replace")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("yes", "no")))
+        hub.agent.answerable_questions.add(CLAUDE)
+
+        hub.emit(InboundText(text="2", in_reply_to="1"))
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == QUESTION_ALREADY_ANSWERED_HINT
+
+        hub.emit(InboundText(text="2", in_reply_to="2"))
+        assert [call.text for call in hub.agent.calls] == ["no"]
+
+    def test_a_row_the_roster_no_longer_holds_is_trimmed_on_the_next_pass(self) -> None:
+        """A Codex row re-keyed on its first turn (#73) is not an ending; the pass
+        trims the table to the live roster and today's rule stands for bare words."""
+        hub = Hub(voice=False)
+        stale = SessionTarget(agent=AgentKind.CODEX, session_id="before-rekey")
+        hub.core.anchors.register(("9",), Anchor(kind=AnchorKind.NOTICE, target=stale))
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+
+        asyncio.run(hub.core.discover())
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.core.anchors.lookup("9") is None
+        assert [call.target for call in hub.agent.calls] == [CODEX]
+
+    def test_a_permission_with_no_handle_offers_nothing_to_pick(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission(None)))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == NUMERAL_PICKS_NOTHING_HINT
+
+    def test_the_rows_of_a_session_go_when_it_ends(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.agent.answerable_questions.add(CLAUDE)
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.agent.calls == []
+        assert hub.channel.sent[-1] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert len(hub.core.anchors) == 0
+
+    def test_words_to_an_ended_sessions_notice_fall_back_to_todays_rule(self) -> None:
+        """Its rows are gone, so the reply replied to nothing; one live Session is left."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        # The one live Session is mid-turn, so the words wait for its window.
+        assert [waiting.target for waiting in hub.state.relays.pending()] == [CODEX]
+
+    def test_the_rows_of_a_session_discovery_finds_gone_go_too(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+        hub.emit(SessionStopped(target=CODEX, waiting_for=WaitingFor()))
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CLAUDE, workspace=Path("/tmp/workspace"), state=SessionState.RUNNING
+                ),
+            )
+        )
+
+        asyncio.run(hub.core.discover())
+
+        assert len(hub.core.anchors) == 1
+        assert hub.core.anchors.lookup("1") is not None
+        assert hub.core.anchors.lookup("2") is None
+
+    def test_the_n_plus_first_notice_evicts_a_sessions_oldest(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO, anchor_rows_per_session=1)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.agent.answerable_questions.add(CLAUDE)
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert [call.text for call in hub.agent.calls] == ["main"]
+        assert hub.channel.sent[-2] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+
+    def test_a_notice_the_message_switch_kept_in_is_no_anchor(self) -> None:
+        """Nothing went out, so there is nothing to reply to and no newest Anchor."""
+        hub = Hub(voice=False, message=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.agent.calls == []
+        assert len(hub.core.anchors) == 0
+
+    def test_a_notice_that_failed_to_send_is_no_anchor(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO, channel_outcome=Delivery.FAILED)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        assert len(hub.core.anchors) == 0
+
+    def test_a_skill_line_inside_a_reply_reaches_the_session_inside_the_wrapper(self) -> None:
+        """No pre-check of the name (#256): Core neither refuses nor rewrites it."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(InboundText(text="/no-such-skill util.py", in_reply_to="1"))
+
+        assert [(call.target, call.text) for call in hub.agent.calls] == [
+            (CLAUDE, "run the skill /no-such-skill with arguments: util.py")
+        ]
+
+    def test_an_inbound_approval_relay_records_its_target(self, caplog) -> None:
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+        caplog.clear()
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert f"handled inbound Companion Channel message kind=approval_relay target={CLAUDE}" in [
+            record.getMessage() for record in caplog.records
+        ]
+
+    def test_the_table_is_memory_only(self) -> None:
+        """`state.json` is untouched (ADR 0021 §2): the durable subset has no anchors."""
+        from gpt_voicecoding.core.persistence import PersistedState
+
+        assert set(PersistedState.__dataclass_fields__) == {"switches"}

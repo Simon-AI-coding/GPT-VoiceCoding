@@ -52,6 +52,7 @@ class Hub:
         silence_end_seconds: float = 60.0,
         cool_down_seconds: float = 30.0,
         speech_settle_seconds: float = 5.0,
+        anchor_rows_per_session: int = 100,
     ) -> None:
         self.now = 1_000.0
         switches = Switchboard()
@@ -88,6 +89,7 @@ class Hub:
                 silence_end_seconds=silence_end_seconds,
                 cool_down_seconds=cool_down_seconds,
                 speech_settle_seconds=speech_settle_seconds,
+                anchor_rows_per_session=anchor_rows_per_session,
             ),
             grammar=TextGrammar(control_commands=COMMANDS),
             clock=lambda: self.now,

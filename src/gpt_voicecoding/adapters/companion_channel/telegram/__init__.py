@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from gpt_voicecoding.adapters.companion_channel.telegram.adapter import (
+    ALLOWED_UPDATES,
     TelegramCompanionChannel,
     split_message,
     utf16_length,
@@ -41,6 +42,7 @@ from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
 )
 
 __all__ = [
+    "ALLOWED_UPDATES",
     "MESSAGE_LIMIT_UTF16_UNITS",
     "FailureLayer",
     "SettingsError",

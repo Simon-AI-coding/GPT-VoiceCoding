@@ -79,6 +79,17 @@ from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from hub import CLAUDE, CODEX, TEN_MINUTES, Hub
 
+#: The one record every Companion Channel send writes (#261, ADR 0021 §10). A
+#: contract line the acceptance harness reads, so it is spelled once here and
+#: asserted whole.
+SEND_RECORD = "sent Companion Channel message request={request} outcome={outcome} message_ids={ids}"
+
+
+def _only_request(hub: Hub) -> str:
+    """The request id of the one send the fake channel saw."""
+    (request,) = hub.channel.requests
+    return request
+
 
 def _field_lines(caplog) -> list[str]:  # noqa: ANN001
     """Every Bridge Core line about a change to a row's `undelivered` field (#226).
@@ -1425,14 +1436,16 @@ class TestTheRelayPipelineEndToEnd:
 
 class TestTheInboundRouterEndToEnd:
     def test_an_inbound_command_records_its_classification(self, caplog) -> None:
-        """Ticket #48's coordinator ruling pins this exact log format."""
+        """Ticket #48's coordinator ruling pins this exact log format. The reply
+        it earns is a send, and every send writes its own record first (#261)."""
         caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
         hub = Hub()
 
         hub.emit(InboundText(text="/status"))
 
         assert [record.getMessage() for record in caplog.records] == [
-            "handled inbound Companion Channel message kind=control"
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            "handled inbound Companion Channel message kind=control",
         ]
 
     def test_an_inbound_answer_relay_records_its_target(self, caplog) -> None:
@@ -1443,7 +1456,73 @@ class TestTheInboundRouterEndToEnd:
         hub.emit(InboundText(text="ship it"))
 
         assert [record.getMessage() for record in caplog.records] == [
-            f"handled inbound Companion Channel message kind=answer_relay target={CODEX}"
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            f"handled inbound Companion Channel message kind=answer_relay target={CODEX}",
+        ]
+
+    def test_a_reply_goes_back_the_way_the_text_came(self) -> None:
+        """Core echoes the inbound `origin` on its reply (ADR 0021 §4) — what the
+        field's docstring always promised, now honoured. A reply revises nothing."""
+        hub = Hub()
+
+        hub.emit(InboundText(text="/status", origin="callback:77"))
+
+        assert hub.channel.origins == ["callback:77"]
+        assert hub.channel.revisions == [()]
+
+    def test_a_relayed_answers_receipt_goes_back_the_same_way(self) -> None:
+        hub = Hub()
+
+        hub.emit(InboundText(text="ship it", origin="chat-1"))
+
+        assert hub.channel.origins == ["chat-1"]
+
+
+class TestEverySendWritesOneRecord:
+    """ADR 0021 §10: a Stop Notice is unbidden, so the ids it landed under reach the
+    world through one named engine-log record per send. The acceptance harness
+    reads this line; the format is a contract like the #48 inbound line."""
+
+    def test_a_stop_notice_records_the_ids_it_landed_under(self, caplog) -> None:
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub()
+        hub.channel.message_ids = ("40", "41")
+
+        hub.emit(
+            SessionStopped(
+                target=CODEX,
+                progress=ProgressObservation.readable(
+                    has_history=False, recent=(), read_at=datetime(2026, 9, 6, tzinfo=UTC)
+                ),
+            )
+        )
+
+        records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert records == [
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="40,41")
+        ]
+        assert hub.channel.origins == [""]
+
+    def test_a_send_that_landed_nowhere_says_so_with_no_ids(self, caplog) -> None:
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub(channel_outcome=Delivery.FAILED, channel_reason="nothing configured")
+        hub.channel.message_ids = ()
+
+        hub.emit(InboundText(text="/status"))
+
+        records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert records == [SEND_RECORD.format(request=_only_request(hub), outcome="failed", ids="")]
+
+    def test_a_split_send_that_half_landed_still_names_what_did(self, caplog) -> None:
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub(channel_outcome=Delivery.UNKNOWN, channel_reason="1 of 2 parts reached the chat")
+        hub.channel.message_ids = ("9",)
+
+        hub.emit(InboundText(text="/status"))
+
+        records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert records == [
+            SEND_RECORD.format(request=_only_request(hub), outcome="unknown", ids="9")
         ]
 
     def test_a_command_reaches_the_wired_control_surface(self) -> None:
@@ -2600,13 +2679,15 @@ class TestWhatBecomesOfACompanionReplyThatDidNotLand:
             assert reply not in said
 
     def test_a_delivered_reply_says_nothing_at_all(self, caplog) -> None:
+        """No warning — the send record every send writes (#261) is not one."""
         caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
         hub = Hub()
 
         hub.emit(InboundText(text="/status"))
 
         assert [one.getMessage() for one in caplog.records] == [
-            "handled inbound Companion Channel message kind=control"
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            "handled inbound Companion Channel message kind=control",
         ]
 
 

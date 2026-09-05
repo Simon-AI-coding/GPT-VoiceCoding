@@ -27,7 +27,8 @@ Two answers, and neither of them lies:
 
 from __future__ import annotations
 
-from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt
+from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
@@ -52,11 +53,16 @@ class NullCompanionChannel:
         # special case for the seam that is empty.
         self._sink = sink
 
-    async def send(self, text: str, *, request_id: RequestId) -> DeliveryReceipt:
-        """Report the truth: there was nowhere to send it."""
-        return DeliveryReceipt(
-            request_id=request_id, outcome=Delivery.FAILED, reason=NOT_CONFIGURED
-        )
+    async def send(
+        self,
+        text: str,
+        *,
+        request_id: RequestId,
+        origin: str = "",
+        revises: tuple[str, ...] = (),
+    ) -> ChannelReceipt:
+        """Report the truth: there was nowhere to send it, so it landed under no id."""
+        return ChannelReceipt(request_id=request_id, outcome=Delivery.FAILED, reason=NOT_CONFIGURED)
 
     async def verify(self) -> VerifyResult:
         """Report the null implementation as itself — the empty module string."""

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from gpt_voicecoding.core.briefing import NON_TEXT_HINT
 from gpt_voicecoding.core.router import InboundClass, InboundRouter, TextGrammar
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
@@ -174,6 +175,14 @@ class TestBareText:
         found = router((CODEX, "port the log")).classify("   ")
 
         assert found.kind is InboundClass.UNKNOWN
+
+    def test_empty_text_is_answered_with_the_one_non_text_hint(self) -> None:
+        """A voice note or a photo arrives as empty text (ADR 0021 §4). The hint is
+        Core's wording, held once in the wording tables and read from there."""
+        found = router((CODEX, "port the log")).classify("")
+
+        assert found.reply == NON_TEXT_HINT
+        assert "text" in NON_TEXT_HINT
 
 
 class TestTheCommandWordCollision:

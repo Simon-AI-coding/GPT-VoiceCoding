@@ -32,6 +32,7 @@ from gpt_voicecoding.adapters.companion_channel import (
     null_channel,
 )
 from gpt_voicecoding.adapters.companion_channel.telegram import (
+    ALLOWED_UPDATES,
     FailureLayer,
     SettingsError,
     TelegramCompanionChannel,
@@ -44,7 +45,11 @@ from gpt_voicecoding.adapters.companion_channel.telegram import (
 )
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
 from gpt_voicecoding.engine.composition import import_factory
-from gpt_voicecoding.seams.companion_channel import CompanionChannel, InboundText
+from gpt_voicecoding.seams.companion_channel import (
+    ChannelReceipt,
+    CompanionChannel,
+    InboundText,
+)
 from gpt_voicecoding.seams.connection import Connectable
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import new_request_id
@@ -99,6 +104,9 @@ class FakeTelegram:
 
     def __post_init__(self) -> None:
         self.updates: queue.Queue[list[dict[str, Any]]] = queue.Queue()
+        #: The id the next `sendMessage` lands under. Counted up from 1, the
+        #: way a chat's own ids grow, so a test can predict what a receipt says.
+        self.next_message_id = 1
 
     def refuse(self, method: str, error: TelegramError, *, times: int = 1) -> None:
         self.answers.setdefault(method, []).extend([error] * times)
@@ -111,6 +119,22 @@ class FakeTelegram:
 
     def method_calls(self, method: str) -> list[dict[str, Any]]:
         return [payload for name, payload in self.calls if name == method]
+
+    def edits(self) -> list[tuple[str, str]]:
+        """Every `editMessageText`, as (message id, new text) — the journal §10 asks for."""
+        return [
+            (str(payload["message_id"]), payload["text"])
+            for method, payload in self.calls
+            if method == "editMessageText"
+        ]
+
+    def toasts(self) -> list[tuple[str, str]]:
+        """Every `answerCallbackQuery`, as (callback id, text)."""
+        return [
+            (str(payload["callback_query_id"]), payload.get("text", ""))
+            for method, payload in self.calls
+            if method == "answerCallbackQuery"
+        ]
 
     def __call__(self, method: str, payload: dict[str, Any], *, timeout_seconds: float) -> Any:
         self.calls.append((method, payload))
@@ -128,7 +152,16 @@ class FakeTelegram:
         if method == "getChat":
             return {"id": int(self.chat_id), "type": "private"}
         if method == "sendMessage":
-            return {"message_id": len(self.calls)}
+            landed, self.next_message_id = self.next_message_id, self.next_message_id + 1
+            return {
+                "message_id": landed,
+                "chat": {"id": int(self.chat_id)},
+                "text": payload["text"],
+            }
+        if method == "editMessageText":
+            return {"message_id": payload["message_id"], "text": payload["text"]}
+        if method == "answerCallbackQuery":
+            return True
         raise AssertionError(f"the adapter called a method this fake does not know: {method}")
 
     def _updates(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -142,11 +175,50 @@ class FakeTelegram:
             return []
 
 
-def message(text: str, *, chat: str = CHAT, update_id: int = 1) -> dict[str, Any]:
-    """One `getUpdates` entry, shaped the way the Bot API shapes it."""
+def message(
+    text: str | None, *, chat: str = CHAT, update_id: int = 1, reply_to: int | None = None
+) -> dict[str, Any]:
+    """One `getUpdates` entry, shaped the way the Bot API shapes it.
+
+    `text=None` is a message with no text — a voice note, a photo — which the
+    API sends with a different key and no `text` at all. `reply_to` is the id
+    of the message the user replied to, carried as `reply_to_message`.
+    """
+    body: dict[str, Any] = {"message_id": update_id, "chat": {"id": int(chat)}}
+    if text is None:
+        body["voice"] = {"duration": 3, "file_id": "AwAC"}
+    else:
+        body["text"] = text
+    if reply_to is not None:
+        body["reply_to_message"] = {
+            "message_id": reply_to,
+            "chat": {"id": int(chat)},
+            "text": "the notice this answers, echoed by Telegram and ignored here",
+        }
+    return {"update_id": update_id, "message": body}
+
+
+CALLBACK_ID = "4000000123456789"
+
+
+def press(
+    data: str,
+    *,
+    chat: str = CHAT,
+    update_id: int = 1,
+    pressed: int = 5,
+    callback: str = CALLBACK_ID,
+) -> dict[str, Any]:
+    """One `callback_query` update: a button under message `pressed` was tapped."""
     return {
         "update_id": update_id,
-        "message": {"message_id": update_id, "chat": {"id": int(chat)}, "text": text},
+        "callback_query": {
+            "id": callback,
+            "from": {"id": int(chat), "is_bot": False, "first_name": "Simon"},
+            "message": {"message_id": pressed, "chat": {"id": int(chat)}, "text": "the notice"},
+            "chat_instance": "-1",
+            "data": data,
+        },
     }
 
 
@@ -191,6 +263,18 @@ class TestTheNullChannel:
         assert receipt.is_delivered is False
         assert "configured" in receipt.reason
 
+    def test_a_push_is_a_channel_receipt_that_landed_under_no_id(self) -> None:
+        """ADR 0021 §4: the return type grows; the null channel's answer does not."""
+        channel = NullCompanionChannel()
+
+        receipt = asyncio.run(
+            channel.send("you are needed", request_id=new_request_id(), origin=CHAT, revises=("7",))
+        )
+
+        assert isinstance(receipt, ChannelReceipt)
+        assert receipt.message_ids == ()
+        assert receipt.outcome is Delivery.FAILED
+
     def test_verify_reports_the_empty_module_string(self) -> None:
         """ADR 0003 reserves empty for exactly this, and MANUAL for nothing else."""
         result = asyncio.run(NullCompanionChannel().verify())
@@ -213,6 +297,37 @@ class TestTheNullChannel:
         built = import_factory(NULL_COMPANION_CHANNEL)(sink=None)
 
         assert isinstance(built, NullCompanionChannel)
+
+
+class TestTheSeamsFields:
+    """Facts an adapter can see, never an opinion about meaning (ADR 0021 §4)."""
+
+    def test_inbound_text_replied_to_nothing_by_default(self) -> None:
+        assert InboundText(text="words", origin=CHAT).in_reply_to == ""
+
+    def test_a_channel_receipt_is_a_delivery_receipt_with_ids(self) -> None:
+        """Existing `send` sites keep reading `is_delivered`; new ones read the ids."""
+        receipt = ChannelReceipt(
+            request_id=new_request_id(), outcome=Delivery.DELIVERED, message_ids=("1", "2")
+        )
+
+        assert receipt.is_delivered is True
+        assert receipt.message_ids == ("1", "2")
+        assert (
+            ChannelReceipt(request_id=new_request_id(), outcome=Delivery.DELIVERED).message_ids
+            == ()
+        )
+
+    def test_an_unknown_receipt_still_carries_what_landed(self) -> None:
+        receipt = ChannelReceipt(
+            request_id=new_request_id(),
+            outcome=Delivery.UNKNOWN,
+            reason="1 of 2 parts reached the chat",
+            message_ids=("1",),
+        )
+
+        assert receipt.is_delivered is False
+        assert receipt.message_ids == ("1",)
 
 
 class TestWhatTheAdapterMayBeTold:
@@ -394,6 +509,277 @@ class TestPushingOneMessage:
 
         assert receipt.outcome is Delivery.FAILED
         assert receipt.reason
+        assert receipt.message_ids == ()
+
+
+class TestWhatAPushLandedUnder:
+    """ADR 0021 §4: the receipt names every part's provider id, in order."""
+
+    def test_one_part_is_one_id(self) -> None:
+        api = FakeTelegram()
+        api.next_message_id = 17
+
+        receipt = asyncio.run(channel(api).send("a notice", request_id=new_request_id()))
+
+        assert isinstance(receipt, ChannelReceipt)
+        assert receipt.message_ids == ("17",)
+
+    def test_a_split_send_lists_every_part_in_order(self) -> None:
+        api = FakeTelegram()
+
+        receipt = asyncio.run(channel(api).send("hello world " * 900, request_id=new_request_id()))
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == tuple(str(n) for n in range(1, len(api.sent()) + 1))
+        assert len(receipt.message_ids) > 1
+
+    def test_a_split_send_that_failed_after_a_part_landed_still_lists_that_part(self) -> None:
+        """UNKNOWN, and the landed part is named: it exists and can be replied to."""
+        api = FakeTelegram()
+        api.answers["sendMessage"] = [
+            {"message_id": 30},
+            TelegramError(FailureLayer.NETWORK, "connection reset"),
+        ]
+
+        receipt = asyncio.run(channel(api).send("hello world " * 1800, request_id=new_request_id()))
+
+        assert receipt.outcome is Delivery.UNKNOWN
+        assert receipt.message_ids == ("30",)
+
+    def test_a_send_that_landed_nowhere_lists_nothing(self) -> None:
+        api = FakeTelegram()
+        api.refuse("sendMessage", TelegramError(FailureLayer.NETWORK, "connection reset"))
+
+        receipt = asyncio.run(channel(api).send("words", request_id=new_request_id()))
+
+        assert receipt.outcome is Delivery.FAILED
+        assert receipt.message_ids == ()
+
+    def test_a_reply_to_a_chat_origin_is_an_ordinary_message(self) -> None:
+        """`origin` echoed from a typed message names the chat; there is one chat."""
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send("the receipt", request_id=new_request_id(), origin=CHAT)
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert api.sent() == ["the receipt"]
+        assert api.toasts() == []
+
+
+class TestRevisingAMessageInPlace:
+    """ADR 0021 §8: `revises` names earlier ids; the adapter edits rather than sends."""
+
+    def test_the_id_round_trips_into_edit_message_text(self) -> None:
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send("handled", request_id=new_request_id(), revises=("17",))
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("17",)
+        assert api.edits() == [("17", "handled")]
+        assert api.sent() == []
+        assert api.method_calls("editMessageText")[0]["chat_id"] == CHAT
+
+    def test_not_modified_is_success(self) -> None:
+        """Editing a notice to the words it already shows is the outcome wanted."""
+        api = FakeTelegram()
+        api.refuse(
+            "editMessageText",
+            TelegramError(
+                FailureLayer.API,
+                "editMessageText was refused: Bad Request: message is not modified: "
+                "specified new message content and reply markup are exactly the same",
+            ),
+        )
+
+        receipt = asyncio.run(
+            channel(api).send("handled", request_id=new_request_id(), revises=("17",))
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("17",)
+
+    def test_any_other_refusal_is_a_failed_edit(self) -> None:
+        api = FakeTelegram()
+        api.refuse(
+            "editMessageText",
+            TelegramError(
+                FailureLayer.API, "editMessageText was refused: message to edit not found"
+            ),
+        )
+
+        receipt = asyncio.run(
+            channel(api).send("handled", request_id=new_request_id(), revises=("17",))
+        )
+
+        assert receipt.outcome is Delivery.FAILED
+        assert "not found" in receipt.reason
+        assert receipt.message_ids == ()
+
+    def test_parts_and_ids_are_edited_pairwise(self) -> None:
+        api = FakeTelegram()
+        text = "hello world " * 900
+        parts = split_message(text)
+
+        receipt = asyncio.run(
+            channel(api).send(
+                text, request_id=new_request_id(), revises=("1", "2", "3")[: len(parts)]
+            )
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert api.edits() == list(zip(receipt.message_ids, parts, strict=True))
+
+    def test_a_count_mismatch_edits_nothing_and_names_both_counts(self) -> None:
+        """A text that no longer fits the messages it revises is refused whole, not
+        half-applied: a message with a hole is a different message."""
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send("handled", request_id=new_request_id(), revises=("17", "18"))
+        )
+
+        assert receipt.outcome is Delivery.FAILED
+        assert "1" in receipt.reason and "2" in receipt.reason
+        assert api.edits() == []
+        assert api.sent() == []
+        assert receipt.message_ids == ()
+
+
+class TestAnsweringAPressAsAToast:
+    """ADR 0021 §4: Core's reply to a press's `origin` is a toast — once, and short."""
+
+    async def _pressed(self, api: FakeTelegram, sink: Sink) -> TelegramCompanionChannel:
+        listener = channel(api, sink=sink)
+        await listener.connect()
+        await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+        api.deliver(press("2"))
+        await until(lambda: sink.events, what="the press surfaced")
+        return listener
+
+    def test_a_short_reply_is_a_toast_and_lands_under_no_id(self) -> None:
+        api, sink = FakeTelegram(), Sink()
+
+        async def scenario() -> ChannelReceipt:
+            listener = await self._pressed(api, sink)
+            receipt = await listener.send(
+                "relayed", request_id=new_request_id(), origin=sink.events[0].origin
+            )
+            await listener.aclose()
+            return receipt
+
+        receipt = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ()
+        assert api.toasts() == [(CALLBACK_ID, "relayed")]
+        assert api.sent() == []
+
+    def test_a_reply_over_two_hundred_characters_is_a_message(self) -> None:
+        api, sink = FakeTelegram(), Sink()
+        long = "x" * 201
+
+        async def scenario() -> ChannelReceipt:
+            listener = await self._pressed(api, sink)
+            receipt = await listener.send(
+                long, request_id=new_request_id(), origin=sink.events[0].origin
+            )
+            await listener.aclose()
+            return receipt
+
+        receipt = asyncio.run(scenario())
+
+        assert receipt.message_ids == ("1",)
+        assert api.toasts() == []
+        assert api.sent() == [long]
+
+    def test_exactly_two_hundred_characters_still_toasts(self) -> None:
+        api, sink = FakeTelegram(), Sink()
+
+        async def scenario() -> None:
+            listener = await self._pressed(api, sink)
+            await listener.send(
+                "y" * 200, request_id=new_request_id(), origin=sink.events[0].origin
+            )
+            await listener.aclose()
+
+        asyncio.run(scenario())
+
+        assert len(api.toasts()) == 1
+        assert api.sent() == []
+
+    def test_the_toast_limit_counts_characters_not_utf16_units(self) -> None:
+        """The API says "0-200 characters": 101 emoji are 101 characters and toast."""
+        api, sink = FakeTelegram(), Sink()
+        emoji = "\N{GRINNING FACE}" * 101
+
+        async def scenario() -> None:
+            listener = await self._pressed(api, sink)
+            await listener.send(emoji, request_id=new_request_id(), origin=sink.events[0].origin)
+            await listener.aclose()
+
+        asyncio.run(scenario())
+
+        assert api.toasts() == [(CALLBACK_ID, emoji)]
+        assert api.sent() == []
+
+    def test_a_second_reply_to_one_press_is_a_message(self) -> None:
+        """A callback is answered once; what follows must still reach the user."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def scenario() -> ChannelReceipt:
+            listener = await self._pressed(api, sink)
+            origin = sink.events[0].origin
+            await listener.send("first", request_id=new_request_id(), origin=origin)
+            second = await listener.send("second", request_id=new_request_id(), origin=origin)
+            await listener.aclose()
+            return second
+
+        second = asyncio.run(scenario())
+
+        assert api.toasts() == [(CALLBACK_ID, "first")]
+        assert api.sent() == ["second"]
+        assert second.message_ids == ("1",)
+
+    def test_a_toast_that_fails_is_logged_and_the_reply_becomes_a_message(self, caplog) -> None:
+        caplog.set_level("WARNING", logger="gpt_voicecoding.adapters.companion_channel.telegram")
+        api, sink = FakeTelegram(), Sink()
+        api.refuse(
+            "answerCallbackQuery",
+            TelegramError(FailureLayer.API, "answerCallbackQuery was refused: query is too old"),
+        )
+
+        async def scenario() -> ChannelReceipt:
+            listener = await self._pressed(api, sink)
+            receipt = await listener.send(
+                "relayed", request_id=new_request_id(), origin=sink.events[0].origin
+            )
+            await listener.aclose()
+            return receipt
+
+        receipt = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("1",)
+        assert api.sent() == ["relayed"]
+        assert any("too old" in record.getMessage() for record in caplog.records)
+
+    def test_an_origin_that_is_not_a_known_callback_is_a_message(self) -> None:
+        """A callback Core replies to after a restart, or twice: there is nothing
+        to answer, so the words go as a message rather than nowhere."""
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send("words", request_id=new_request_id(), origin="callback:unknown")
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert api.toasts() == []
+        assert api.sent() == ["words"]
 
 
 class TestAnsweringForItself:
@@ -455,6 +841,114 @@ class TestListening:
         asyncio.run(listening())
 
         assert sink.events == [InboundText(text="turn duty off", origin=CHAT)]
+
+    def test_a_reply_names_the_message_it_answered(self) -> None:
+        """`reply_to_message.message_id` → `in_reply_to`, a fact and not a meaning."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(message("ship it", update_id=9, reply_to=5))
+            await until(lambda: sink.events, what="the reply surfaced")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert sink.events == [InboundText(text="ship it", origin=CHAT, in_reply_to="5")]
+
+    def test_a_press_is_a_numeral_reply_to_the_pressed_message(self) -> None:
+        """A button never crosses the seam: a press arrives as the numeral typed in a
+        reply, with an origin only this adapter can read (ADR 0021 §4)."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(press("2", pressed=5, update_id=9))
+            await until(lambda: sink.events, what="the press surfaced")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        (event,) = sink.events
+        assert event.text == "2"
+        assert event.in_reply_to == "5"
+        assert CALLBACK_ID in event.origin
+        assert event.origin != CHAT
+
+    def test_the_reader_asks_for_presses_by_name(self) -> None:
+        """A set `allowed_updates` list persists on the bot (#247): the one this
+        adapter sends must include `callback_query` or presses never arrive."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: len(api.method_calls("getUpdates")) >= 2, what="the first poll")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert "callback_query" in ALLOWED_UPDATES
+        assert all(
+            set(poll["allowed_updates"]) >= {"message", "callback_query"}
+            for poll in api.method_calls("getUpdates")
+        )
+
+    def test_a_strangers_press_is_met_with_silence_and_never_answered(self) -> None:
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(press("1", chat=STRANGER, update_id=7, callback="666"))
+            api.deliver(message("this one is mine", update_id=8))
+            await until(lambda: sink.events, what="the user's own text surfaced")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert [event.text for event in sink.events] == ["this one is mine"]
+        assert api.toasts() == []
+        assert api.sent() == []
+
+    def test_a_message_with_no_text_from_the_user_surfaces_as_empty_text(self) -> None:
+        """Text only, this iteration (ADR 0021 §4): a voice note is raised as empty
+        text so Core's cannot-classify path can answer with its one hint."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(message(None, update_id=9))
+            await until(lambda: sink.events, what="the empty text surfaced")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert sink.events == [InboundText(text="", origin=CHAT)]
+
+    def test_a_message_with_no_text_from_a_stranger_is_silence(self) -> None:
+        api, sink = FakeTelegram(), Sink()
+
+        async def listening() -> None:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(message(None, chat=STRANGER, update_id=7))
+            api.deliver(message("this one is mine", update_id=8))
+            await until(lambda: sink.events, what="the user's own text surfaced")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert sink.events == [InboundText(text="this one is mine", origin=CHAT)]
+        assert api.sent() == []
 
     def test_a_stranger_is_met_with_silence(self) -> None:
         """Core routes inbound text into the control plane, so the front door is closed

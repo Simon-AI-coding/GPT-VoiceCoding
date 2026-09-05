@@ -135,6 +135,13 @@ STATE_WORDING: Mapping[BriefState, str] = {
     BriefState.UNREADABLE: "unreadable",
 }
 
+#: What the user hears back when their message carried no text at all — a voice
+#: note, a photo, a file. The Companion Channel is text only this iteration (ADR
+#: 0021 §4): the adapter raises such a message as empty text, and the router's
+#: cannot-classify path answers with these words. One hint, worded here and
+#: nowhere else, so every surface that cannot read a message says so the same way.
+NON_TEXT_HINT = "I can only read text here — say it in words"
+
 
 @dataclass(frozen=True, slots=True)
 class Newest:

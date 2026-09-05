@@ -50,6 +50,7 @@ from gpt_voicecoding.seams.call import (
     UserSpeaking,
     VoiceSpeech,
 )
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.events import Event, EventSink
 from gpt_voicecoding.seams.identity import RequestId, SessionTarget
@@ -428,27 +429,55 @@ def unbuildable_call(**_: object) -> FakeCall:
 
 
 class FakeCompanionChannel:
-    """A Companion Channel that records pushes and can be told to fail."""
+    """A Companion Channel that records pushes and can be told to fail.
+
+    Every send lands under one fresh id, counted up from 1, unless `message_ids`
+    says otherwise — so a test that wants a split send or a toast (no ids) can
+    say so. `origins` and `revisions` journal what Core echoed on each send, in
+    the same order as `sent`.
+    """
 
     def __init__(
         self,
         *,
         outcome: Delivery = Delivery.DELIVERED,
         reason: str = "fake channel",
+        message_ids: tuple[str, ...] | None = None,
         verify_result: VerifyResult | None = None,
         sink: EventSink | None = None,
     ) -> None:
         self.outcome = outcome
         self.reason = reason
+        self.message_ids = message_ids
         self.verify_result = verify_result or VerifyResult(
             outcome=VerifyOutcome.PASS, loaded="tests.fakes.FakeCompanionChannel"
         )
         self.sink = sink
         self.sent: list[str] = []
+        self.requests: list[str] = []
+        self.origins: list[str] = []
+        self.revisions: list[tuple[str, ...]] = []
 
-    async def send(self, text: str, *, request_id: RequestId) -> DeliveryReceipt:
+    async def send(
+        self,
+        text: str,
+        *,
+        request_id: RequestId,
+        origin: str = "",
+        revises: tuple[str, ...] = (),
+    ) -> ChannelReceipt:
         self.sent.append(text)
-        return DeliveryReceipt(request_id=request_id, outcome=self.outcome, reason=self.reason)
+        self.requests.append(str(request_id))
+        self.origins.append(origin)
+        self.revisions.append(revises)
+        if self.message_ids is not None:
+            landed = self.message_ids
+        else:
+            # Ids name parts that landed (ADR 0021 §4): a FAILED send has none.
+            landed = () if self.outcome is Delivery.FAILED else (str(len(self.sent)),)
+        return ChannelReceipt(
+            request_id=request_id, outcome=self.outcome, reason=self.reason, message_ids=landed
+        )
 
     async def verify(self) -> VerifyResult:
         return self.verify_result

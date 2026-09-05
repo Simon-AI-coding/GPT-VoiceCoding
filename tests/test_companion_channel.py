@@ -601,14 +601,25 @@ class TestCuttingTheOriginalToOneMessage:
         assert body.endswith(" is here"), "cut fell mid-line rather than at a line break"
 
     def test_the_headline_is_never_cut_when_it_alone_is_near_the_cap(self) -> None:
-        """Less than a marker's worth of room left: the fold is what fits of the marker."""
+        """Room for the marker but not a word of the original: the fold is the marker, whole."""
+        question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 107 - utf16_length(MARKER))
+        original = "the whole original, every word of it, " * 4
+
+        laid_out = lay_out(notice(question=question, newest=original))
+
+        assert entity(laid_out, "bold") == question
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        assert entity(laid_out, "expandable_blockquote") == MARKER
+
+    def test_the_marker_is_never_cut_so_too_little_room_for_it_means_no_fold(self) -> None:
+        """A partial marker is words nobody wrote: the fold goes rather than the marker's tail."""
         question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 130)
 
         laid_out = lay_out(notice(question=question, newest="the whole original, every word of it"))
 
-        assert entity(laid_out, "bold") == question
         assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
-        assert MARKER.startswith(entity(laid_out, "expandable_blockquote"))
+        assert [e["type"] for e in laid_out.entities] == ["bold"]
+        assert MARKER not in laid_out.text
 
     def test_a_headline_that_fills_the_cap_leaves_no_fold_and_no_entity_for_one(self) -> None:
         question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 107)

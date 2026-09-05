@@ -117,7 +117,9 @@ def _roster(notice: RosterNotice, *, limit: int) -> LaidOut:
     thirty of two hundred rows still says two hundred are there, and what it
     could not carry is named by number rather than silently absent. Rows are
     in Briefing's order, the Focus Session first, so the back is the least
-    asked-about end.
+    asked-about end. **A roster is one message, never split**: it is one Anchor
+    whose labels resolve by position (ADR 0021 §6), and a second message would
+    be a second Anchor with its own numbering (Advisor ruling on #262).
     """
     rows = [
         f"{STATE_LIGHT[row.state]} {row.name}{SEPARATOR}{row.agent}{SEPARATOR}{row.state_word}"
@@ -167,8 +169,9 @@ def _fitted(original: str, marker: str, budget: int) -> str:
     paid for — a line break first because a fold that ends on a whole line
     reads as the message it is cut from, and a space only when the window holds
     no line break at all. When nothing of the original fits beside the marker,
-    the fold is the marker alone; when not even the marker fits, it is as much
-    of the marker as does, and nothing when nothing does. The headline is never
+    the fold is the marker alone; when not even the whole marker fits, there
+    is no fold at all — the marker is Core's fixed words, and a partial one is
+    words nobody wrote (Advisor ruling on #262). The headline is never
     the thing that gives way, and the message never leaves here over the cap:
     a notice is one message (ADR 0021 §5), and a message Telegram refuses is a
     notice nobody receives.
@@ -177,7 +180,7 @@ def _fitted(original: str, marker: str, budget: int) -> str:
         return original
     room = budget - utf16_length(marker) - 1
     if room <= 0:
-        return marker[: prefix_within(marker, max(budget, 0))]
+        return marker if utf16_length(marker) <= budget else ""
     hard = prefix_within(original, room)
     window = original[:hard]
     boundary = window.rfind("\n")

@@ -232,10 +232,19 @@ Every reply carries `kind`, `text`, and the structure `text` was rendered from:
              "last_activity_at": "2026-09-02T03:04:05+00:00"}}
 ```
 
-**`text` is the engine's own rendering and surfaces print it unchanged.**
-`bridgectl brief` prints exactly this string; so does the Companion Channel. One
-renderer is the point: two would be two descriptions of one Session. The
-structure travels beside it for a surface that reads fields rather than lines.
+**`text` is the engine's own rendering, and the words in it never fork.**
+`bridgectl brief` prints exactly this string, and so does the engine log. One
+source of the words is the point: two would be two descriptions of one Session.
+What may differ per surface is the **layout** (ADR 0021 §5): the Companion
+Channel is handed the same brief as a structured carrier beside this text —
+state, agent, name, question, option labels in order, recommendation, the newest
+message whole — filled from the same wording tables, and an adapter with a shape
+of its own (Telegram: a state light, the question in bold, the original folded)
+arranges those words and chooses none. An adapter with no layout prints `text`.
+That is what the realtime adapter already does with the spoken brief, and the
+rule it restates is the one above: the vocabulary is `core/briefing.py`'s alone.
+The structure travels beside the text here too, for a surface that reads fields
+rather than lines.
 
 `state` is one of five, and they are what the user is told:
 

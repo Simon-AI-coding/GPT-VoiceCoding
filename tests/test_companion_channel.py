@@ -33,12 +33,14 @@ from gpt_voicecoding.adapters.companion_channel import (
 )
 from gpt_voicecoding.adapters.companion_channel.telegram import (
     ALLOWED_UPDATES,
+    MESSAGE_LIMIT_UTF16_UNITS,
     FailureLayer,
     SettingsError,
     TelegramCompanionChannel,
     TelegramError,
     TelegramSettings,
     http_transport,
+    lay_out,
     split_message,
     telegram_channel,
     utf16_length,
@@ -46,9 +48,13 @@ from gpt_voicecoding.adapters.companion_channel.telegram import (
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
 from gpt_voicecoding.engine.composition import import_factory
 from gpt_voicecoding.seams.companion_channel import (
+    BriefState,
     ChannelReceipt,
     CompanionChannel,
     InboundText,
+    RosterNotice,
+    RosterRowNotice,
+    SessionNotice,
 )
 from gpt_voicecoding.seams.connection import Connectable
 from gpt_voicecoding.seams.delivery import Delivery
@@ -431,6 +437,206 @@ class TestCuttingAMessageToSize:
         assert "".join(parts) == text
 
 
+MARKER = "… cut here; the rest is on the terminal"
+
+
+def notice(**overrides: Any) -> SessionNotice:
+    """A decision notice in Core's words, the way `briefing.notice` would fill it."""
+    table: dict[str, Any] = {
+        "state": BriefState.DECISION,
+        "state_word": "waiting for your decision",
+        "agent": "codex",
+        "name": "gpt-voicecoding · port the log",
+        "question": "Which base?",
+        "options": ("main", "develop"),
+        "recommendation": "recommends: main",
+        "newest": "I rebuilt the index.",
+        "cut_marker": MARKER,
+        "answerable_here": True,
+        "answer_wording": "answer from here",
+    }
+    table.update(overrides)
+    return SessionNotice(**table)
+
+
+def entity(laid_out, kind: str) -> str:
+    """The text one entity covers, read back through the UTF-16 offsets it names."""
+    (found,) = [e for e in laid_out.entities if e["type"] == kind]
+    units = laid_out.text.encode("utf-16-le")
+    return units[found["offset"] * 2 : (found["offset"] + found["length"]) * 2].decode("utf-16-le")
+
+
+class TestLayingOutANotice:
+    """The Telegram layout of a structured brief (ADR 0021 §5): Core's words, arranged.
+
+    The adapter chooses no words. Every string in the laid-out text is one the
+    notice carried, and the two entities — bold for the question, an expandable
+    blockquote for the original — are the only markup, given as offsets in
+    UTF-16 code units rather than as MarkdownV2, so nothing the agent wrote is
+    ever escaped or refused.
+    """
+
+    def test_the_shape_is_light_word_then_agent_and_name_then_question_options_and_fold(
+        self,
+    ) -> None:
+        laid_out = lay_out(notice())
+
+        assert laid_out.text == (
+            "🟡 waiting for your decision\n"
+            "codex · gpt-voicecoding · port the log\n"
+            "\n"
+            "Which base?\n"
+            "1. main\n"
+            "2. develop\n"
+            "recommends: main\n"
+            "\n"
+            "I rebuilt the index."
+        )
+        assert entity(laid_out, "bold") == "Which base?"
+        assert entity(laid_out, "expandable_blockquote") == "I rebuilt the index."
+
+    def test_a_notice_with_no_question_is_the_same_layout_with_the_slot_empty(self) -> None:
+        laid_out = lay_out(
+            notice(
+                state=BriefState.FINISHED,
+                state_word="finished",
+                question="",
+                options=(),
+                recommendation="",
+                newest="All green.",
+            )
+        )
+
+        assert laid_out.text == "🟢 finished\ncodex · gpt-voicecoding · port the log\n\nAll green."
+        assert [e["type"] for e in laid_out.entities] == ["expandable_blockquote"]
+
+    def test_the_agents_words_arrive_verbatim_with_the_entities_intact(self) -> None:
+        """A stray `*`, `_`, backtick or backslash cannot break a notice: nothing is escaped."""
+        original = "use *stars*, _underscores_, `ticks` and a \\ backslash [link](x) > quote"
+
+        laid_out = lay_out(notice(newest=original, question="is *this* ok_?"))
+
+        assert laid_out.text.endswith(original)
+        assert entity(laid_out, "expandable_blockquote") == original
+        assert entity(laid_out, "bold") == "is *this* ok_?"
+
+    def test_fenced_code_in_the_original_shows_literally(self) -> None:
+        original = "Run this:\n```sh\nmake test\n```\nthen `ship`."
+
+        laid_out = lay_out(notice(newest=original))
+
+        assert entity(laid_out, "expandable_blockquote") == original
+        assert all(e["type"] in {"bold", "expandable_blockquote"} for e in laid_out.entities)
+
+    def test_offsets_are_counted_in_utf16_units(self) -> None:
+        laid_out = lay_out(notice(question="🙂🙂 which?", newest="🙂 done"))
+
+        assert entity(laid_out, "bold") == "🙂🙂 which?"
+        assert entity(laid_out, "expandable_blockquote") == "🙂 done"
+
+    def test_an_undelivered_line_sits_below_the_fold_and_outside_it(self) -> None:
+        laid_out = lay_out(
+            notice(undelivered="your last reply did not arrive, because ceiling_passed")
+        )
+
+        assert laid_out.text.endswith(
+            "I rebuilt the index.\nyour last reply did not arrive, because ceiling_passed"
+        )
+        assert entity(laid_out, "expandable_blockquote") == "I rebuilt the index."
+
+    def test_a_terminal_only_answer_is_said_below_the_fold(self) -> None:
+        laid_out = lay_out(notice(answerable_here=False, answer_wording="answer at the terminal"))
+
+        assert laid_out.text.endswith("I rebuilt the index.\nanswer at the terminal")
+
+    def test_an_answerable_notice_carries_no_answer_line(self) -> None:
+        assert "answer from here" not in lay_out(notice()).text
+
+    def test_a_session_with_no_name_shows_its_address_in_the_name_slot(self) -> None:
+        laid_out = lay_out(notice(name="codex:abc"))
+
+        assert laid_out.text.splitlines()[1] == "codex · codex:abc"
+
+    def test_each_state_has_its_own_light(self) -> None:
+        lights = {
+            state: lay_out(notice(state=state, state_word=str(state))).text[0]
+            for state in BriefState
+        }
+
+        assert len(set(lights.values())) == len(BriefState)
+
+
+class TestCuttingTheOriginalToOneMessage:
+    """A notice is one message (ADR 0021 §5): the original gives way, the headline never."""
+
+    def test_an_original_that_fits_is_carried_whole_with_no_marker(self) -> None:
+        laid_out = lay_out(notice(newest="short"))
+
+        assert MARKER not in laid_out.text
+
+    def test_an_original_exactly_at_budget_gets_no_marker(self) -> None:
+        headline = lay_out(notice(newest="")).text
+        budget = MESSAGE_LIMIT_UTF16_UNITS - utf16_length(headline)
+        original = "x" * budget
+
+        laid_out = lay_out(notice(newest=original))
+
+        assert utf16_length(laid_out.text) == MESSAGE_LIMIT_UTF16_UNITS
+        assert entity(laid_out, "expandable_blockquote") == original
+
+    def test_an_original_over_budget_is_cut_and_the_fold_ends_with_the_marker(self) -> None:
+        laid_out = lay_out(notice(newest="word " * 2000))
+
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        fold = entity(laid_out, "expandable_blockquote")
+        assert fold.endswith("\n" + MARKER)
+        assert fold.startswith("word word")
+
+    def test_the_cut_prefers_the_last_line_break_then_the_last_space(self) -> None:
+        lines = "\n".join(f"line {n:04d} is here" for n in range(400))
+
+        fold = entity(lay_out(notice(newest=lines)), "expandable_blockquote")
+
+        body = fold.removesuffix("\n" + MARKER)
+        assert body.endswith(" is here"), "cut fell mid-line rather than at a line break"
+
+    def test_the_headline_is_never_cut_when_it_alone_is_near_the_cap(self) -> None:
+        """Less than a marker's worth of room left: the fold is the marker and nothing else."""
+        question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 130)
+
+        laid_out = lay_out(notice(question=question, newest="the whole original, every word of it"))
+
+        assert entity(laid_out, "bold") == question
+        assert entity(laid_out, "expandable_blockquote") == MARKER
+
+    def test_an_emoji_heavy_original_is_cut_in_utf16_units_with_no_surrogate_split(self) -> None:
+        laid_out = lay_out(notice(newest="\N{GRINNING FACE}" * 3000))
+
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        laid_out.text.encode("utf-16", "strict")
+        assert entity(laid_out, "expandable_blockquote").endswith(MARKER)
+
+    def test_a_roster_is_one_line_per_session_and_a_counts_line(self) -> None:
+        laid_out = lay_out(
+            RosterNotice(
+                rows=(
+                    RosterRowNotice(BriefState.RUNNING, "running", "claude", "gpt-voicecoding · a"),
+                    RosterRowNotice(
+                        BriefState.DECISION, "waiting for your decision", "codex", "codex:def"
+                    ),
+                ),
+                counts="the others: 1 waiting for your decision",
+            )
+        )
+
+        assert laid_out.text == (
+            "🔵 gpt-voicecoding · a · claude · running\n"
+            "🟡 codex:def · codex · waiting for your decision\n"
+            "the others: 1 waiting for your decision"
+        )
+        assert laid_out.entities == ()
+
+
 class TestPushingOneMessage:
     def test_a_push_that_lands_is_delivered_to_the_configured_chat(self) -> None:
         api = FakeTelegram()
@@ -566,6 +772,114 @@ class TestWhatAPushLandedUnder:
         assert receipt.outcome is Delivery.DELIVERED
         assert api.sent() == ["the receipt"]
         assert api.toasts() == []
+
+
+class TestPushingANotice:
+    """A structured brief is laid out here and sent as one message (ADR 0021 §5).
+
+    The text Core sent beside it is the same words in `briefing.text`'s shape;
+    this adapter lays the brief out instead and never splits the result, so a
+    notice is one message whatever its original held. `split_message` is not
+    reached by a notice.
+    """
+
+    def test_a_notice_is_sent_laid_out_with_entities_and_not_as_its_text(self) -> None:
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send(
+                "the text rendering, which this surface does not print",
+                request_id=new_request_id(),
+                notice=notice(),
+            )
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("1",)
+        (call,) = api.method_calls("sendMessage")
+        assert call["chat_id"] == CHAT
+        assert call["text"] == lay_out(notice()).text
+        assert call["entities"] == list(lay_out(notice()).entities)
+        assert "parse_mode" not in call
+
+    def test_a_notice_with_a_huge_original_is_still_one_message(self) -> None:
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send(
+                "text", request_id=new_request_id(), notice=notice(newest="word " * 5000)
+            )
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert len(api.method_calls("sendMessage")) == 1
+        assert receipt.message_ids == ("1",)
+        assert MARKER in api.sent()[0]
+
+    def test_a_roster_notice_is_sent_the_same_way(self) -> None:
+        api = FakeTelegram()
+        roster = RosterNotice(
+            rows=(RosterRowNotice(BriefState.RUNNING, "running", "claude", "a · b"),),
+            counts="sessions: 1 running",
+        )
+
+        asyncio.run(channel(api).send("text", request_id=new_request_id(), notice=roster))
+
+        assert api.sent() == ["🔵 a · b · claude · running\nsessions: 1 running"]
+
+    def test_a_notice_answering_a_press_clears_the_button_and_goes_as_a_message(self) -> None:
+        """A notice is never a toast: the press is answered with no text, then the notice lands."""
+        api = FakeTelegram()
+        sink = Sink()
+
+        async def scenario() -> ChannelReceipt:
+            adapter = channel(api, sink=sink)
+            await adapter.connect()
+            api.deliver(press("1"))
+            await until(lambda: sink.events, what="the press to reach the sink")
+            (pressed,) = sink.events
+            try:
+                return await adapter.send(
+                    "text", request_id=new_request_id(), origin=pressed.origin, notice=notice()
+                )
+            finally:
+                await adapter.aclose()
+
+        receipt = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("1",)
+        assert api.toasts() == [(CALLBACK_ID, "")]
+        assert api.sent() == [lay_out(notice()).text]
+
+    def test_a_notice_revising_one_message_edits_it_with_the_same_layout(self) -> None:
+        """ADR 0021 §8: an edit carries the same entities a fresh send would have."""
+        api = FakeTelegram()
+        closed = notice(state_word="handled", options=())
+
+        receipt = asyncio.run(
+            channel(api).send("text", request_id=new_request_id(), revises=("17",), notice=closed)
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert receipt.message_ids == ("17",)
+        (edit,) = api.method_calls("editMessageText")
+        assert edit["message_id"] == 17
+        assert edit["text"] == lay_out(closed).text
+        assert edit["entities"] == list(lay_out(closed).entities)
+
+    def test_a_notice_cannot_revise_more_than_one_message(self) -> None:
+        """One notice is one message, so two ids is a notice that was never a notice."""
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send(
+                "text", request_id=new_request_id(), revises=("17", "18"), notice=notice()
+            )
+        )
+
+        assert receipt.outcome is Delivery.FAILED
+        assert api.method_calls("editMessageText") == []
 
 
 class TestRevisingAMessageInPlace:

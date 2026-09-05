@@ -25,7 +25,14 @@ from gpt_voicecoding.core.errors import StaleSessionError, UnknownSessionError
 from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import RelayKind, RelayQueue
-from gpt_voicecoding.core.relays import RelayPipeline, RelayReason, reason_for
+from gpt_voicecoding.core.relays import (
+    NO_AUTHORITY_CLAUSE,
+    RelayOutcome,
+    RelayPipeline,
+    RelayReason,
+    reason_for,
+    receipt_sentence,
+)
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.seams.agent import (
     RelayRoute,
@@ -634,3 +641,156 @@ class TestWhatATerminalRelaySaysAboutAnUnprovenAttempt:
 
         assert outcome.reason is RelayReason.SESSION_ENDED
         assert outcome.receipt is None
+
+
+def held_question(harness: Harness, target: SessionTarget = CLAUDE) -> None:
+    """The Session asked through a hook the lane still holds (ADR 0015's route)."""
+    harness.sessions.observed_one(
+        SessionInspection(
+            target=target,
+            workspace=Path("/tmp/workspace"),
+            state=SessionState.WAITING,
+            waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt="Which base?"),
+        ),
+        now=harness.now,
+    )
+    harness.agent.answerable_questions.add(target)
+
+
+class TestWhichRouteCarriedTheUsersAuthority:
+    """The fourth fact on a receipt: whether the words went as the user's own.
+
+    ADR 0013's amendment and ADR 0021 (Receipts): two routes carry the user's
+    authority — a question the Session offered through a hook the lane still
+    holds, and a permission verdict. Every other Relay is words without their
+    say-so, and the surface that says so needs the fact from the outcome rather
+    than from a second reading of the row, which may have moved by then.
+    """
+
+    def test_an_answer_through_the_held_hook_carries_the_users_authority(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "main"))
+
+        assert outcome.state is Lifecycle.DELIVERED
+        assert outcome.with_authority is True
+
+    def test_words_into_an_idle_session_carry_none(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN)
+
+        outcome = harness.relay("carry on")
+
+        assert outcome.state is Lifecycle.DELIVERED
+        assert outcome.with_authority is False
+
+    def test_words_that_queue_carry_none(self) -> None:
+        assert Harness().relay().with_authority is False
+
+    def test_a_question_the_lane_no_longer_holds_is_refused_without_authority(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+        harness.agent.answerable_questions.clear()
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "main"))
+
+        assert outcome.reason is RelayReason.QUESTION_UNANSWERABLE
+        assert outcome.with_authority is False
+
+
+class TestTheReceiptSentence:
+    """The three codes as one sentence, held once beside the codes (ADR 0021, Receipts).
+
+    `bridgectl relay` keeps the codes; the Companion Channel answers with this.
+    The clause is ADR 0013's: added exactly when the words answered a question
+    the Session merely said — plain text, no held hook — and never on the
+    held-hook or permission routes, because both carry the user's authority.
+    """
+
+    def test_a_delivered_relay_over_the_inbox_says_it_arrived_and_adds_the_clause(self) -> None:
+        outcome = Harness(window=ReplyWindow.OPEN).relay("carry on")
+
+        sentence = receipt_sentence(outcome)
+
+        assert sentence.startswith("Your words arrived.")
+        assert sentence.endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_a_delivered_answer_through_the_held_hook_gets_no_clause(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+
+        sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "main")))
+
+        assert sentence == "Your words arrived."
+
+    def test_a_permission_verdict_gets_no_clause(self) -> None:
+        outcome = RelayOutcome(
+            request_id=RequestId("rq-1"),
+            target=CLAUDE,
+            state=Lifecycle.DELIVERED,
+            route=RelayRoute.DELIVER,
+            reason=RelayReason.DELIVERED,
+            receipt=DeliveryReceipt(request_id=RequestId("rq-1"), outcome=Delivery.DELIVERED),
+            with_authority=True,
+        )
+
+        assert receipt_sentence(outcome) == "Your words arrived."
+
+    def test_queued_words_say_they_wait_and_carry_the_clause(self) -> None:
+        sentence = receipt_sentence(Harness().relay())
+
+        assert sentence.startswith("Your words are waiting")
+        assert sentence.endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_a_proven_failure_that_waits_says_the_attempt_did_not_arrive(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN, agent=FakeAgent(outcome=Delivery.FAILED))
+
+        sentence = receipt_sentence(harness.relay())
+
+        assert "did not arrive" in sentence
+        assert "wait" in sentence
+
+    def test_an_unproven_attempt_is_said_to_be_kept_and_not_sent_again(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN, agent=FakeAgent(outcome=Delivery.UNKNOWN))
+
+        sentence = receipt_sentence(harness.relay())
+
+        assert "may" in sentence
+        assert "not sent again" in sentence
+        assert sentence.endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_a_held_relay_is_said_to_be_in_front_of_a_person(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN, agent=FakeAgent(outcome=Delivery.HELD))
+
+        assert "held" in receipt_sentence(harness.relay())
+
+    def test_a_refused_question_names_the_terminal_and_carries_no_clause(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+        harness.agent.answerable_questions.clear()
+
+        sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "main")))
+
+        assert "terminal" in sentence
+        assert NO_AUTHORITY_CLAUSE not in sentence
+
+    def test_every_reason_has_a_sentence(self) -> None:
+        for reason in RelayReason:
+            outcome = RelayOutcome(
+                request_id=RequestId("rq-1"),
+                target=CODEX,
+                state=Lifecycle.REPORTED_FAILED
+                if reason
+                in {
+                    RelayReason.CEILING_PASSED,
+                    RelayReason.SESSION_ENDED,
+                    RelayReason.QUESTION_UNANSWERABLE,
+                }
+                else Lifecycle.RETAINED,
+                route=RelayRoute.DELIVER,
+                reason=reason,
+            )
+            if reason is RelayReason.DELIVERED:
+                continue
+            assert receipt_sentence(outcome).strip(), reason
+            assert "=" not in receipt_sentence(outcome), "a sentence, not the codes"

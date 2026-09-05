@@ -74,7 +74,7 @@ from gpt_voicecoding.seams.call import (
     UserSpeech,
     VoiceSpeech,
 )
-from gpt_voicecoding.seams.companion_channel import InboundText
+from gpt_voicecoding.seams.companion_channel import InboundText, SessionNotice
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from hub import CLAUDE, CODEX, TEN_MINUTES, Hub
@@ -277,6 +277,48 @@ class TestTheStopNoticePipelineEndToEnd:
             "  answer: at the terminal\n"
             "  last activity: not read"
         ]
+
+    def test_a_stop_hands_the_channel_the_structured_brief_beside_its_text(self) -> None:
+        """ADR 0021 §5: the same words twice — as `text`, and as the brief a layout arranges.
+
+        The channel fake records both. What must hold is that the brief is
+        Briefing's own filling of the brief the text renders, not a second
+        reading: one Session, one moment, two shapes.
+        """
+        hub = Hub(voice=False)
+
+        hub.emit(
+            SessionStopped(
+                target=CODEX,
+                waiting_for=WaitingFor(
+                    kind=WaitingKind.QUESTION,
+                    prompt="Which base?",
+                    options=(Option(text="main"), Option(text="feature")),
+                    recommendation="main",
+                ),
+            )
+        )
+
+        (notice,) = hub.channel.notices
+        assert isinstance(notice, SessionNotice)
+        assert notice.state is BriefState.DECISION
+        assert notice.state_word == "waiting for your decision"
+        assert notice.name == "GPT-VoiceCoding · port the log"
+        assert notice.agent == "codex"
+        assert notice.question == "Which base?"
+        assert notice.options == ("main", "feature")
+        assert notice.recommendation == "recommends: main"
+        assert notice.newest == "not read"
+        assert notice.answerable_here is False
+        assert notice.cut_marker
+
+    def test_a_reply_to_the_user_carries_no_notice(self) -> None:
+        """A receipt is words, not a brief: nothing to lay out (ADR 0021 §6)."""
+        hub = Hub()
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.channel.notices == [None]
 
     def test_a_finished_stop_pushes_the_briefs_text(self) -> None:
         """A Claude turn that ended asking nothing is FINISHED, in Briefing's words."""
@@ -1194,13 +1236,16 @@ class TestTheRelayPipelineEndToEnd:
         assert hub.state.sessions.resolve(CODEX).state is SessionState.RUNNING
 
     def test_words_for_a_busy_session_wait_and_the_channel_gets_the_receipt(self) -> None:
-        """The inbound path answers with the same structured receipt the CLI prints."""
+        """The inbound path answers with the CLI's three facts as one sentence (ADR 0021)."""
         hub = Hub()
 
         hub.emit(InboundText(text="ship it"))
 
         assert hub.agent.calls == []
-        assert hub.channel.sent == ["state=retained grade=none reason=awaiting_reply_window"]
+        assert hub.channel.sent == [
+            "Your words are waiting, and go in when the Session next takes a turn. "
+            "The Session may not treat this as your own confirmation."
+        ]
 
     def test_the_open_window_delivers_them_without_answering_again(self) -> None:
         """The receipt answers the words the user sent. The flush is not an answer."""

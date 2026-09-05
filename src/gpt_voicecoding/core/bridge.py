@@ -1067,6 +1067,10 @@ class BridgeCore:
         that is sitting there waiting for them, so the question is asked of the
         one component that can tell a re-keying from a death.
         """
+        # Read before the pass, because a Session it finds gone is marked ended
+        # by it: the row is still the only place its name and its classification
+        # are, and the line that announces it is written from that row.
+        before = {session.target: session for session in self._state.sessions.live()}
         gone: list[SessionTarget] = []
         for kind, adapter in self._agents.items():
             try:
@@ -1084,6 +1088,10 @@ class BridgeCore:
             # 0021 §8's fifth cause), and before the rows go, because the edits
             # are addressed to the ids those rows carry.
             await self._close_open_notices(target)
+            # **And a Session found gone is announced like any other ending**
+            # (ADR 0021 §9): a closed terminal is exactly the case the line
+            # exists for, and Core does not distinguish it from a crash.
+            await self._announce_ended(before.get(target))
             # Rows go with their Session (ADR 0021 §2): a reply to one of its
             # notices from here on takes the unknown-Anchor path.
             self.anchors.drop(target)
@@ -1247,10 +1255,6 @@ class BridgeCore:
         message already sent and obeys Duty alone (§8), while the ended line is
         an unbidden push like every other and rides the Message Switch (§9).
         """
-        # **Asked before the row is marked**, because `_spawned` asks `resolve`,
-        # and `resolve` refuses an ended Session before it ever reaches the
-        # question of whether it was a child.
-        spawned = self._spawned(event.target)
         ended: Session | None = None
         try:
             ended = self._state.sessions.mark_ended(event.target)
@@ -1260,14 +1264,28 @@ class BridgeCore:
         for outcome in self.relays.session_ended(event.target):
             await self._settle(outcome)
         await self._close_open_notices(event.target)
-        # **A Session nobody was told about is not announced as gone.** An
-        # unregistered target has no row to name it from, and a Child Process is
-        # seen and never spoken about (#79) — it got no Stop Notice either.
-        if ended is not None and not spawned:
-            await self._push(briefing.ended_line(ended))
+        await self._announce_ended(ended)
         # Rows go with their Session (ADR 0021 §2), and last: the edits above
         # are addressed to the ids these rows carry.
         self.anchors.drop(event.target)
+
+    async def _announce_ended(self, ended: Session | None) -> None:
+        """Say once that a Session is gone — wherever the end was seen (ADR 0021 §9).
+
+        Both paths come here: the lane's own `SessionEnded`, and the discovery
+        pass that finds a Session no longer on the roster. Core does not
+        distinguish exit, crash or closed terminal, so neither does this.
+
+        **A Session nobody was told about is not announced as gone.** An
+        unregistered target has no row to name it from, and a Child Process is
+        seen and never spoken *about* (#79) — it got no Stop Notice either, so
+        an ended line would be the first and last the user ever heard of it. The
+        row's own classification answers that, because `resolve` refuses an
+        ended Session before it reaches the question of whether it was a child.
+        """
+        if ended is None or not ended.child.is_main:
+            return
+        await self._push(briefing.ended_line(ended))
 
     async def _reply_window_changed(self, event: ReplyWindowChanged) -> None:
         """An adapter saw the window move between two discoveries. Land it on the state.
@@ -1378,16 +1396,23 @@ class BridgeCore:
             return ControlAnswer(NO_CONTROL_SURFACE, ok=False)
         return await self._control(found)
 
-    async def _run(self, action: Action, arguments: str = "", *, origin: str) -> None:
+    async def _run(self, action: Action, arguments: str = "", *, origin: str) -> bool:
         """A press that means a control-plane verb: run it at once and answer with its words.
 
         `verify`, `live` and the switch flip are the same actions typed as
         `/verify` and the rest would be, so they go through the same surface
         and come back in the same words — as a toast, when the press is still
         waiting for one (ADR 0021 §4). Neither answer is an Anchor.
+
+        Reports whether the action ran, because a caller may owe the user
+        something more when it did — and nothing at all when it did not
+        (`_flip_pick`, #266). The words are the same either way, and the answer
+        the surface gave is the one thing that tells them apart.
         """
         found = Classification(kind=InboundClass.CONTROL, command=str(action), text=arguments)
-        await self._reply((await self._answer_command(found)).text, origin=origin)
+        answer = await self._answer_command(found)
+        await self._reply(answer.text, origin=origin)
+        return answer.ok
 
     async def _reply_screen(self, screen: MenuScreen, origin: str) -> None:
         """Send one menu screen as the answer to what opened it, registering its row."""
@@ -1513,12 +1538,15 @@ class BridgeCore:
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
-        await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
+        flipped = await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
         # **And the screen is re-sent onto itself** (ADR 0021 §8), so every
-        # label shows the state it holds now. Only this screen and only after a
-        # flip made through it: a flip made anywhere else leaves the label
-        # stale, and a press on a stale label still means "flip" (§6).
-        await self._redraw_switches(self.anchors.sent_under(pressed_on))
+        # label shows the state it holds now. Only this screen, only after a
+        # flip made through it, and only when the flip actually happened: a flip
+        # made anywhere else leaves the label stale, a press on a stale label
+        # still means "flip" (§6), and a refused action changed no state for the
+        # labels to show.
+        if flipped:
+            await self._redraw_switches(self.anchors.sent_under(pressed_on))
 
     async def _redraw_switches(self, ids: tuple[str, ...]) -> None:
         """Re-send the switches brief onto the screen the press was made on.
@@ -1560,6 +1588,13 @@ class BridgeCore:
             await self._reply(str(refusal), origin=origin)
             return
         await self._settle(outcome)
+        # **Words that arrived are the answer, and they close the notice that
+        # asked** (ADR 0021 §8's first cause: answered from Telegram). Words
+        # that only queued answered nothing — the Session has not taken the turn
+        # they are waiting for, and the question is still the user's to answer
+        # from here.
+        if outcome.state is Lifecycle.DELIVERED:
+            await self._close_open_notices(found.target)
         # A receipt names the Session the words went to, so it is an Anchor: a
         # reply to it is more words for that Session (ADR 0021 §2). It offers
         # nothing to pick, and a numeral on it is refused.

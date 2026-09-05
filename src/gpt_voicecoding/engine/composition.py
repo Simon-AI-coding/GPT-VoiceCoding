@@ -51,7 +51,7 @@ from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.commands import CommandError, build_request, render
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.control_plane.server import ControlPlaneServer
-from gpt_voicecoding.core.bridge import BridgeCore
+from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer
 from gpt_voicecoding.core.events import EventQueue
 from gpt_voicecoding.core.instructions import ControlPlaneCli, InstructionContext
 from gpt_voicecoding.core.persistence import StateStore
@@ -200,7 +200,7 @@ class Engine:
         # time rather than captured before it exists.
         hub: dict[str, BridgeCore] = {}
 
-        async def control(found: Classification) -> str:
+        async def control(found: Classification) -> ControlAnswer:
             return await _answer_text(held["plane"], found)
 
         async def delegate(found: Classification) -> str:
@@ -385,13 +385,20 @@ class Engine:
                 _log.exception("a discovery pass raised")
 
 
-async def _answer_text(plane: ControlPlane, found: Classification) -> str:
-    """One inbound command, answered in words — the Companion Channel's surface."""
+async def _answer_text(plane: ControlPlane, found: Classification) -> ControlAnswer:
+    """One inbound command, answered in words — the Companion Channel's surface.
+
+    `ok` travels with the words because the words alone cannot be told apart:
+    a refusal is prose like any other answer, and Bridge Core anchors on one
+    and not the other (`ControlAnswer`). An unreadable command line never
+    reached the plane, so it is a refusal too.
+    """
     try:
         request = build_request(found.command, shlex.split(found.text))
     except (CommandError, ValueError) as unreadable:
-        return str(unreadable)
-    return render(await plane.handle(request))
+        return ControlAnswer(str(unreadable), ok=False)
+    reply = await plane.handle(request)
+    return ControlAnswer(render(reply), ok=reply.ok)
 
 
 def _refuse_a_page_the_wire_cannot_carry(

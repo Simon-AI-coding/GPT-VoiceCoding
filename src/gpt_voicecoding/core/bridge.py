@@ -147,6 +147,24 @@ _log = logging.getLogger(__name__)
 #: Answers an inbound command when no control-plane surface is wired to this hub.
 NO_CONTROL_SURFACE = "I recognised that command, but no control surface is wired up here"
 
+
+@dataclass(frozen=True, slots=True)
+class ControlAnswer:
+    """What the wired control surface said, and whether it was a refusal.
+
+    The words are what the user is told either way, so most callers use `text`
+    and nothing else. `ok` is the one fact that cannot be recovered from them:
+    a refusal reads as ordinary prose, and a path that registers an Anchor on
+    the answer has to know which of the two it got — **a refusal is never an
+    Anchor** (ADR 0021 §2, #263). The surface holds that fact already
+    (`Reply.ok`) and used to drop it on the way back, which is how the menu's
+    `history` choice came to anchor a Session to a refusal (#264 review).
+    """
+
+    text: str
+    ok: bool
+
+
 #: What `assistant` answers until the Assistant Conversation is built (#265).
 #: The verb is in the shared set now (ADR 0021 §6) so the command menu can name
 #: it and one parser accepts it; the conversation behind it is that issue's.
@@ -449,7 +467,7 @@ class BridgeCore:
         grammar: TextGrammar | None = None,
         clock: Clock = default_clock,
         stamp: Clock = wall_clock,
-        control: Callable[[Classification], Awaitable[str]] | None = None,
+        control: Callable[[Classification], Awaitable[ControlAnswer]] | None = None,
         delegate: Callable[[Classification], Awaitable[str]] | None = None,
         inventory: tuple[SeamLoad, ...] = (),
         instruction_context: InstructionContext | None = None,
@@ -1262,7 +1280,7 @@ class BridgeCore:
                 # from here so its row is registered (ADR 0021 §6, #264).
                 await self._reply_screen(await self._screen_for(found.command), event.origin)
             case InboundClass.CONTROL:
-                await self._reply(await self._answer_command(found), origin=event.origin)
+                await self._reply((await self._answer_command(found)).text, origin=event.origin)
             case InboundClass.MENU_PICK:
                 await self._menu_pick(found, origin=event.origin)
             case InboundClass.DELEGATION:
@@ -1295,9 +1313,15 @@ class BridgeCore:
             return await self.sessions_screen()
         return self.config_screen()
 
-    async def _answer_command(self, found: Classification) -> str:
-        """One control-plane command, answered in words by the surface wired to this hub."""
-        return await self._control(found) if self._control else NO_CONTROL_SURFACE
+    async def _answer_command(self, found: Classification) -> ControlAnswer:
+        """One control-plane command, answered by the surface wired to this hub.
+
+        A hub with no surface refuses in its own words: an answer, and not a
+        successful one — nothing ran.
+        """
+        if self._control is None:
+            return ControlAnswer(NO_CONTROL_SURFACE, ok=False)
+        return await self._control(found)
 
     async def _run(self, action: Action, arguments: str = "", *, origin: str) -> None:
         """A press that means a control-plane verb: run it at once and answer with its words.
@@ -1308,7 +1332,7 @@ class BridgeCore:
         waiting for one (ADR 0021 §4). Neither answer is an Anchor.
         """
         found = Classification(kind=InboundClass.CONTROL, command=str(action), text=arguments)
-        await self._reply(await self._answer_command(found), origin=origin)
+        await self._reply((await self._answer_command(found)).text, origin=origin)
 
     async def _reply_screen(self, screen: MenuScreen, origin: str) -> None:
         """Send one menu screen as the answer to what opened it, registering its row."""
@@ -1362,13 +1386,25 @@ class BridgeCore:
                 # The newest page, in the surface's own rendering; an Anchor of
                 # that Session with nothing to pick, so words replying to it
                 # are more words for the Session.
+                #
+                # **The page is the Anchor; a refusal is not** (#264 review).
+                # This is the one menu choice answered through the control
+                # surface rather than read here, so it is the one that can be
+                # handed a refusal, and it used to register a row on one.
+                # Words are not the harm — with no row they fall through to the
+                # newest Anchor and reach the Session anyway (ADR 0021 §2).
+                # What the row cost was a slot: each Session keeps its newest N
+                # (`anchor_rows_per_session`), so a failed read could evict a
+                # real Stop Notice from the table. A numeral gets the right
+                # hint of the two for the same reason.
                 found = Classification(
                     kind=InboundClass.CONTROL, command=str(Action.HISTORY), text=str(target)
                 )
+                answer = await self._answer_command(found)
                 await self._reply(
-                    await self._answer_command(found),
+                    answer.text,
                     origin=origin,
-                    anchor=Anchor(kind=AnchorKind.HISTORY, target=target),
+                    anchor=Anchor(kind=AnchorKind.HISTORY, target=target) if answer.ok else None,
                 )
             case MenuWord.SEND_MESSAGE:
                 await self._reply_screen(menu.prompt_screen(session), origin)

@@ -33,6 +33,7 @@ from gpt_voicecoding.core.bridge import (
     NO_DELEGATE_HANDLER,
     VOICE_QUIET_LINE,
     VOICE_SPEAKING_LINE,
+    ControlAnswer,
 )
 from gpt_voicecoding.core.briefing import (
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
@@ -1585,9 +1586,9 @@ class TestEverySendWritesOneRecord:
     def test_a_command_reaches_the_wired_control_surface(self) -> None:
         seen: list[Classification] = []
 
-        async def control(found: Classification) -> str:
+        async def control(found: Classification) -> ControlAnswer:
             seen.append(found)
-            return "duty is on"
+            return ControlAnswer("duty is on", ok=True)
 
         hub = Hub(control=control)
 
@@ -3438,12 +3439,16 @@ class TestEveryMenuScreenIsAnAnchor:
             options=tuple(Option(text=label) for label in labels),
         )
 
+    #: Whether the fake control surface answers or refuses. A refusal's words
+    #: read like any other answer, so this is what tells them apart.
+    control_ok = True
+
     def hub(self, **overrides: object) -> tuple[Hub, list[Classification]]:
         asked: list[Classification] = []
 
-        async def control(found: Classification) -> str:
+        async def control(found: Classification) -> ControlAnswer:
             asked.append(found)
-            return f"ran {found.command} {found.text}".strip()
+            return ControlAnswer(f"ran {found.command} {found.text}".strip(), ok=self.control_ok)
 
         overrides.setdefault("sessions", self.TWO)
         overrides.setdefault("window", ReplyWindow.OPEN)
@@ -3633,6 +3638,41 @@ class TestEveryMenuScreenIsAnAnchor:
         assert row.kind is AnchorKind.HISTORY
         assert row.target == CLAUDE
         assert row.options == ()
+
+    def test_a_refused_history_is_not_an_anchor(self) -> None:
+        """A refusal is never an Anchor (ADR 0021 §2, #264 review).
+
+        `history` is the one menu choice answered through the control surface
+        instead of read here, so it is the one that can be handed a refusal —
+        a Session read that failed, a lane that is down. Anchoring that would
+        make the next words the user typed a Relay into the Session, answering
+        something they never saw.
+        """
+        self.control_ok = False
+        hub, _ = self.greeted()
+
+        hub.emit(InboundText(text="2", in_reply_to="2", origin="callback:9"))
+
+        assert hub.channel.sent[-1] == "ran history claude:def:100"
+        assert hub.core.anchors.lookup("3") is None
+
+    def test_a_numeral_on_a_refused_history_gets_the_unknown_anchor_hint(self) -> None:
+        """With no row there, the numeral is refused as an unknown Anchor (#263).
+
+        Not the picks-nothing hint a registered page would have given: the
+        refusal is not a message with options, and it is not in the table at
+        all. Words are a different matter — with no row they fall through to
+        the newest Anchor, which is why the harm of anchoring a refusal is the
+        row it evicts and the hint it changes, not a misdirected relay.
+        """
+        self.control_ok = False
+        hub, _ = self.greeted()
+        hub.emit(InboundText(text="2", in_reply_to="2"))
+
+        hub.emit(InboundText(text="1", in_reply_to="3"))
+
+        assert hub.channel.sent[-1] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert [(call.target, call.text) for call in hub.agent.calls] == []
 
     def test_words_replying_to_the_history_page_reach_that_session(self) -> None:
         hub, _ = self.greeted()

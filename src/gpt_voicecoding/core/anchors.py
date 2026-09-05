@@ -226,6 +226,20 @@ class AnchorTable:
             if row is not None:
                 row.handled = True
 
+    def sent_under(self, message_id: str) -> tuple[str, ...]:
+        """Every id the message with this id landed under — its whole row.
+
+        What an edit addressed to a message the user just acted on needs: a
+        split send landed under several ids, and the row is edited whole or not
+        at all. Empty for an id this table no longer holds. With no id — a
+        numeral typed rather than pressed, resolved by the newest-Anchor rule —
+        the newest row's ids, which is the message that rule picked.
+        """
+        row = (
+            self._by_id.get(message_id) if message_id else (self._rows[-1] if self._rows else None)
+        )
+        return () if row is None else row.ids
+
     def newest(self) -> Anchor | None:
         """The last Anchor sent — what a message that replies to nothing is for."""
         return self._rows[-1].anchor if self._rows else None

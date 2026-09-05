@@ -3760,8 +3760,11 @@ class TestEveryMenuScreenIsAnAnchor:
         hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
 
         assert [(found.command, found.text) for found in asked] == [("switch", "duty off")]
-        assert hub.channel.sent[-1] == "ran switch duty off"
-        assert hub.channel.origins[-1] == "callback:9"
+        # The flip answers first, as the toast on the press; the screen is then
+        # re-sent onto itself so its labels show the state now (#266).
+        assert hub.channel.sent[-2] == "ran switch duty off"
+        assert hub.channel.origins[-2] == "callback:9"
+        assert hub.channel.revisions[-1] == ("2",)
 
     def test_a_stale_switch_label_still_means_flip_from_the_state_now(self) -> None:
         """Duty was flipped off elsewhere after the screen went out: the press turns it on."""
@@ -4141,3 +4144,91 @@ class TestAClosedNoticeIsEditedInPlace:
 
         assert "message to edit not found" in caplog.text
         assert hub.channel.revisions.count(("1",)) == 1
+
+
+class TestTheSwitchesScreenIsEditedAfterItsOwnFlip:
+    """ADR 0021 §8 (#266): after a flip made *through* the switches screen, Core
+    re-sends the switches brief onto the same Anchor so each label shows the new
+    state. The roster and greeting screens are never edited, and a flip made
+    anywhere else edits nothing — that label goes stale, and a later press on it
+    still means "flip" (§6).
+
+    The edit is the answer to a control-plane action the user just took, so it
+    passes every switch, Duty included (ADR 0002): otherwise the user who flips
+    Duty off from the phone would never see the flip land.
+    """
+
+    COMMANDS = frozenset({"status", "sessions", "config", "switch"})
+
+    def hub(self, **overrides: object) -> Hub:
+        """A hub whose control surface really flips the board, as the real one does."""
+        hub: Hub | None = None
+
+        async def control(found: Classification) -> ControlAnswer:
+            assert hub is not None
+            name, _, state = found.text.partition(" ")
+            await hub.core.flip_switch(name, state == "on")
+            return ControlAnswer(f"ran {found.command} {found.text}".strip(), ok=True)
+
+        overrides.setdefault("sessions", ((CODEX, "port the log"),))
+        hub = Hub(voice=False, control=control, **overrides)  # type: ignore[arg-type]
+        hub.core.router._grammar = hub.core.router._grammar.__class__(  # noqa: SLF001
+            control_commands=self.COMMANDS
+        )
+        return hub
+
+    @staticmethod
+    def screen(hub: Hub) -> MenuNotice:
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, MenuNotice)
+        return notice
+
+    def switches(self, hub: Hub) -> None:
+        """Open the switch screen through the config screen, as the menu does."""
+        hub.emit(InboundText(text="/config"))
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+    def test_a_flip_through_the_screen_re_sends_it_onto_the_same_anchor(self) -> None:
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
+
+        assert hub.channel.revisions[-1] == ("2",)
+        assert "duty: off" in self.screen(hub).options
+
+    def test_the_re_sent_screen_passes_every_switch_duty_included(self) -> None:
+        """Or the user who flips Duty off from the phone never sees the flip land."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert hub.state.switches.is_set("duty") is False
+        assert hub.channel.revisions[-1] == ("2",)
+        assert "duty: off" in self.screen(hub).options
+
+    def test_the_screen_is_not_registered_again_and_stays_where_it_was(self) -> None:
+        """A revised row is not re-registered (ADR 0021 §8), so a later press still lands."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert hub.state.switches.is_set("duty") is True
+        assert len([row for row in hub.channel.revisions if row]) == 2
+
+    def test_a_flip_made_anywhere_else_edits_nothing(self) -> None:
+        """The label goes stale, and a later press on it still means flip (ADR 0021 §6)."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="/switch duty off"))
+
+        assert hub.channel.revisions[-1] == ()
+
+    def test_a_press_on_the_config_screen_edits_nothing(self) -> None:
+        """Only the switches screen is edited: the config screen offers no state to go stale."""
+        hub = self.hub()
+        hub.emit(InboundText(text="/config"))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.channel.revisions == [(), ()]

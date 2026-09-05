@@ -1331,7 +1331,7 @@ class BridgeCore:
             case InboundClass.CONTROL:
                 await self._reply((await self._answer_command(found)).text, origin=event.origin)
             case InboundClass.MENU_PICK:
-                await self._menu_pick(found, origin=event.origin)
+                await self._menu_pick(found, origin=event.origin, pressed_on=event.in_reply_to)
             case InboundClass.DELEGATION:
                 # Not an Anchor: a top-level `>` is a one-shot Delegated Turn with
                 # no Session context (ADR 0021 §3), so its answer names no target
@@ -1387,7 +1387,9 @@ class BridgeCore:
         """Send one menu screen as the answer to what opened it, registering its row."""
         await self._reply(screen.text, origin=origin, notice=screen.notice, anchor=screen.anchor)
 
-    async def _menu_pick(self, found: Classification, *, origin: str = "") -> None:
+    async def _menu_pick(
+        self, found: Classification, *, origin: str = "", pressed_on: str = ""
+    ) -> None:
         """A numeral on a menu screen: what the row says that position stands for (#264).
 
         Read off the row's `picks`, never the label's text (ADR 0021 §6). Which
@@ -1406,7 +1408,7 @@ class BridgeCore:
             case Screen.CONFIG:
                 await self._config_pick(pick, origin=origin)
             case Screen.SWITCHES:
-                await self._flip_pick(str(pick), origin=origin)
+                await self._flip_pick(str(pick), origin=origin, pressed_on=pressed_on)
             case SessionTarget() as target:
                 await self._session_pick(target, pick, origin=origin)
             case _:  # an Assistant Conversation's row (#265) offers nothing to pick
@@ -1492,7 +1494,7 @@ class BridgeCore:
             case _:
                 await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
 
-    async def _flip_pick(self, name: str, *, origin: str) -> None:
+    async def _flip_pick(self, name: str, *, origin: str, pressed_on: str = "") -> None:
         """A press on a switch label means flip — against the board as it stands now.
 
         The label may be stale: flipped elsewhere since the screen was sent,
@@ -1506,6 +1508,29 @@ class BridgeCore:
             await self._reply(str(refusal), origin=origin)
             return
         await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
+        # **And the screen is re-sent onto itself** (ADR 0021 §8), so every
+        # label shows the state it holds now. Only this screen and only after a
+        # flip made through it: a flip made anywhere else leaves the label
+        # stale, and a press on a stale label still means "flip" (§6).
+        await self._redraw_switches(self.anchors.sent_under(pressed_on))
+
+    async def _redraw_switches(self, ids: tuple[str, ...]) -> None:
+        """Re-send the switches brief onto the screen the press was made on.
+
+        **Past every switch, Duty included** (ADR 0002, ADR 0021 §8). This is
+        not a correction the system decided to make: it is the answer to a
+        control-plane action the user took a moment ago, and the control plane
+        is never gated. Gating it on Duty would produce the indefensible case —
+        the user flips Duty off from the phone, and the screen they flipped it
+        on never shows that it landed.
+
+        A row this table no longer holds is nothing to edit, and the send is
+        skipped rather than addressed to nobody.
+        """
+        if not ids:
+            return
+        screen = self.switches_screen()
+        await self._send(screen.text, revises=ids, notice=screen.notice)
 
     async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
         """Carry a typed relay in, and answer it with the receipt as one sentence.

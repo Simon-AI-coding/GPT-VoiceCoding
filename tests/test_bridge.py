@@ -4077,6 +4077,29 @@ class TestAClosedNoticeIsEditedInPlace:
 
         assert hub.channel.revisions == [()]
 
+    def test_a_permission_handed_back_to_the_terminal_closes_its_notice(self) -> None:
+        """`ask`, or the hook ending without a verdict: the dialog is the keyboard's
+        again, and the window shuts behind it (ADR 0021 §8)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-1] == ("1",)
+        assert self.revised(hub).state_word == "handled"
+        assert self.revised(hub).options == ()
+
+    def test_the_edit_leaves_the_row_itself_exactly_as_it_was(self) -> None:
+        """The message changes; the row behind it does not (ADR 0021 §8). What a
+        numeral on it then means is the roster's answer, unchanged by the edit."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        before = hub.core.anchors.lookup("1")
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.core.anchors.lookup("1") == before
+
     def test_duty_off_leaves_the_row_open_for_the_next_fact_to_close(self) -> None:
         """A refusal is not a failed attempt: nothing was spent, so nothing is used up."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)

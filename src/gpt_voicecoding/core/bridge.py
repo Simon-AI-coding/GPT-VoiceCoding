@@ -1201,15 +1201,38 @@ class BridgeCore:
         )
 
     async def _session_ended(self, event: SessionEnded) -> None:
+        """A Session is gone: close what it left open, say so once, forget its rows.
+
+        **The order is fixed by the ids** (ADR 0021 §9). The edits name the
+        message ids of this Session's own rows, so they go while the table still
+        holds them; the ended line follows, so the chat reads in the order the
+        facts happened; the rows go last, and a reply to any of them from then
+        on takes the unknown-Anchor path.
+
+        Which of the three the user actually sees is the switches' answer and
+        differs between them on purpose: closing a notice is a correction to a
+        message already sent and obeys Duty alone (§8), while the ended line is
+        an unbidden push like every other and rides the Message Switch (§9).
+        """
+        # **Asked before the row is marked**, because `_spawned` asks `resolve`,
+        # and `resolve` refuses an ended Session before it ever reaches the
+        # question of whether it was a child.
+        spawned = self._spawned(event.target)
+        ended: Session | None = None
         try:
-            self._state.sessions.mark_ended(event.target)
+            ended = self._state.sessions.mark_ended(event.target)
         except BridgeCoreError:
             _log.info("a Session ended that was never registered: %s", event.target)
         self._state.persist()
         for outcome in self.relays.session_ended(event.target):
             await self._settle(outcome)
-        # Rows go with their Session (ADR 0021 §2). Editing its open notices to
-        # `handled` and pushing the ended line come before this, and are #266's.
+        # **A Session nobody was told about is not announced as gone.** An
+        # unregistered target has no row to name it from, and a Child Process is
+        # seen and never spoken about (#79) — it got no Stop Notice either.
+        if ended is not None and not spawned:
+            await self._push(briefing.ended_line(ended))
+        # Rows go with their Session (ADR 0021 §2), and last: the edits above
+        # are addressed to the ids these rows carry.
         self.anchors.drop(event.target)
 
     async def _reply_window_changed(self, event: ReplyWindowChanged) -> None:

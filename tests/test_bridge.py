@@ -3493,12 +3493,14 @@ class TestEveryMenuScreenIsAnAnchor:
         assert hub.core.anchors.lookup("1") is None
 
     def test_sessions_lists_live_sessions_only(self) -> None:
+        """The screen is `2`: the ended line took `1` and registered nothing (#266)."""
         hub, _ = self.hub()
         hub.emit(SessionEnded(target=CLAUDE))
 
         hub.emit(InboundText(text="/sessions"))
 
-        assert self.anchor(hub, "1").picks == (CODEX,)
+        assert hub.core.anchors.lookup("1") is None
+        assert self.anchor(hub, "2").picks == (CODEX,)
 
     def test_a_press_on_the_roster_greets_that_session(self) -> None:
         hub, _ = self.hub()
@@ -3847,3 +3849,82 @@ class TestEveryMenuScreenIsAnAnchor:
             "The attempt did not arrive; your words wait for the Session's next turn."
         )
         assert hub.channel.origins[-1] == "callback:9"
+
+
+class TestASessionsEndIsAnnouncedInOneLine:
+    """ADR 0021 §9 (#266): on `SessionEnded` from any cause the user is told, in one
+    line, that the Session is gone — no question, no fold, no buttons, and not an
+    Anchor, because a reply to it names a Session that has left the roster.
+
+    Voice is off throughout, so every send is on the one surface.
+    """
+
+    TWO = ((CODEX, "port the log"), (CLAUDE, "build the shell"))
+
+    def test_a_session_that_ends_is_announced_in_one_line(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent[-1] == "⚫ ended · claude · GPT-VoiceCoding · build the shell"
+
+    def test_the_ended_line_is_text_and_never_an_anchor(self) -> None:
+        """It names a Session that is gone: a reply to it takes the unknown-Anchor path."""
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.notices[-1] is None
+        assert len(hub.core.anchors) == 0
+
+    def test_the_ended_line_rides_the_message_switch_alone(self) -> None:
+        """An unbidden push like every other (ADR 0021 §9): no new Feature Switch."""
+        hub = Hub(voice=False, message=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == []
+
+    def test_a_session_that_never_stopped_is_still_announced_as_ended(self) -> None:
+        """Away from the Mac, "it is gone" is the fact the user most needs."""
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CODEX))
+
+        assert hub.channel.sent == ["⚫ ended · codex · GPT-VoiceCoding · port the log"]
+
+    def test_many_sessions_ending_together_are_one_line_each(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE), SessionEnded(target=CODEX))
+
+        assert hub.channel.sent == [
+            "⚫ ended · claude · GPT-VoiceCoding · build the shell",
+            "⚫ ended · codex · GPT-VoiceCoding · port the log",
+        ]
+
+    def test_a_child_process_that_ends_is_never_spoken_about(self) -> None:
+        """Seen, never spoken to, and never spoken about (#79): it got no Stop Notice either."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        child = SessionTarget(agent=AgentKind.CODEX, session_id="a891a18f447827175")
+        hub.state.sessions.register(
+            Session(
+                target=child,
+                workspace=Path("/tmp/workspace"),
+                first_seen=0.0,
+                state=SessionState.RUNNING,
+                child=ChildClassification(kind=ChildKind.CHILD, parent=CODEX),
+            )
+        )
+
+        hub.emit(SessionEnded(target=child))
+
+        assert hub.channel.sent == []
+
+    def test_a_session_the_roster_never_held_is_not_announced_as_ended(self) -> None:
+        """There is no row to name it from, and nobody was told it started."""
+        hub = Hub(voice=False, sessions=((CODEX, "port the log"),))
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == []

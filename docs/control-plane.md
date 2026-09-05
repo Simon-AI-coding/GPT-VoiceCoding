@@ -108,7 +108,8 @@ screen is a silent wrong number, which is what the version gate exists to
 prevent.
 
 Protocol 9 adds `sessions`, `config` and `assistant` — the three verbs the
-Companion Channel's command menu opens screens with (ADR 0021 §6, #264). The
+Companion Channel's command menu opens screens with (ADR 0021 §6 §7, #264,
+#265). The
 menu is four entries, `/assistant`, `/sessions`, `/status`, `/config`, and it
 advertises only what the shared parser accepts: the entries and the one
 sentence shown beside each live in `seams/control_plane.py::MENU`, and the
@@ -548,9 +549,28 @@ and is not a screen.
 
 ### `assistant`
 
-Payload: none. Opens an Assistant Conversation (ADR 0021 §7). Until #265 builds
-it the hub refuses, `refused`, in its own words; the verb is in the set now so
-the command menu can name it and one parser accepts it.
+Payload: none. Data is a screen, the same shape `sessions` and `config` answer
+with: `{"text": "...", "options": []}`.
+
+Opens an Assistant Conversation (ADR 0021 §7): the engine starts a fresh coding
+thread with the delegated instructions and `[delegate] model`, and answers with
+the fixed opening line. **No turn is run** — the line is the engine's own words,
+so a conversation costs nothing until it is replied to. There are never options:
+a conversation is answered in words.
+
+The conversation is continued only by **replying** to one of its messages on the
+Companion Channel, so a caller reached through this socket opens a thread it has
+no way to continue: nothing sent here is an Anchor. `bridgectl assistant` is a
+way to prove the seam answers, not a way to hold a conversation.
+
+The engine refuses, `refused`, in its own words when it has no assistant behind
+it or the coding thread could not be started. How many conversations stay
+answerable at once is `[policy] assistant_conversations`, three by default; the
+oldest is dropped whole when one past that is opened. A reply to a dropped one
+is a reply to an Anchor the engine no longer holds, so it is words that replied
+to nothing and goes to the newest Anchor, whichever that now is. The
+start-again hint is for the other case: a thread the coding model itself no
+longer has.
 
 ## The command line
 
@@ -620,6 +640,7 @@ silence_end_seconds     = 60
 cool_down_seconds       = 30
 speech_settle_seconds   = 5
 anchor_rows_per_session = 100         # Anchors the Companion Channel keeps per Session (ADR 0021 §2)
+assistant_conversations = 3           # Assistant Conversations it keeps at once (ADR 0021 §7)
 
 [log]                               # required: three numbers with no default
 max_bytes                     = 8388608

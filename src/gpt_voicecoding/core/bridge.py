@@ -165,17 +165,31 @@ class ControlAnswer:
     ok: bool
 
 
-#: What `assistant` answers until the Assistant Conversation is built (#265).
-#: The verb is in the shared set now (ADR 0021 §6) so the command menu can name
-#: it and one parser accepts it; the conversation behind it is that issue's.
-ASSISTANT_NOT_BUILT = "the assistant is not on this engine yet"
+@dataclass(frozen=True, slots=True)
+class DelegatedAnswer:
+    """What one Delegated Turn came back with, and the one fact its words hide.
 
-#: The two menu verbs this hub answers with a screen of its own (ADR 0021 §6,
-#: #264) rather than through the control-plane surface: a screen is an Anchor,
-#: and the row is registered inside the one send site, which the surface's
-#: text answer cannot reach. The same two verbs answer `bridgectl` in text
-#: through `sessions_screen` / `config_screen`, so there is one screen apiece.
-SCREEN_VERBS: frozenset[str] = frozenset({str(Action.SESSIONS), str(Action.CONFIG)})
+    `text` is what the user is shown either way — the coding model's answer, or
+    the failure's own words, a busy thread's refusal included (ADR 0021 §7).
+    `thread_gone` is the one outcome that is not words to show: the conversation
+    itself has ended, and Bridge Core answers that with its own fixed hint and
+    anchors nothing. Shaped after `ControlAnswer` for the same reason it has an
+    `ok`: a fact that cannot be recovered from prose has to travel beside it.
+    """
+
+    text: str = ""
+    thread_gone: bool = False
+
+
+#: The three menu verbs this hub answers with a screen of its own (ADR 0021 §6
+#: §7, #264, #265) rather than through the control-plane surface: a screen is an
+#: Anchor, and the row is registered inside the one send site, which the
+#: surface's text answer cannot reach. The same three answer `bridgectl` in text
+#: through `sessions_screen` / `config_screen` / `open_assistant`, so there is
+#: one screen apiece.
+SCREEN_VERBS: frozenset[str] = frozenset(
+    {str(Action.SESSIONS), str(Action.CONFIG), str(Action.ASSISTANT)}
+)
 
 #: Answers an inbound delegation when no Delegated Turn handler is wired.
 NO_DELEGATE_HANDLER = "I can't take a delegated turn right now — nothing is wired to answer it"
@@ -460,7 +474,8 @@ class BridgeCore:
         clock: Clock = default_clock,
         stamp: Clock = wall_clock,
         control: Callable[[Classification], Awaitable[ControlAnswer]] | None = None,
-        delegate: Callable[[Classification], Awaitable[str]] | None = None,
+        delegate: Callable[[Classification], Awaitable[DelegatedAnswer]] | None = None,
+        open_conversation: Callable[[], Awaitable[str]] | None = None,
         inventory: tuple[SeamLoad, ...] = (),
         instruction_context: InstructionContext | None = None,
     ) -> None:
@@ -472,6 +487,12 @@ class BridgeCore:
         self._policy = policy or CorePolicy()
         self._control = control
         self._delegate = delegate
+        #: Starts one Assistant Conversation's thread and names it (ADR 0021
+        #: §7). None is an engine with no assistant, which says so and opens
+        #: nothing. Bridge Core keeps the id it returns on the Anchor row and
+        #: holds no list of its own: the table is the memory, and it is the
+        #: thing that already forgets on a restart.
+        self._open_conversation = open_conversation
         self._inventory = inventory
         #: Both generated instruction sets, made once from facts only the
         #: composition root knows — where the control-plane CLI is, and which
@@ -507,7 +528,10 @@ class BridgeCore:
         #: after every restart. Held here beside the router that reads it and
         #: the send path that fills it, and deliberately **not** on
         #: `BridgeState`, whose one job is deciding what is durable.
-        self.anchors = AnchorTable(rows_per_target=self._policy.anchor_rows_per_session)
+        self.anchors = AnchorTable(
+            rows_per_target=self._policy.anchor_rows_per_session,
+            conversations=self._policy.assistant_conversations,
+        )
         self.router = InboundRouter(
             sessions=state.sessions,
             grammar=grammar,
@@ -927,9 +951,28 @@ class BridgeCore:
         """The switch screen: one label per switch carrying its state now."""
         return menu.switches_screen(self._state.switches)
 
-    async def open_assistant(self) -> str:
-        """`assistant`: refused until the Assistant Conversation is built (#265)."""
-        raise BridgeCoreError(ASSISTANT_NOT_BUILT)
+    async def open_assistant(self) -> MenuScreen:
+        """`assistant`: open an Assistant Conversation and answer with its opening line.
+
+        ADR 0021 §7. A thread is started with the delegated instructions and the
+        `[delegate] model`, and the fixed opening line goes back as an Anchor
+        carrying that thread id. **No turn is run**: the line is Core's own
+        words, so a conversation costs nothing until the user replies to it.
+
+        An engine with no assistant wired, or one whose Call seam could not
+        start a thread, refuses in Core's own words rather than the wire's —
+        what the user needs is the fact, not the failure — and anchors nothing.
+        """
+        if self._open_conversation is None:
+            raise BridgeCoreError(briefing.ASSISTANT_UNAVAILABLE_HINT)
+        try:
+            thread_id = await self._open_conversation()
+        except Exception as refusal:  # noqa: BLE001 - any lane failure is one fact to the user
+            _log.warning("an Assistant Conversation could not be opened", exc_info=refusal)
+            raise BridgeCoreError(briefing.ASSISTANT_UNAVAILABLE_HINT) from refusal
+        if not thread_id:
+            raise BridgeCoreError(briefing.ASSISTANT_UNAVAILABLE_HINT)
+        return menu.assistant_screen(thread_id)
 
     async def verify(self) -> tuple[SeamVerification, ...]:
         """What configuration named, against what this engine actually loaded.
@@ -1276,13 +1319,7 @@ class BridgeCore:
             case InboundClass.MENU_PICK:
                 await self._menu_pick(found, origin=event.origin)
             case InboundClass.DELEGATION:
-                # Not an Anchor: a top-level `>` is a one-shot Delegated Turn with
-                # no Session context (ADR 0021 §3), so its answer names no target
-                # this hub can see. #265's Assistant Conversation answers do.
-                await self._reply(
-                    await self._delegate(found) if self._delegate else NO_DELEGATE_HANDLER,
-                    origin=event.origin,
-                )
+                await self._delegated_turn(found, origin=event.origin)
             case InboundClass.ANSWER_RELAY:
                 await self._relay_inbound(found, origin=event.origin)
             case InboundClass.APPROVAL_RELAY:
@@ -1300,10 +1337,75 @@ class BridgeCore:
             _log.info("handled inbound Companion Channel message kind=%s", found.kind)
 
     async def _screen_for(self, command: str) -> MenuScreen:
-        """The screen one of `SCREEN_VERBS` opens."""
+        """The screen one of `SCREEN_VERBS` opens, or a refusal in its own words.
+
+        Only the assistant's can refuse — it is the one screen whose making
+        reaches a seam — and a refusal is text and never an Anchor (ADR 0021 §2).
+        """
         if command == str(Action.SESSIONS):
             return await self.sessions_screen()
+        if command == str(Action.ASSISTANT):
+            try:
+                return await self.open_assistant()
+            except BridgeCoreError as refusal:
+                return MenuScreen(text=str(refusal))
         return self.config_screen()
+
+    async def _delegated_turn(self, found: Classification, *, origin: str) -> None:
+        """One turn handed to a coding model: the top-level `>`, or a conversation's.
+
+        **The two differ only in what the answer is.** A `>` is one shot with no
+        Session context and no thread to continue, so its answer names no target
+        this hub can see and registers no row (ADR 0021 §3). A turn on an
+        Assistant Conversation's thread answers *as* that conversation: the
+        answer is an Anchor of the same thread, so a reply to it continues the
+        conversation, and a split answer is an Anchor in every part of itself,
+        which the send site does by entering the row under every id it landed on.
+
+        **The answer is whatever came back, including a refusal.** A busy thread
+        meets the coding model's own refusal of a second turn and those words are
+        the answer — nothing is queued (ADR 0021 §7). The one outcome that is not
+        words is a thread that cannot be resumed: the conversation has ended,
+        so Core says its own fixed hint, drops the conversation's rows and
+        anchors nothing, and a reply to the hint is words with an unknown Anchor.
+
+        **A second reply cannot meet a busy thread from this surface.** The hub
+        handles one message at a time (`engine/composition.py::_dispatching`),
+        so a reply typed while a turn is running waits and is answered after it
+        ends. The coding model's own refusal of a second turn is still what
+        comes back as the answer if two surfaces ever do reach one thread at
+        once, and nothing is queued on the thread either way.
+
+        Legacy (ADR 0010): `legacy@1d32845` has no assistant of any kind — no
+        model the user talks to, and no delegated turn. This is **adapted** from
+        this generation's own Delegated Turn
+        (`adapters/call/realtime/adapter.py::delegate`), which is unchanged
+        under it: the same instructions, the same action set, the same model
+        setting. What is new is that the thread it runs on can be named, kept,
+        and resumed (ADR 0021 §7).
+        """
+        if self._delegate is None:
+            await self._reply(NO_DELEGATE_HANDLER, origin=origin)
+            return
+        answer = await self._delegate(found)
+        if not found.thread_id:
+            await self._reply(answer.text, origin=origin)
+            return
+        if answer.thread_gone:
+            # **The rows go with the conversation** (`AnchorTable.drop`'s own
+            # case: "a thread that ended"). Left in place they would still be
+            # the newest Anchor, so the next thing typed in the chat — meant
+            # for a Session — would be classified as a turn on a thread that is
+            # gone, and answered with this hint again, and again.
+            self.anchors.drop(found.thread_id)
+            await self._reply(briefing.ASSISTANT_CONVERSATION_GONE_HINT, origin=origin)
+            return
+        await self._reply(
+            answer.text,
+            origin=origin,
+            anchor=menu.assistant_answer(found.thread_id),
+            reply_bar=briefing.ASSISTANT_REPLY_PLACEHOLDER,
+        )
 
     async def _answer_command(self, found: Classification) -> ControlAnswer:
         """One control-plane command, answered by the surface wired to this hub.
@@ -1328,7 +1430,13 @@ class BridgeCore:
 
     async def _reply_screen(self, screen: MenuScreen, origin: str) -> None:
         """Send one menu screen as the answer to what opened it, registering its row."""
-        await self._reply(screen.text, origin=origin, notice=screen.notice, anchor=screen.anchor)
+        await self._reply(
+            screen.text,
+            origin=origin,
+            notice=screen.notice,
+            anchor=screen.anchor,
+            reply_bar=screen.reply_bar,
+        )
 
     async def _menu_pick(self, found: Classification, *, origin: str = "") -> None:
         """A numeral on a menu screen: what the row says that position stands for (#264).
@@ -1352,7 +1460,7 @@ class BridgeCore:
                 await self._flip_pick(str(pick), origin=origin)
             case SessionTarget() as target:
                 await self._session_pick(target, pick, origin=origin)
-            case _:  # an Assistant Conversation's row (#265) offers nothing to pick
+            case _:  # a target with no screen behind it: nothing to pick by number
                 await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
 
     async def _greet(self, target: SessionTarget, *, origin: str) -> None:
@@ -1649,6 +1757,7 @@ class BridgeCore:
         origin: str = "",
         notice: Notice | None = None,
         anchor: Anchor | None = None,
+        reply_bar: str = "",
     ) -> None:
         """Answer text the user sent. **Never gated** — a reply is not a push.
 
@@ -1676,7 +1785,9 @@ class BridgeCore:
         """
         if not text:
             return
-        receipt = await self._send(text, origin=origin, notice=notice, anchor=anchor)
+        receipt = await self._send(
+            text, origin=origin, notice=notice, anchor=anchor, reply_bar=reply_bar
+        )
         if receipt.is_delivered:
             return
         _log.warning(
@@ -1692,6 +1803,7 @@ class BridgeCore:
         origin: str = "",
         notice: Notice | None = None,
         anchor: Anchor | None = None,
+        reply_bar: str = "",
     ) -> ChannelReceipt:
         """One Companion Channel send, the one record every send writes — and its Anchor.
 
@@ -1722,12 +1834,14 @@ class BridgeCore:
         empty for an unbidden push. `notice` is the structured brief the text
         renders, for a push that is one (ADR 0021 §5) and for a reply that is
         a menu screen or a re-sent brief (§6); a receipt or a refusal carries
-        none. Nothing here revises: editing a notice in place (ADR 0021 §8) is
-        #266's.
+        none. `reply_bar` is Core's placeholder words for a message that asks
+        for words back — the `Say to <name>:` prompt, an Assistant
+        Conversation's messages — and a courtesy, never the routing (§7).
+        Nothing here revises: editing a notice in place (ADR 0021 §8) is #266's.
         """
         request_id = new_request_id()
         receipt = await self._channel.send(
-            text, request_id=request_id, origin=origin, notice=notice
+            text, request_id=request_id, origin=origin, notice=notice, reply_bar=reply_bar
         )
         _log.info(
             "sent Companion Channel message request=%s outcome=%s message_ids=%s",

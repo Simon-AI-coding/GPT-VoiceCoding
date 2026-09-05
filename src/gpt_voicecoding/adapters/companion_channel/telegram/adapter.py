@@ -109,7 +109,12 @@ from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     MESSAGE_LIMIT_UTF16_UNITS,
     TelegramSettings,
 )
-from gpt_voicecoding.seams.companion_channel import ChannelReceipt, InboundText, Notice
+from gpt_voicecoding.seams.companion_channel import (
+    PLACEHOLDER_LIMIT,
+    ChannelReceipt,
+    InboundText,
+    Notice,
+)
 from gpt_voicecoding.seams.control_plane import MENU
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
@@ -275,6 +280,7 @@ class TelegramCompanionChannel:
         origin: str = "",
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
+        reply_bar: str = "",
     ) -> ChannelReceipt:
         """Push one message, in as many parts as the API's cap requires.
 
@@ -301,20 +307,28 @@ class TelegramCompanionChannel:
         not sent: it is the same words in the shape a surface with no layout
         prints. `split_message` is never reached by a notice.
 
-        Three variations, all decided by the caller's arguments and none by
+        **A reply bar rides the last part** (ADR 0021 §7). `reply_bar` is Core's
+        placeholder words; they become a `ForceReply` on the final `sendMessage`
+        of the send, because that is the message the bar sits under — put on an
+        earlier part it would be cancelled by the next one. A notice is one
+        part, so for a notice the last part is the only part.
+
+        Four variations, all decided by the caller's arguments and none by
         anything this adapter infers: `revises` names messages to edit in place
         rather than send (`_revise`); an `origin` naming an unanswered press
         makes a short reply a toast (`_toast`) — never a notice, which clears
-        the press and goes as a message; `notice` chooses the layout. Everything
-        else — a chat's origin, an empty one — is an ordinary message to the one
-        chat.
+        the press and goes as a message; `notice` chooses the layout;
+        `reply_bar` opens the reply bar. Everything else — a chat's origin, an
+        empty one — is an ordinary message to the one chat.
 
         Nothing is queued here. An unreachable network is a classified failure
         returned at once — the engine's loop is never held. Bridge Core decides
         whether a later outlet transition should reconcile the current Session
         state; this adapter never replays the notice object.
         """
-        parts = _parts(text, notice, label_width=self._settings.button_label_width)
+        parts = _parts(
+            text, notice, label_width=self._settings.button_label_width, reply_bar=reply_bar
+        )
         if revises:
             return await self._revise(parts, request_id=request_id, revises=revises)
         if not parts:
@@ -741,16 +755,49 @@ class TelegramCompanionChannel:
         return await answer
 
 
-def _parts(text: str, notice: Notice | None, *, label_width: int) -> tuple[dict[str, object], ...]:
+def _parts(
+    text: str, notice: Notice | None, *, label_width: int, reply_bar: str = ""
+) -> tuple[dict[str, object], ...]:
     """What goes on the wire, as `sendMessage` bodies without the chat: one per part.
 
     A notice is laid out and is one part — its keyboard, when it carries
     labels, is part of that body; anything else is the text, cut to the cap
     into as many parts as it needs (`split_message`).
+
+    `reply_bar` becomes a `ForceReply` on the **last** part, and never replaces
+    a keyboard the layout already put there: a message cannot carry both, and
+    the buttons are the thing a numeral picks from, while the bar is only a
+    courtesy (ADR 0021 §7). The placeholder is Core's words, inside the seam's
+    bound by the seam's own guard.
     """
     if notice is not None:
-        return (lay_out(notice, label_width=label_width).payload(),)
-    return tuple({"text": part} for part in split_message(text))
+        parts = (lay_out(notice, label_width=label_width).payload(),)
+    else:
+        parts = tuple({"text": part} for part in split_message(text))
+    if not reply_bar or not parts:
+        return parts
+    if len(reply_bar) > PLACEHOLDER_LIMIT:
+        # **The message is worth more than the courtesy.** Telegram refuses a
+        # `sendMessage` whose placeholder is over its bound, and the bar rides
+        # the *last* part — so a split answer would land its earlier parts and
+        # come back UNKNOWN with the final one missing. Dropping the bar costs
+        # the reply prompt and delivers every word.
+        _log.warning(
+            "a reply-bar placeholder of %d characters is past the API's %d; "
+            "the message is sent without one",
+            len(reply_bar),
+            PLACEHOLDER_LIMIT,
+        )
+        return parts
+    last = parts[-1]
+    if "reply_markup" in last:
+        return parts
+    return (*parts[:-1], {**last, "reply_markup": _force_reply(reply_bar)})
+
+
+def _force_reply(placeholder: str) -> dict[str, object]:
+    """The Bot API's `ForceReply`, carrying Core's words into the reply bar."""
+    return {"force_reply": True, "input_field_placeholder": placeholder}
 
 
 def _message_id_of(message: object) -> str:

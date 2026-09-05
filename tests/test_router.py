@@ -29,7 +29,12 @@ from gpt_voicecoding.core.briefing import (
     NUMERAL_PICKS_NOTHING_HINT,
     QUESTION_ALREADY_ANSWERED_HINT,
 )
-from gpt_voicecoding.core.router import InboundClass, InboundRouter, TextGrammar
+from gpt_voicecoding.core.router import (
+    WORDS_OR_THE_COMMAND,
+    InboundClass,
+    InboundRouter,
+    TextGrammar,
+)
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.seams.agent import (
     ApprovalVerdict,
@@ -273,7 +278,7 @@ def anchored(
     `asking` puts a Session's roster row at `WAITING` on a question with those
     option labels — what a Stop carrying a question does through the hub.
     """
-    table = AnchorTable(rows_per_target=cap)
+    table = AnchorTable(rows_per_target=cap, conversations=100)
     for ids, row in rows:
         table.register(ids, row)
     registry = registry_of(*sessions)
@@ -646,7 +651,7 @@ class TestARowWhoseSessionTheRosterNoLongerHolds:
     def test_an_ended_sessions_row_is_skipped_too(self) -> None:
         registry = registry_of(*TWO)
         registry.mark_ended(CLAUDE)
-        table = AnchorTable(rows_per_target=100)
+        table = AnchorTable(rows_per_target=100, conversations=100)
         table.register(("40",), question(CLAUDE, "a"))
         router = InboundRouter(
             sessions=registry, grammar=TextGrammar(control_commands=COMMANDS), anchors=table
@@ -654,6 +659,148 @@ class TestARowWhoseSessionTheRosterNoLongerHolds:
 
         assert router.classify("yes", in_reply_to="40").target == CODEX
         assert router.classify("yes").target == CODEX
+
+
+class TestAnAssistantConversationIsContinuedByReplying:
+    """ADR 0021 §7, #265: a reply to any of its messages resumes that same thread.
+
+    Which conversation a message continues is decided only by what it replies
+    to, so two coexist with no ambiguity. Inside one, the top-level grammar is
+    not read: a `>` and a numeral are plain text to the conversation, because
+    the reply already said whose words these are.
+    """
+
+    OPENING = Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0)
+    ANSWER = Anchor(kind=AnchorKind.ANSWER, target="thread-1", sent_at=2.0)
+    OTHER = Anchor(kind=AnchorKind.ANSWER, target="thread-2", sent_at=3.0)
+
+    def test_a_reply_to_the_opening_line_is_a_turn_on_that_thread(self) -> None:
+        router, _ = anchored((CODEX, "port the log"), rows=((("60",), self.OPENING),))
+
+        found = router.classify("what did the last commit change?", in_reply_to="60")
+
+        assert found.kind is InboundClass.DELEGATION
+        assert found.thread_id == "thread-1"
+        assert found.text == "what did the last commit change?"
+        assert found.target is None
+
+    def test_a_reply_to_an_answer_continues_the_same_conversation(self) -> None:
+        router, _ = anchored(
+            (CODEX, "port the log"), rows=((("60",), self.OPENING), (("61",), self.ANSWER))
+        )
+
+        assert router.classify("and before that?", in_reply_to="61").thread_id == "thread-1"
+
+    def test_two_conversations_are_told_apart_by_what_a_message_replies_to(self) -> None:
+        router, _ = anchored(
+            (CODEX, "port the log"), rows=((("61",), self.ANSWER), (("62",), self.OTHER))
+        )
+
+        assert router.classify("go on", in_reply_to="61").thread_id == "thread-1"
+        assert router.classify("go on", in_reply_to="62").thread_id == "thread-2"
+
+    def test_a_marker_inside_a_conversation_is_plain_text_to_it(self) -> None:
+        """A `>`, a `/x` line and a numeral all reach the model as the user typed them."""
+        router, _ = anchored((CODEX, "port the log"), rows=((("60",), self.OPENING),))
+
+        for typed in ("> summarise it", "/review the diff", "2", "@codex: hello"):
+            found = router.classify(typed, in_reply_to="60")
+
+            assert found.kind is InboundClass.DELEGATION
+            assert found.text == typed
+            assert found.thread_id == "thread-1"
+
+    def test_a_reply_to_a_conversation_no_longer_held_is_words_that_replied_to_nothing(
+        self,
+    ) -> None:
+        """An expired assistant Anchor takes #263's newest-Anchor path (#265)."""
+        router, _ = anchored((CODEX, "port the log"), rows=((("40",), question(CODEX, "yes")),))
+
+        found = router.classify("go on", in_reply_to="99")
+
+        assert found.kind is InboundClass.ANSWER_RELAY
+        assert found.target == CODEX
+
+
+class TestTheNewestAnchorMayBeAConversation:
+    """§7 generalises §2's rule: plain typing goes to the newest Anchor, of either kind."""
+
+    def test_plain_typing_under_an_answer_continues_that_conversation(self) -> None:
+        rows = (
+            (("40",), question(CODEX, "yes")),
+            (("61",), Anchor(kind=AnchorKind.ANSWER, target="thread-1", sent_at=2.0)),
+        )
+        router, _ = anchored((CODEX, "port the log"), rows=rows)
+
+        found = router.classify("one more thing")
+
+        assert found.kind is InboundClass.DELEGATION
+        assert found.thread_id == "thread-1"
+
+    def test_a_newer_stop_notice_takes_plain_typing_back_to_the_session(self) -> None:
+        """An assistant answer older than a Stop Notice does not hold the chat (#265)."""
+        rows = (
+            (("61",), Anchor(kind=AnchorKind.ANSWER, target="thread-1", sent_at=1.0)),
+            (("41",), question(CODEX, "yes", at=2.0)),
+        )
+        router, _ = anchored((CODEX, "port the log"), rows=rows)
+
+        assert router.classify("one more thing").kind is InboundClass.ANSWER_RELAY
+        assert router.classify("one more thing").target == CODEX
+        # Replying to the older answer still continues it: routing is the
+        # Anchor rule and the newest rule is only for what replies to nothing.
+        assert router.classify("one more thing", in_reply_to="61").thread_id == "thread-1"
+
+    def test_a_conversation_answers_plain_typing_with_no_session_live(self) -> None:
+        """The conversation is a target of its own: it needs no roster behind it."""
+        table = AnchorTable(rows_per_target=100, conversations=100)
+        table.register(("60",), Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0))
+        router = InboundRouter(
+            sessions=registry_of(), grammar=TextGrammar(control_commands=COMMANDS), anchors=table
+        )
+
+        found = router.classify("are you there?")
+
+        assert found.kind is InboundClass.DELEGATION
+        assert found.thread_id == "thread-1"
+
+    def test_a_numeral_typed_under_a_conversation_still_needs_a_known_anchor(self) -> None:
+        """A numeral is a decision over one question; it is never read against the newest."""
+        rows = ((("60",), Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0)),)
+        router, _ = anchored((CODEX, "port the log"), rows=rows)
+
+        assert router.classify("2").reply == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+
+    def test_a_bare_command_word_under_a_conversation_offers_both_readings(self) -> None:
+        """The collision is the same one; the second reading is the conversation, not a Session."""
+        table = AnchorTable(rows_per_target=100, conversations=100)
+        table.register(("60",), Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0))
+        router = InboundRouter(
+            sessions=registry_of(), grammar=TextGrammar(control_commands=COMMANDS), anchors=table
+        )
+
+        found = router.classify("stop")
+
+        assert found.kind is InboundClass.UNKNOWN
+        assert found.reply == WORDS_OR_THE_COMMAND.format(word="stop", command="/stop")
+
+    def test_a_bare_command_word_still_names_the_sessions_when_there_are_some(self) -> None:
+        """With Sessions live the older wording stands: it can still say which one."""
+        rows = ((("60",), Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0)),)
+        router, _ = anchored(*TWO, rows=rows)
+
+        reply = router.classify("stop").reply
+
+        assert "@" in reply
+
+    def test_a_top_level_marker_is_still_read_when_a_conversation_is_newest(self) -> None:
+        """The newest-Anchor rule is for bare text; `/`, `>` and `@` are top-level forms."""
+        rows = ((("60",), Anchor(kind=AnchorKind.ASSISTANT, target="thread-1", sent_at=1.0)),)
+        router, _ = anchored((CODEX, "port the log"), rows=rows)
+
+        assert router.classify("/status").kind is InboundClass.CONTROL
+        assert router.classify("> one shot").kind is InboundClass.DELEGATION
+        assert router.classify("> one shot").thread_id == ""
 
 
 class TestARouterWithoutATable:
@@ -758,7 +905,7 @@ class TestANumeralOnAMenuScreenIsAPick:
     def test_a_numeral_on_a_greeting_whose_session_ended_is_refused(self) -> None:
         registry = registry_of(*TWO)
         registry.mark_ended(CLAUDE)
-        table = AnchorTable(rows_per_target=100)
+        table = AnchorTable(rows_per_target=100, conversations=100)
         table.register(("51",), greeting(CLAUDE))
         router = InboundRouter(
             sessions=registry, grammar=TextGrammar(control_commands=COMMANDS), anchors=table

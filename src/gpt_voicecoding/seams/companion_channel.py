@@ -34,6 +34,12 @@ seam's own carrier in `seams/call.py`, filled by `briefing.spoken`. `BriefState`
 is the one non-string field, so an adapter can key a state light on a closed
 enum instead of on English words — the words stay Core's; the light is layout.
 
+**A conversation's messages carry no brief, only a reply bar** (ADR 0021 §7).
+An Assistant Conversation's opening line and every answer of it are prose — one
+fixed, the rest the coding model's own — and a notice is a laid-out brief that a
+surface *cuts* to its limit. An answer must **split** instead, every part of it
+an Anchor, so it crosses as text with `reply_bar` set and no `notice` at all.
+
 **Options are labels, and a surface that can draw buttons draws one per label**
 (ADR 0021 §6). Every notice that offers choices carries them as `options`, in
 order — a question's labels, a permission's `allow` / `deny`, a roster's
@@ -75,6 +81,12 @@ class InboundText(Event):
     text: str
     origin: str = ""
     in_reply_to: str = ""
+
+
+#: The longest reply-bar placeholder a surface will carry. The Bot API's own
+#: bound on `ForceReply.input_field_placeholder`, stated at the seam so Core
+#: stays inside it and no adapter silently cuts the user's own vocabulary.
+PLACEHOLDER_LIMIT = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,21 +217,24 @@ class MenuNotice:
     The screens the command menu opens (ADR 0021 §6, #264) — a greeting for one
     Session, the config screen, the switch screen, the `Say to <name>:` prompt
     — are one shape: a heading in Core's words and the option labels in order,
-    each of which a numeral picks by position. `expects_words` is the prompt:
-    the screen asks for the user's words rather than a choice, so a surface
-    with a reply bar opens it and one without prints the heading and waits.
-    Every string is Core's; the adapter numbers, draws, and chooses none.
+    each of which a numeral picks by position. Every string is Core's; the
+    adapter numbers, draws, and chooses none.
+
+    **A screen that asks for words says so through `send(reply_bar=...)`, not
+    here.** `expects_words` used to be a second signal for the same thing — it
+    existed only to make a surface open its reply bar — so one message could
+    want a bar for two unrelated reasons and an adapter had two fields to read.
+    There is one signal now: the words in the bar, given to the verb that sends
+    the message, which is also the verb that knows which part of a split send
+    the bar belongs under (ADR 0021 §7, #265).
     """
 
     heading: str
     options: tuple[str, ...] = ()
-    expects_words: bool = False
 
     def __post_init__(self) -> None:
         if not self.heading.strip():
             raise ValueError("a menu screen says what it is for")
-        if self.expects_words and self.options:
-            raise ValueError("a screen asks for words or offers choices, never both")
 
 
 #: What `send` may be handed beside its text. Three kinds, and an adapter lays
@@ -243,6 +258,7 @@ class CompanionChannel(Protocol):
         origin: str = "",
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
+        reply_bar: str = "",
     ) -> ChannelReceipt:
         """Push one message to the user, and say which ids it landed under.
 
@@ -254,6 +270,14 @@ class CompanionChannel(Protocol):
         `text` renders, when the message is one: an adapter that lays notices
         out lays this one out and sends that instead of `text`; one that does
         not sends `text` and ignores it. The words are the same either way.
+
+        `reply_bar` opens the surface's reply bar with those words written into
+        it as a placeholder — a courtesy on the `Say to <name>:` prompt and on
+        an Assistant Conversation's messages (ADR 0021 §6, §7), never the
+        routing, which is the Anchor rule alone. On a send that splits it
+        belongs to the **last** part, because that is the message the bar sits
+        under. An adapter with no reply bar ignores it. The words are Core's,
+        and `PLACEHOLDER_LIMIT` is the bound they stay inside.
         """
         ...
 

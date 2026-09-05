@@ -11,7 +11,7 @@ from pathlib import Path
 
 from gpt_voicecoding.core import briefing, menu
 from gpt_voicecoding.core.anchors import AnchorKind, Screen
-from gpt_voicecoding.core.briefing import MenuWord
+from gpt_voicecoding.core.briefing import SAY_TO_PLACEHOLDER, MenuWord
 from gpt_voicecoding.core.sessions import Session
 from gpt_voicecoding.core.switches import Switchboard, SwitchName
 from gpt_voicecoding.seams.agent import SessionState
@@ -112,9 +112,8 @@ class TestThePromptScreen:
         screen = menu.prompt_screen(session(CODEX))
 
         assert screen.text == "Say to GPT-VoiceCoding · port the log:"
-        assert screen.notice == MenuNotice(
-            heading="Say to GPT-VoiceCoding · port the log:", expects_words=True
-        )
+        assert screen.notice == MenuNotice(heading="Say to GPT-VoiceCoding · port the log:")
+        assert screen.reply_bar == SAY_TO_PLACEHOLDER
         assert screen.anchor is not None
         assert screen.anchor.kind is AnchorKind.PROMPT
         assert screen.anchor.target == CODEX

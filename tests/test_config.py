@@ -124,6 +124,24 @@ class TestACompleteConfiguration:
         with pytest.raises(ConfigError):
             load(written(tmp_path, COMPLETE + "\n[policy]\nanchor_rows_per_session = 0\n"))
 
+    def test_the_chat_keeps_three_assistant_conversations_by_default(self, tmp_path: Path) -> None:
+        """ADR 0021 §7: assistant Anchors are capped by conversation, not by Session."""
+        config = load(written(tmp_path, COMPLETE))
+
+        assert config.policy.assistant_conversations == 3
+
+    def test_the_assistant_conversations_may_be_dialled(self, tmp_path: Path) -> None:
+        config = load(written(tmp_path, COMPLETE + "\n[policy]\nassistant_conversations = 2\n"))
+
+        assert config.policy.assistant_conversations == 2
+
+    def test_assistant_conversations_that_are_not_a_count_are_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError):
+            load(written(tmp_path, COMPLETE + "\n[policy]\nassistant_conversations = 2.0\n"))
+
+        with pytest.raises(ConfigError):
+            load(written(tmp_path, COMPLETE + "\n[policy]\nassistant_conversations = 0\n"))
+
     def test_a_duration_that_would_expire_everything_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
             load(written(tmp_path, COMPLETE + "\n[policy]\nrelay_ceiling_seconds = 0\n"))

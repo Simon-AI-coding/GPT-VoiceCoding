@@ -58,6 +58,16 @@ DEFAULT_HISTORY_PAGE_ENTRIES = 5
 #: timer. **New** — legacy has no reply anchoring at all (ADR 0021, Legacy).
 DEFAULT_ANCHOR_ROWS_PER_SESSION = 100
 
+#: How many Assistant Conversations the Anchor Table holds at once — the newest
+#: three, the oldest dropped whole when a fourth is opened (ADR 0021 §7, #265).
+#: Counted per chat, and this engine serves one configured chat, so per chat and
+#: per engine are the same number. Three rather than a hundred because a
+#: conversation is opened deliberately from the menu and its rows are not a
+#: Session's: the user holds a couple of threads in mind, not a hundred, and
+#: every one held is a Codex thread this engine can still resume.
+#: **New** — legacy has no assistant at all (ADR 0021, Legacy).
+DEFAULT_ASSISTANT_CONVERSATIONS = 3
+
 
 @dataclass(frozen=True, slots=True)
 class CorePolicy:
@@ -84,6 +94,10 @@ class CorePolicy:
     history_page_entries: int = DEFAULT_HISTORY_PAGE_ENTRIES
     #: How many Anchors one Session keeps in the Anchor Table. Memory only.
     anchor_rows_per_session: int = DEFAULT_ANCHOR_ROWS_PER_SESSION
+    #: How many Assistant Conversations that same table holds. Memory only, and
+    #: a count of conversations rather than of rows: the dial above already
+    #: bounds the messages of one (ADR 0021 §7).
+    assistant_conversations: int = DEFAULT_ASSISTANT_CONVERSATIONS
 
     def __post_init__(self) -> None:
         for name, seconds in (
@@ -114,4 +128,14 @@ class CorePolicy:
             raise ValueError(
                 f"anchor_rows_per_session must keep at least one row; "
                 f"{self.anchor_rows_per_session!r} would forget every notice as it was sent"
+            )
+        if isinstance(self.assistant_conversations, bool) or not isinstance(
+            self.assistant_conversations, int
+        ):
+            raise ValueError("assistant_conversations is a whole number of conversations")
+        if self.assistant_conversations <= 0:
+            raise ValueError(
+                f"assistant_conversations must keep at least one conversation; "
+                f"{self.assistant_conversations!r} would forget an Assistant Conversation "
+                "the moment it was opened"
             )

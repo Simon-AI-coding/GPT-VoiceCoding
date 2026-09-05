@@ -275,6 +275,18 @@ class FakeCall:
         self.opened_on: list[Dial] = []
         #: The same, for the threads Delegated Turns run on.
         self.delegated_on: list[str] = []
+        #: The instructions every Assistant Conversation was opened with, in
+        #: order; the thread id it was answered with is its 1-based position.
+        self.conversations: list[str] = []
+        #: What each `delegate` was asked to resume, in order — empty for the
+        #: one-shot `>`, a thread id for a conversation's turn (ADR 0021 §7).
+        self.resumed: list[str] = []
+        #: Scripted failures. `turn_refusals` is consumed one per `delegate`, so
+        #: a test can make the second reply fail and the first succeed; a `None`
+        #: entry is a turn that answers normally.
+        self.turn_refusals: list[Exception | None] = []
+        #: What `open_conversation` raises instead of opening one, or None.
+        self.conversation_refusal: Exception | None = None
         self._snapshot = CallSnapshot(state=CallState.DOWN)
         #: How many calls this adapter actually brought up. A policy test asserts
         #: on it to prove the one-call invariant stopped a second one.
@@ -316,11 +328,34 @@ class FakeCall:
             request_id=request_id, outcome=Delivery.DELIVERED, reason="spoken into the call"
         )
 
+    async def open_conversation(self, *, model: str, instructions: str) -> str:
+        """Start a thread for an Assistant Conversation and name it (ADR 0021 §7).
+
+        No turn is run, so nothing lands in `delegated`: a test that sees one
+        there after opening a conversation has caught the hub spending a turn on
+        the fixed opening line.
+        """
+        if self.conversation_refusal is not None:
+            raise self.conversation_refusal
+        self.conversations.append(instructions)
+        return f"thread-{len(self.conversations)}"
+
     async def delegate(
-        self, text: str, *, model: str, instructions: str, request_id: RequestId
+        self,
+        text: str,
+        *,
+        model: str,
+        instructions: str,
+        request_id: RequestId,
+        resume: str = "",
     ) -> DelegatedReply:
         self.delegated.append((text, model))
         self.delegated_on.append(instructions)
+        #: Empty for the one-shot `>`, the thread id for a conversation's turn.
+        self.resumed.append(resume)
+        refusal = self.turn_refusals.pop(0) if self.turn_refusals else None
+        if refusal is not None:
+            raise refusal
         return DelegatedReply(text=self.delegated_text, model=model)
 
     async def play_cue(self, cue: Cue) -> None:
@@ -458,6 +493,11 @@ class FakeCompanionChannel:
         self.origins: list[str] = []
         self.revisions: list[tuple[str, ...]] = []
         self.notices: list[Notice | None] = []
+        #: The reply-bar placeholder each send asked for, empty for most.
+        self.reply_bars: list[str] = []
+        #: Every receipt this fake answered with, in order — the ids a
+        #: message landed under are what a reply to it is keyed by.
+        self.receipts: list[ChannelReceipt] = []
 
     async def send(
         self,
@@ -467,20 +507,24 @@ class FakeCompanionChannel:
         origin: str = "",
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
+        reply_bar: str = "",
     ) -> ChannelReceipt:
         self.sent.append(text)
         self.requests.append(str(request_id))
         self.origins.append(origin)
         self.revisions.append(revises)
         self.notices.append(notice)
+        self.reply_bars.append(reply_bar)
         if self.message_ids is not None:
             landed = self.message_ids
         else:
             # Ids name parts that landed (ADR 0021 §4): a FAILED send has none.
             landed = () if self.outcome is Delivery.FAILED else (str(len(self.sent)),)
-        return ChannelReceipt(
+        receipt = ChannelReceipt(
             request_id=request_id, outcome=self.outcome, reason=self.reason, message_ids=landed
         )
+        self.receipts.append(receipt)
+        return receipt
 
     async def verify(self) -> VerifyResult:
         return self.verify_result

@@ -321,6 +321,26 @@ class CallSnapshot:
         return self.state is CallState.UP
 
 
+class DelegatedTurnError(Exception):
+    """One Delegated Turn could not be completed. Carries why, in its own words.
+
+    Seam vocabulary rather than one adapter's, because it is half of what
+    `delegate` answers with: a caller has to be able to catch what the verb
+    raises without knowing which implementation is behind it, and the words it
+    carries are what the user is shown.
+    """
+
+
+class ThreadGoneError(DelegatedTurnError):
+    """The thread a turn was to resume is not there any more (ADR 0021 §7, #265).
+
+    Its own type because it is the one failure a caller answers differently:
+    every other one is words to show the user, and this one means the
+    conversation itself has ended, which Bridge Core says in its own fixed hint.
+    A `DelegatedTurnError` first, so a caller that does not care still catches it.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class DelegatedReply:
     """One Delegated Turn's answer, and which model actually produced it."""
@@ -448,10 +468,44 @@ class CallAdapter(Protocol):
         """
         ...
 
+    async def open_conversation(self, *, model: str, instructions: str) -> str:
+        """Start a thread for an Assistant Conversation and answer with its id.
+
+        No turn is run: what the user sees when a conversation opens is Bridge
+        Core's own fixed line (ADR 0021 §7), so there is nothing for a model to
+        produce. The id is opaque to Core, which carries it on the Anchor row
+        and hands it back to `delegate` as `resume`; an adapter with no notion
+        of a thread has no conversation to open and says so by raising.
+
+        Legacy (ADR 0010): `legacy@1d32845` has no assistant and no delegated
+        turn — **new**, adapted from this generation's own `delegate`.
+        """
+        ...
+
     async def delegate(
-        self, text: str, *, model: str, instructions: str, request_id: RequestId
+        self,
+        text: str,
+        *,
+        model: str,
+        instructions: str,
+        request_id: RequestId,
+        resume: str = "",
     ) -> DelegatedReply:
-        """Hand work to a coding model on the user's behalf — the Delegated Turn."""
+        """Hand work to a coding model on the user's behalf — the Delegated Turn.
+
+        `resume` empty is one turn on a thread of its own, which is what the
+        top-level `>` has always been. Naming a thread runs the turn on that
+        thread instead and leaves it alive afterwards, which is how an Assistant
+        Conversation remembers (ADR 0021 §7): the memory is the coding model's
+        own thread, and Bridge Core holds nothing but the id.
+
+        **A thread that cannot be resumed is not an answer.** An adapter reports
+        it as a failure distinguishable from every other one, because the caller
+        answers it differently — every other failure is words to show the user,
+        and this one means the conversation has ended and Core says so in its own
+        fixed hint. A thread that is merely busy is not that: the coding model's
+        own refusal comes back as the answer, and nothing is queued.
+        """
         ...
 
     async def play_cue(self, cue: Cue) -> None:

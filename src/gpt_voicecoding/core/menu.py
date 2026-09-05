@@ -1,8 +1,10 @@
 """The menu screens — every one an Anchor with option labels (ADR 0021 §6, #264).
 
 The Companion Channel's command menu opens screens: the roster, a greeting for
-one Session, the `Say to <name>:` prompt, the config screen and the switch
-screen. Each is one shape — a text in Core's words, the seam's structured brief
+one Session, the `Say to <name>:` prompt, the config screen, the switch screen,
+and an Assistant Conversation's opening line (ADR 0021 §7, #265), which is a
+screen in exactly this sense: a text in Core's words with a row saying what a
+reply to it means. Each is one shape — a text in Core's words, the seam's structured brief
 beside it for a surface that lays screens out, and the Anchor row the send
 registers, whose labels a numeral picks by position. This module builds them
 and decides nothing about what a press does: that is `core/bridge.py`'s, which
@@ -33,9 +35,12 @@ from dataclasses import dataclass, replace
 
 from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorPick, AnchorTarget, Screen
 from gpt_voicecoding.core.briefing import (
+    ASSISTANT_OPENING_LINE,
+    ASSISTANT_REPLY_PLACEHOLDER,
     DISAMBIGUATED_LABEL_TEMPLATE,
     MENU_WORDING,
     NOTHING_RUNNING_HINT,
+    SAY_TO_PLACEHOLDER,
     MenuWord,
     RosterBrief,
     greeting,
@@ -66,6 +71,10 @@ class MenuScreen:
     text: str
     notice: Notice | None = None
     anchor: Anchor | None = None
+    #: What the reply bar shows while this screen waits, on a surface that has
+    #: one — Core's words, and the one signal that a screen asks for words
+    #: rather than a choice (ADR 0021 §6, §7). Empty opens no reply bar.
+    reply_bar: str = ""
 
     @property
     def options(self) -> tuple[str, ...]:
@@ -125,9 +134,43 @@ def prompt_screen(session: Session) -> MenuScreen:
     heading = say_to(spoken_name(session))
     return MenuScreen(
         text=heading,
-        notice=MenuNotice(heading=heading, expects_words=True),
+        notice=MenuNotice(heading=heading),
         anchor=Anchor(kind=AnchorKind.PROMPT, target=session.target),
+        reply_bar=SAY_TO_PLACEHOLDER,
     )
+
+
+def assistant_screen(thread_id: str) -> MenuScreen:
+    """`assistant`: the fixed opening line, an Anchor of one Codex thread (ADR 0021 §7).
+
+    The line is Core's own words and no model wrote it, so opening a
+    conversation costs no turn. The row carries the thread id where a Session's
+    row carries a target: that id is the whole of Bridge Core's memory of the
+    conversation, and the transcript stays where it belongs, on the coding
+    model's own thread. Words replying to it are the conversation's first turn,
+    by the Anchor rule alone, and the reply bar is only what shows the user so.
+
+    **No structured brief.** A conversation's messages are prose — this one
+    fixed, the answers the coding model's own — and a notice is a laid-out brief
+    that a surface cuts rather than splits. What they want from the surface is
+    the reply bar, which `send` opens; that is not a layout to fill in.
+    """
+    return MenuScreen(
+        text=ASSISTANT_OPENING_LINE,
+        anchor=Anchor(kind=AnchorKind.ASSISTANT, target=thread_id),
+        reply_bar=ASSISTANT_REPLY_PLACEHOLDER,
+    )
+
+
+def assistant_answer(thread_id: str) -> Anchor:
+    """The row one turn's answer registers: the same conversation, nothing to pick.
+
+    A row rather than a screen, because an answer is the coding model's words
+    and this module words nothing about it. Every answer anchors, and a split
+    answer anchors every part of itself — the send site enters the row under
+    every id the message landed under (ADR 0021 §7).
+    """
+    return Anchor(kind=AnchorKind.ANSWER, target=thread_id)
 
 
 def config_screen() -> MenuScreen:

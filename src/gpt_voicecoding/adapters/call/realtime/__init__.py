@@ -24,6 +24,7 @@ from gpt_voicecoding.adapters.call.realtime.adapter import (
     USER_QUIET_POLL_FRACTION,
     DelegatedTurnError,
     RealtimeCallAdapter,
+    ThreadGoneError,
 )
 from gpt_voicecoding.adapters.call.realtime.settings import (
     DEFAULT_REALTIME_MODEL,
@@ -47,6 +48,7 @@ __all__ = [
     "USER_QUIET_POLL_FRACTION",
     "CallTransport",
     "DelegatedTurnError",
+    "ThreadGoneError",
     "RealtimeCallAdapter",
     "RealtimeCallSettings",
     "SettingsError",

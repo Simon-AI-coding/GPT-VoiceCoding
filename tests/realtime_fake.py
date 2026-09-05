@@ -177,6 +177,7 @@ def delegated_script(
         return {"turn": {"id": "turn-1"}}
 
     server.answers("turn/start", start_turn)
+    server.answers("thread/resume", {"thread": {"id": thread_id}, "model": model})
 
 
 class FakeCueOutput:

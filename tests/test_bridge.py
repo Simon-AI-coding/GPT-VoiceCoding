@@ -4363,6 +4363,8 @@ class TestTheSwitchesScreenIsEditedAfterItsOwnFlip:
         hub.emit(InboundText(text="1", in_reply_to="1"))
 
         assert hub.channel.revisions == [(), ()]
+
+
 #: The one verb this class's hub answers to, beside the harness's own two.
 ASSISTANT_COMMANDS = frozenset({"status", "stop", "assistant"})
 

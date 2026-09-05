@@ -34,8 +34,8 @@ label's words are never read. A label wider than the configured width is cut
 on the button and ended with a mark; **the numbered line in the text carries it
 whole**, which is what lets the user tell two buttons apart when the cut left
 them reading alike. A menu screen is the heading in bold and the labels
-numbered; the prompt that asks for words carries a ForceReply instead of
-buttons.
+numbered. The reply bar is not this module's: `send` opens one when Core asked
+for it, on the last part of the message, which is a thing only `send` can see.
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ class LaidOut:
     text: str
     #: `MessageEntity` objects, offsets and lengths in UTF-16 code units.
     entities: tuple[dict[str, object], ...] = ()
-    #: The `reply_markup` — an inline keyboard drawn from the labels, or a
-    #: ForceReply for the prompt — or None when the message offers nothing.
+    #: The `reply_markup` — an inline keyboard drawn from the labels — or None
+    #: when the message offers nothing to press.
     reply_markup: dict[str, object] | None = None
 
     def payload(self) -> dict[str, object]:
@@ -132,7 +132,8 @@ def lay_out(
 
     **One button per option label, in order** (ADR 0021 §6): every kind of
     notice that carries labels gets the same keyboard, and one that carries
-    none gets no markup. The prompt that asks for words gets a ForceReply.
+    none gets no markup. A reply bar is not decided here — it is `send`'s
+    `reply_bar`, which belongs to the last part of a message this never sees.
     """
     if isinstance(notice, RosterNotice):
         # **The keyboard follows the rows that survived the cap** (#264 review).
@@ -147,8 +148,6 @@ def lay_out(
         )
     if isinstance(notice, MenuNotice):
         laid_out = _menu(notice)
-        if notice.expects_words:
-            return replace(laid_out, reply_markup={"force_reply": True})
     else:
         laid_out = _session(notice, limit=limit)
     return replace(laid_out, reply_markup=keyboard(notice.options, label_width=label_width))

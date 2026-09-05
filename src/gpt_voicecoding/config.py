@@ -404,6 +404,12 @@ def _policy(section: dict[str, Any], where: str) -> CorePolicy:
         if isinstance(rows, bool) or not isinstance(rows, int):
             raise ConfigError(f"[policy] anchor_rows_per_session{where} must be a whole number")
         dials["anchor_rows_per_session"] = rows
+    conversations = section.get("assistant_conversations")
+    if conversations is not None:
+        # A count of conversations, read as one, for the same reason as the rows.
+        if isinstance(conversations, bool) or not isinstance(conversations, int):
+            raise ConfigError(f"[policy] assistant_conversations{where} must be a whole number")
+        dials["assistant_conversations"] = conversations
     try:
         return CorePolicy(**dials)
     except ValueError as refusal:

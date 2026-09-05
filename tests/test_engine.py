@@ -29,6 +29,10 @@ from gpt_voicecoding.config import ConfigError, load
 from gpt_voicecoding.control_plane.client import ask
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.control_plane.server import AlreadyServing
+from gpt_voicecoding.core.briefing import (
+    ASSISTANT_CONVERSATION_GONE_HINT,
+    ASSISTANT_OPENING_LINE,
+)
 from gpt_voicecoding.core.sessions import Session
 from gpt_voicecoding.engine.composition import Engine, EngineAssemblyError
 from gpt_voicecoding.seams.agent import (
@@ -37,6 +41,7 @@ from gpt_voicecoding.seams.agent import (
     ReplyWindowChanged,
     SessionInspection,
 )
+from gpt_voicecoding.seams.call import DelegatedTurnError, ThreadGoneError
 from gpt_voicecoding.seams.companion_channel import InboundText
 from gpt_voicecoding.seams.control_plane import Action, Reply, Request
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
@@ -455,6 +460,89 @@ class TestEventsReachTheHub:
         delegated = asyncio.run(scenario())
 
         assert delegated == [("summarise the diff", "the-model-the-user-chose")]
+
+
+class TestTheAssistantConversationIsWiredEndToEnd:
+    """ADR 0021 §7, #265: the root is what joins the menu verb to the coding thread."""
+
+    def test_opening_one_starts_a_thread_on_the_configured_model_and_runs_no_turn(
+        self, home: Path
+    ) -> None:
+        engine = assembled(home)
+
+        async def scenario() -> tuple[list[str], list[tuple[str, str]], list[str]]:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="/assistant"))
+                await _until(lambda: bool(engine.adapters.call.conversations))
+                return (
+                    list(engine.adapters.call.conversations),
+                    list(engine.adapters.call.delegated),
+                    list(engine.adapters.channel.sent),
+                )
+            finally:
+                await engine.aclose()
+
+        opened, delegated, sent = asyncio.run(scenario())
+
+        assert engine.core.instructions is not None
+        assert opened == [engine.core.instructions.delegated.text]
+        assert delegated == []
+        assert sent == [ASSISTANT_OPENING_LINE]
+
+    def test_a_reply_resumes_the_thread_the_row_carries(self, home: Path) -> None:
+        engine = assembled(home)
+
+        async def scenario() -> list[str]:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="/assistant"))
+                await _until(lambda: bool(engine.adapters.call.conversations))
+                opening = engine.adapters.channel.receipts[-1].message_ids[0]
+                engine.core.events.emit(InboundText(text="what changed?", in_reply_to=opening))
+                await _until(lambda: bool(engine.adapters.call.resumed))
+                return list(engine.adapters.call.resumed)
+            finally:
+                await engine.aclose()
+
+        assert asyncio.run(scenario()) == ["thread-1"]
+
+    def test_a_thread_that_cannot_be_resumed_becomes_cores_own_hint(self, home: Path) -> None:
+        """The adapter's distinguishable failure, turned into the one fixed hint."""
+        engine = assembled(home)
+        engine.adapters.call.turn_refusals = [ThreadGoneError("no such thread")]
+
+        async def scenario() -> str:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="/assistant"))
+                await _until(lambda: bool(engine.adapters.call.conversations))
+                opening = engine.adapters.channel.receipts[-1].message_ids[0]
+                engine.core.events.emit(InboundText(text="still there?", in_reply_to=opening))
+                await _until(lambda: len(engine.adapters.channel.sent) > 1)
+                return engine.adapters.channel.sent[-1]
+            finally:
+                await engine.aclose()
+
+        assert asyncio.run(scenario()) == ASSISTANT_CONVERSATION_GONE_HINT
+
+    def test_a_failed_turn_reaches_the_user_as_the_failures_own_words(self, home: Path) -> None:
+        """Otherwise the drain loop logs it and the user is left with silence (ADR 0021 §7)."""
+        engine = assembled(home)
+        engine.adapters.call.turn_refusals = [
+            DelegatedTurnError("codex refused the delegated turn: thread is busy")
+        ]
+
+        async def scenario() -> str:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="> summarise the diff"))
+                await _until(lambda: bool(engine.adapters.channel.sent))
+                return engine.adapters.channel.sent[-1]
+            finally:
+                await engine.aclose()
+
+        assert "thread is busy" in asyncio.run(scenario())
 
 
 class TestSharingTheOneAppServer:

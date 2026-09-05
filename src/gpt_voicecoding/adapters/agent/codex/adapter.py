@@ -78,6 +78,7 @@ from gpt_voicecoding.adapters.codex_app_server.process import (
 )
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
 from gpt_voicecoding.adapters.codex_app_server.wire import (
+    NO_ROLLOUT_YET,
     Message,
     RemoteError,
     WireError,
@@ -109,11 +110,6 @@ from gpt_voicecoding.seams.identity import AgentKind, RequestId, SessionTarget
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
 
 _log = logging.getLogger(__name__)
-
-#: What codex says about a thread that exists but has never done anything. It
-#: has no rollout file yet, so there is nothing to resume — a state the thread
-#: grows out of the moment it does any work.
-NO_ROLLOUT_YET = "no rollout found"
 
 #: What a Relay or a verdict is told when no shared daemon answered (#83's
 #: advisor note, ruled onto #77). It is a **pre-wire** refusal: nothing was sent,

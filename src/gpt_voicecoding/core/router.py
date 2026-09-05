@@ -17,7 +17,8 @@ command by name and cannot grow one:
     ><prompt>         a Delegated Turn
     @<name>: words    the user's own words, for the Session that name names
     words             the user's own words, for the target of the newest Anchor —
-                      or, with no Anchor held, for the one live Session
+                      a Session or an Assistant Conversation — or, with no
+                      Anchor held, for the one live Session
 
 **And a fifth thing a message can be: a reply** (ADR 0021 §2, §3; #263). The
 adapter reports which of our own messages the user replied to (`in_reply_to`),
@@ -30,6 +31,16 @@ arguments …`, #248), with no pre-check of the name (#256). A `>` inside a repl
 is the user's words. A reply to an Anchor Core no longer holds — pre-restart,
 fallen out, the user's own message — is treated exactly as a message that replied
 to nothing, **when it is words**.
+
+**A reply to an Assistant Conversation is a turn on its thread** (ADR 0021 §7,
+#265). The row carries the thread id in place of a Session, and the reply is a
+`DELEGATION` naming it; which conversation a message continues is decided only
+by what it replies to, so two coexist with nothing to disambiguate. Inside one,
+the top-level grammar is not read at all: a `>`, a `/x` line and a numeral are
+plain text to the conversation, because the reply already said whose words these
+are and the conversation is the one target that takes words of every shape. A
+non-reply goes to the newest Anchor whichever kind it is, which is why §2's rule
+reads "the target of the newest Anchor" and not "the Session of".
 
 **A numeral must reply to the message it answers** (ruling, 2026-09-06). A
 numeral picks that Anchor's Nth option label: on a permission notice it is the
@@ -72,7 +83,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable, Screen
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable, Screen, conversation_of
 from gpt_voicecoding.core.briefing import (
     NON_TEXT_HINT,
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
@@ -89,6 +100,15 @@ from gpt_voicecoding.seams.identity import SessionTarget
 #: resolves the name itself; a wrong one costs one turn and is never refused here.
 SKILL_WORDS = "run the skill {command}"
 SKILL_WORDS_WITH_ARGUMENTS = "run the skill {command} with arguments: {arguments}"
+
+#: What a bare word that is also a command is answered with when there is no
+#: Session to name as the other reading — the newest Anchor is an Assistant
+#: Conversation and the roster is empty. The wording with candidates
+#: (`_which_one`) cannot be used there: it would end on an empty list.
+WORDS_OR_THE_COMMAND = (
+    "{word!r} could be the command or words for the assistant — say {command} for the "
+    "command, or reply to the assistant's message to send it as words"
+)
 
 
 class InboundClass(StrEnum):
@@ -149,6 +169,10 @@ class Classification:
     target: SessionTarget | None = None
     #: Set for APPROVAL_RELAY only. The pending dialog's handle, from the Anchor row.
     approval_id: str = ""
+    #: Set for DELEGATION only, and only for an Assistant Conversation's turn:
+    #: the thread to resume, read off the Anchor row (ADR 0021 §7). Empty is the
+    #: top-level `>`, which is one turn on a thread of its own.
+    thread_id: str = ""
     #: Set for APPROVAL_RELAY only. What the numeral resolved to.
     verdict: ApprovalVerdict | None = None
     #: Set for MENU_PICK only. The screen's row, and the 1-based position picked;
@@ -209,13 +233,20 @@ class InboundRouter:
                 if position is not None:
                     return self._as_menu_pick(anchor, position)
             else:
+                thread_id = conversation_of(anchor)
+                if thread_id is not None:
+                    # An Assistant Conversation's row (ADR 0021 §7). Everything
+                    # inside it is the user's words to it, markers and numerals
+                    # alike, so the body goes as it was typed.
+                    return Classification(
+                        kind=InboundClass.DELEGATION, text=body, thread_id=thread_id
+                    )
                 session = self._live_session_of(anchor)
                 if session is not None:
                     return self._as_reply(body, anchor, session)
             # A row whose Session the roster no longer holds is an unknown
             # Anchor: words fall through to the grammar below, a numeral is
-            # refused there. A reply to an Anchor that is not a Session's — an
-            # Assistant Conversation's (ADR 0021 §7) — is #265's branch here.
+            # refused there.
 
         grammar = self._grammar
         if body.startswith(grammar.control_prefix):
@@ -358,19 +389,27 @@ class InboundRouter:
         )
 
     def _as_bare_text(self, body: str) -> Classification:
+        # "Reply to the previous message" (ADR 0021 §2, generalised by §7): with
+        # messages lying flat on this surface, the newest Anchor's target takes
+        # the place the Focus Session has on the voice side, and that target may
+        # be an Assistant Conversation as easily as a Session. A newest row the
+        # roster no longer holds is skipped rather than refused on, and today's
+        # rule stands.
+        newest = self._anchors.newest() if self._anchors is not None else None
+        thread_id = conversation_of(newest) if newest is not None else None
         live = self._sessions.live()
-        if not live:
+        if thread_id is None and not live:
             return self._refuse("nothing is running for me to pass that to")
 
         collision = self._command_collision(body, live)
         if collision is not None:
             return collision
 
-        # "Reply to the previous message" (ADR 0021 §2): with messages lying flat
-        # on this surface, the newest Anchor's target takes the place the Focus
-        # Session has on the voice side. A newest row the roster no longer holds
-        # is skipped rather than refused on, and today's rule stands.
-        newest = self._anchors.newest() if self._anchors is not None else None
+        if thread_id is not None:
+            # A conversation is a target of its own and needs no roster behind
+            # it: the words go on its thread whether or not a Session is live.
+            return Classification(kind=InboundClass.DELEGATION, text=body, thread_id=thread_id)
+
         session = self._live_session_of(newest) if newest is not None else None
         if session is not None:
             return Classification(kind=InboundClass.ANSWER_RELAY, text=body, target=session.target)
@@ -385,13 +424,22 @@ class InboundRouter:
         Exact match only. Guarding a whole sentence that merely *starts* with a
         command word would swallow ordinary speech — "stop after the tests pass"
         is words for a Session and nothing else.
+
+        **The second reading is named, never left blank.** With Sessions live it
+        is "words for one of these", and the refusal lists them so the user can
+        pick. With none — the newest Anchor an Assistant Conversation and the
+        roster empty (ADR 0021 §7) — it is "words for the assistant", and the
+        refusal says to reply to it. Falling through to the listing wording
+        there would end the sentence on an empty list.
         """
         if body.casefold() not in self._grammar.control_commands:
             return None
+        command = f"{self._grammar.control_prefix}{body.casefold()}"
+        if not live:
+            return self._refuse(WORDS_OR_THE_COMMAND.format(word=body, command=command))
         return self._refuse(
             f"{body!r} could be the command or words for a session — "
-            f"say {self._grammar.control_prefix}{body.casefold()} for the command, or "
-            f"{self._which_one(live)}"
+            f"say {command} for the command, or {self._which_one(live)}"
         )
 
     def _which_one(self, candidates: tuple[Session, ...]) -> str:

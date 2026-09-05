@@ -53,6 +53,9 @@ class Hub:
         cool_down_seconds: float = 30.0,
         speech_settle_seconds: float = 5.0,
         anchor_rows_per_session: int = 100,
+        assistant_conversations: int = 3,
+        open_conversation: object = None,
+        commands: frozenset[str] = COMMANDS,
     ) -> None:
         self.now = 1_000.0
         switches = Switchboard()
@@ -90,11 +93,13 @@ class Hub:
                 cool_down_seconds=cool_down_seconds,
                 speech_settle_seconds=speech_settle_seconds,
                 anchor_rows_per_session=anchor_rows_per_session,
+                assistant_conversations=assistant_conversations,
             ),
-            grammar=TextGrammar(control_commands=COMMANDS),
+            grammar=TextGrammar(control_commands=commands),
             clock=lambda: self.now,
             control=control,  # type: ignore[arg-type]
             delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
             instruction_context=instruction_context() if instructions else None,
         )
 

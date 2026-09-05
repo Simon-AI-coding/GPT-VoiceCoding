@@ -224,5 +224,13 @@ class ControlPlane:
         return payloads.screen_document(self._core.config_screen())
 
     async def _assistant(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Open an Assistant Conversation (ADR 0021 §7). The hub refuses until #265 builds it."""
-        return {"text": await self._core.open_assistant()}
+        """Open an Assistant Conversation and answer with its opening line (ADR 0021 §7).
+
+        The same screen the Companion Channel's menu opens, in the same words.
+        A surface reached through here registers no Anchor — only a message
+        actually sent to the user can be replied to — so `bridgectl assistant`
+        opens a thread the chat cannot continue. That is the shape `sessions`
+        and `config` already have: the screen is the answer, and the row belongs
+        to the send.
+        """
+        return payloads.screen_document(await self._core.open_assistant())

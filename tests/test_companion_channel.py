@@ -51,9 +51,14 @@ from gpt_voicecoding.adapters.companion_channel.telegram.adapter import (
 )
 from gpt_voicecoding.adapters.companion_channel.telegram.layout import keyboard
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
-from gpt_voicecoding.core.briefing import DISAMBIGUATED_LABEL_TEMPLATE
+from gpt_voicecoding.core.briefing import (
+    ASSISTANT_REPLY_PLACEHOLDER,
+    DISAMBIGUATED_LABEL_TEMPLATE,
+    SAY_TO_PLACEHOLDER,
+)
 from gpt_voicecoding.engine.composition import import_factory
 from gpt_voicecoding.seams.companion_channel import (
+    PLACEHOLDER_LIMIT,
     BriefState,
     ChannelReceipt,
     CompanionChannel,
@@ -783,6 +788,91 @@ class TestWhatAPushLandedUnder:
         assert receipt.outcome is Delivery.DELIVERED
         assert receipt.message_ids == tuple(str(n) for n in range(1, len(api.sent()) + 1))
         assert len(receipt.message_ids) > 1
+
+    def test_a_reply_bar_becomes_a_force_reply_carrying_cores_words(self) -> None:
+        """ADR 0021 §7: the courtesy on an Assistant Conversation's messages."""
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api).send(
+                "the assistant is listening",
+                request_id=new_request_id(),
+                reply_bar="your words for the assistant",
+            )
+        )
+
+        (sent,) = api.method_calls("sendMessage")
+        assert sent["reply_markup"] == {
+            "force_reply": True,
+            "input_field_placeholder": "your words for the assistant",
+        }
+
+    def test_a_reply_bar_rides_the_last_part_of_a_split_send(self) -> None:
+        """The bar sits under the final message; on an earlier part the next cancels it."""
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api).send(
+                "hello world " * 900, request_id=new_request_id(), reply_bar="say more"
+            )
+        )
+
+        parts = api.method_calls("sendMessage")
+        assert len(parts) > 1
+        assert "reply_markup" not in parts[0]
+        assert parts[-1]["reply_markup"] == {
+            "force_reply": True,
+            "input_field_placeholder": "say more",
+        }
+
+    def test_a_placeholder_past_the_api_bound_costs_the_bar_and_not_the_message(self) -> None:
+        """Telegram refuses the whole `sendMessage` over it, and the bar rides the last part."""
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send("the answer", request_id=new_request_id(), reply_bar="x" * 65)
+        )
+
+        assert receipt.outcome is Delivery.DELIVERED
+        (sent,) = api.method_calls("sendMessage")
+        assert sent["text"] == "the answer"
+        assert "reply_markup" not in sent
+
+    def test_a_placeholder_exactly_at_the_bound_is_carried(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).send("hi", request_id=new_request_id(), reply_bar="x" * 64))
+
+        (sent,) = api.method_calls("sendMessage")
+        assert sent["reply_markup"]["input_field_placeholder"] == "x" * 64
+
+    def test_cores_own_placeholders_are_inside_the_bound(self) -> None:
+        """The two Core sends today. A longer one would silently lose its reply bar."""
+        for placeholder in (ASSISTANT_REPLY_PLACEHOLDER, SAY_TO_PLACEHOLDER):
+            assert len(placeholder) <= PLACEHOLDER_LIMIT
+
+    def test_a_send_with_no_reply_bar_opens_none(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).send("just words", request_id=new_request_id()))
+
+        assert "reply_markup" not in api.method_calls("sendMessage")[0]
+
+    def test_a_reply_bar_never_displaces_the_buttons_a_notice_drew(self) -> None:
+        """A message carries one markup; the buttons are what a numeral picks from."""
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api).send(
+                "pick one",
+                request_id=new_request_id(),
+                notice=MenuNotice(heading="pick one", options=("first", "second")),
+                reply_bar="or say it in words",
+            )
+        )
+
+        (sent,) = api.method_calls("sendMessage")
+        assert "inline_keyboard" in sent["reply_markup"]
 
     def test_a_split_send_that_failed_after_a_part_landed_still_lists_that_part(self) -> None:
         """UNKNOWN, and the landed part is named: it exists and can be replied to."""
@@ -1877,11 +1967,12 @@ class TestLayingOutAMenuScreen:
             ]
         }
 
-    def test_the_prompt_asks_for_words_with_a_force_reply_and_no_buttons(self) -> None:
-        laid_out = lay_out(MenuNotice(heading="Say to a · b:", expects_words=True))
+    def test_a_screen_with_no_labels_draws_no_markup_of_any_kind(self) -> None:
+        """The reply bar is `send`'s `reply_bar` now, and this module decides none of it."""
+        laid_out = lay_out(MenuNotice(heading="Say to a · b:"))
 
         assert laid_out.text == "Say to a · b:"
-        assert laid_out.reply_markup == {"force_reply": True}
+        assert laid_out.reply_markup is None
 
     def test_a_screen_is_sent_as_one_message_with_its_markup(self) -> None:
         api = FakeTelegram()

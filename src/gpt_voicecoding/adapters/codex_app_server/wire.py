@@ -72,6 +72,15 @@ _OPCODE_PONG = 0xA
 METHOD_NOT_FOUND = -32601
 
 
+#: What codex says about a thread that exists but has never done anything. It
+#: has no rollout file yet, so there is nothing to resume — a state the thread
+#: grows out of the moment it does any work. Here rather than in either adapter
+#: because both meet it: the Codex Session adapter when it subscribes to a TUI
+#: the user just started, and the Call adapter on the first turn of an Assistant
+#: Conversation, which opens with no turn at all (ADR 0021 §7, #265).
+NO_ROLLOUT_YET = "no rollout found"
+
+
 class WireError(Exception):
     """This connection could not carry, or could not read, one message."""
 

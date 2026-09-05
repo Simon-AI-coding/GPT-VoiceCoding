@@ -22,12 +22,25 @@ string from `verify` and returns a positive non-delivery from `send` — a
 `ChannelReceipt` with no ids — never something Bridge Core could mistake for
 delivery. It never emits.
 
+**A notice crosses as a structured brief, beside its text** (ADR 0021 §5). Core
+fills `SessionNotice` / `RosterNotice` from `core/briefing.py`'s wording tables
+— the same words `briefing.text` prints — and hands one to `send` as the
+optional `notice` keyword; the `text` beside it is that rendering, so a channel
+that draws no layout (the null one, a log) prints it and loses nothing, and one
+that does (Telegram) lays the brief out and chooses no words. The brief is an
+optional argument rather than a second verb, and its types live here rather
+than in a shared module, on the Call seam's precedent: `SpokenBrief` is that
+seam's own carrier in `seams/call.py`, filled by `briefing.spoken`. `BriefState`
+is the one non-string field, so an adapter can key a state light on a closed
+enum instead of on English words — the words stay Core's; the light is layout.
+
 Adapters: Telegram is the generic public one.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from gpt_voicecoding.seams.delivery import DeliveryReceipt
@@ -69,6 +82,105 @@ class ChannelReceipt(DeliveryReceipt):
     message_ids: tuple[str, ...] = ()
 
 
+class BriefState(StrEnum):
+    """What one Session is doing, in the five words the user is ever told.
+
+    Deliberately not `SessionState`: that is the agent's own vocabulary for a
+    lifecycle (`running`, `idle`, `waiting`), and these five are what the user
+    is owed — three of them actionable, one of them the honest admission that
+    something could not be read.
+
+    **Defined at the seam, read by Core.** The words for each state are Core's
+    (`core/briefing.py::STATE_WORDING`, ADR 0021 §5), but the closed set of
+    states is a fact an adapter needs apart from the words: the Telegram layout
+    lights one symbol per state, and keying that on English would make the
+    adapter read words it is not allowed to choose. One definition, here, so the
+    channel carries the same enum Briefing derives — Core imports the seams and
+    the seams import nothing of Core's, so this is the one direction it can go.
+    """
+
+    #: A question is waiting for the user, or a Codex turn ended (#166 B2).
+    DECISION = "decision"
+    #: A permission dialog is open.
+    PERMISSION = "permission"
+    #: This turn is done and the Session is idle for a new instruction (Q7).
+    FINISHED = "finished"
+    #: Mid-turn. Nothing is being asked of the user.
+    RUNNING = "running"
+    #: It stopped, and what it stopped on or what it said could not be read.
+    #: **Never counted as a decision** (#166 B7): the brief carries whatever was
+    #: read, and says plainly what it could not.
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionNotice:
+    """One Session Brief as this seam carries it — Briefing's words, as data.
+
+    Every string is one Briefing worded; the adapter assembles and never
+    phrases. `options` are the labels in order, because a numeral picks one by
+    position (ADR 0021 §3) and a surface that can draw buttons draws one per
+    label (§6); empty labels draw no buttons. `question` is empty for a notice
+    that asks nothing — a turn that `finished` — and the layout is the same with
+    the slot empty. `newest` is the newest message **whole**, or the omission
+    words: cutting it to a surface's limit is the adapter's layout act (§5), and
+    this carrier never holds a cut one — what it holds is `cut_marker`, the words
+    Core chose for the place a surface had to cut, so the cut is marked in the
+    user's vocabulary and the adapter still chooses none of it.
+    """
+
+    state: BriefState
+    state_word: str
+    agent: str
+    #: The Session Name where there is one, else the address (`_headline`'s rule).
+    name: str
+    question: str = ""
+    options: tuple[str, ...] = ()
+    #: Briefing's whole line for the recommendation, empty when there is none.
+    recommendation: str = ""
+    newest: str = ""
+    #: What ends a folded original a surface had to cut — Core's words.
+    cut_marker: str = ""
+    #: Whether the user can answer from this surface, and Briefing's line for it.
+    answerable_here: bool = True
+    answer_wording: str = ""
+    #: Why the user's last reply never arrived, in Briefing's words — empty when
+    #: nothing is undelivered, which is the ordinary case and draws no line.
+    undelivered: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.state_word.strip():
+            raise ValueError("a notice says what the Session is doing")
+
+
+@dataclass(frozen=True, slots=True)
+class RosterRowNotice:
+    """One roster line's facts: the state to light, and the three words to print."""
+
+    state: BriefState
+    state_word: str
+    agent: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RosterNotice:
+    """The Roster Brief as this seam carries it — rows in Briefing's order, counts whole.
+
+    `counts` is the whole counts line, heading included, for the reason
+    `SpokenRosterBrief` gives: with a Focus Session the counts are *the others*,
+    and that is a fact Briefing states, not a label an adapter writes.
+    """
+
+    rows: tuple[RosterRowNotice, ...]
+    counts: str
+
+
+#: What `send` may be handed beside its text. Two kinds, and an adapter lays
+#: each out in one visual language (ADR 0021 §5).
+Notice = SessionNotice | RosterNotice
+
+
 #: The closed set of events this seam raises. Nothing else may appear.
 CompanionChannelEvent = InboundText
 
@@ -84,6 +196,7 @@ class CompanionChannel(Protocol):
         request_id: RequestId,
         origin: str = "",
         revises: tuple[str, ...] = (),
+        notice: Notice | None = None,
     ) -> ChannelReceipt:
         """Push one message to the user, and say which ids it landed under.
 
@@ -91,7 +204,10 @@ class CompanionChannel(Protocol):
         it; empty for an unbidden push. `revises` is the ids from an earlier
         receipt: non-empty means "replace those messages' content with this
         text" rather than send a new one. An adapter that cannot edit ignores
-        it and reports as it always did.
+        it and reports as it always did. `notice` is the structured brief the
+        `text` renders, when the message is one: an adapter that lays notices
+        out lays this one out and sends that instead of `text`; one that does
+        not sends `text` and ignores it. The words are the same either way.
         """
         ...
 

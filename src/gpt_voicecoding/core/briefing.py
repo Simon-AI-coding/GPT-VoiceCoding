@@ -1,7 +1,7 @@
 """Briefing — the one source of words about what a Session is doing.
 
 Pure, in-process, and fed the roster rows Bridge Core has already folded: no
-I/O, no clock, no lane. Six functions and nothing else —
+I/O, no clock, no lane. Eight functions and nothing else —
 
     briefing.roster(sessions, focus)  -> RosterBrief
     briefing.session(session)         -> SessionBrief
@@ -9,19 +9,27 @@ I/O, no clock, no lane. Six functions and nothing else —
     briefing.text(brief)              -> str
     briefing.spoken(brief)            -> SpokenBrief
     briefing.handover(sessions, ...)  -> tuple[HandoverItem, ...]
+    briefing.notice(brief)            -> SessionNotice
+    briefing.roster_notice(brief)     -> RosterNotice
 
 `spoken` and `handover` are the Live Call's two: the first hands one brief across
 the Call seam as the seam's own carrier (no Core type crosses a seam, ADR 0001),
-the second builds everything a system-dialled call opens holding. Both are still
-only words about Sessions — the carriers are filled with the wording below, and
-the adapter that puts them on the wire chooses none of it.
+the second builds everything a system-dialled call opens holding. `notice` and
+`roster_notice` are the Companion Channel's pair, on the same precedent (ADR
+0021 §5): the seam's own carrier, filled from the tables below, laid out by the
+adapter. All four are still only words about Sessions — the carriers are filled
+with the wording below, and the adapter that puts them on the wire chooses none
+of it.
 
-`text` is the **only** text renderer for Session state. The Companion Channel,
-the engine log and ``bridgectl brief`` all print what it returns, so there is
-one place the wording lives and no two surfaces can describe one Session two
-ways. That was the defect #166 named: six renderers, each with its own half of
-the vocabulary, and a Session that read as *waiting* on one surface and *idle*
-on another.
+`text` is the **only** text renderer for Session state. The engine log and
+``bridgectl brief`` print what it returns, and the Companion Channel is handed
+it beside the structured brief, so there is one place the wording lives and no
+two surfaces can describe one Session two ways. That was the defect #166 named:
+six renderers, each with its own half of the vocabulary, and a Session that read
+as *waiting* on one surface and *idle* on another. What ADR 0021 §5 adds is that
+**the words must not fork; a layout per surface may**: the Telegram adapter
+arranges these same strings in its own shape, as the realtime adapter already
+does with `spoken`.
 
 **The engine never condenses.** `newest` is the newest assistant message whole,
 under ADR 0016's omission rules, and the decision carries the prompt, every
@@ -75,30 +83,13 @@ from gpt_voicecoding.seams.call import (
     SpokenBrief,
     SpokenRosterBrief,
 )
+from gpt_voicecoding.seams.companion_channel import (
+    BriefState,
+    RosterNotice,
+    RosterRowNotice,
+    SessionNotice,
+)
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
-
-
-class BriefState(StrEnum):
-    """What one Session is doing, in the five words the user is ever told.
-
-    Deliberately not `SessionState`: that is the agent's own vocabulary for a
-    lifecycle (`running`, `idle`, `waiting`), and these five are what the user
-    is owed — three of them actionable, one of them the honest admission that
-    something could not be read.
-    """
-
-    #: A question is waiting for the user, or a Codex turn ended (#166 B2).
-    DECISION = "decision"
-    #: A permission dialog is open.
-    PERMISSION = "permission"
-    #: This turn is done and the Session is idle for a new instruction (Q7).
-    FINISHED = "finished"
-    #: Mid-turn. Nothing is being asked of the user.
-    RUNNING = "running"
-    #: It stopped, and what it stopped on or what it said could not be read.
-    #: **Never counted as a decision** (#166 B7): the brief carries whatever was
-    #: read, and says plainly what it could not.
-    UNREADABLE = "unreadable"
 
 
 class NewestState(StrEnum):
@@ -134,6 +125,44 @@ STATE_WORDING: Mapping[BriefState, str] = {
     BriefState.RUNNING: "running",
     BriefState.UNREADABLE: "unreadable",
 }
+
+
+class NoticeWord(StrEnum):
+    """The fixed words a notice needs that are not a state: keys into `NOTICE_WORDING`."""
+
+    #: The state line of a notice whose decision has closed (ADR 0021 §8).
+    HANDLED = "handled"
+    #: The one line a Session's end is announced with (ADR 0021 §9).
+    ENDED = "ended"
+    #: The two labels a permission notice offers (ADR 0021 §6).
+    ALLOW = "allow"
+    DENY = "deny"
+    #: What ends a folded original that a surface had to cut (ADR 0021 §5).
+    TRUNCATED = "truncated"
+
+
+#: The words themselves. **All English** (Simon, 2026-09-06): one table, chosen
+#: here, laid out by every adapter as it stands — no per-surface language and no
+#: adapter-held translation, which would be the second vocabulary ADR 0021 §5
+#: exists to prevent. The Voice re-renders them in speech; Telegram prints them.
+NOTICE_WORDING: Mapping[NoticeWord, str] = {
+    NoticeWord.HANDLED: "handled",
+    NoticeWord.ENDED: "ended",
+    NoticeWord.ALLOW: "allow",
+    NoticeWord.DENY: "deny",
+    NoticeWord.TRUNCATED: "… cut here; the rest is on the terminal",
+}
+
+#: The prompt a surface shows when the user chose to say something to one
+#: Session (ADR 0021 §6, the `send message` screen). A template, because the
+#: name goes inside the sentence; `say_to` fills it.
+SAY_TO_TEMPLATE = "Say to {name}:"
+
+
+def say_to(name: str) -> str:
+    """The `Say to <name>:` prompt, in this module's words."""
+    return SAY_TO_TEMPLATE.format(name=name)
+
 
 #: What the user hears back when their message carried no text at all — a voice
 #: note, a photo, a file. The Companion Channel is text only this iteration (ADR
@@ -319,6 +348,19 @@ def session(session: Session, *, question_answerable: bool = False) -> SessionBr
     )
 
 
+def brief_state(session: Session) -> BriefState:
+    """Which of the five states this row is in, read the way every brief reads it.
+
+    Public for the one caller outside a brief that needs the user's five words
+    rather than the lane's lifecycle: the Relay pipeline, deciding whether the
+    words it carried answered a question the Session merely *said* — a Codex
+    turn that ended asking, which no `WaitingFor` records (ADR 0013's
+    amendment, `core/relays.py::RelayAuthority`). One reading, so the receipt
+    and the notice cannot disagree about whether there was a question.
+    """
+    return _state(session)
+
+
 def earns_a_brief(session: Session) -> bool:
     """Whether this Session has anything the user is owed a whole brief about.
 
@@ -375,6 +417,61 @@ def spoken(brief: SessionBrief) -> SpokenBrief:
         answerable_here=_answer_wording(brief.answerable_here),
         last_activity_at=_when(brief.last_activity_at),
         undelivered=_undelivered_wording(brief.undelivered),
+    )
+
+
+def notice(brief: SessionBrief) -> SessionNotice:
+    """One Session Brief as the Companion Channel seam carries it (ADR 0021 §5).
+
+    The `spoken` rule on the other surface: a Core type may not cross a seam,
+    so the seam's carrier crosses, and every string in it is one this module
+    worded. What the channel needs that the Voice does not is the closed state
+    (to light a symbol, which is layout) and the option labels as a tuple in
+    order, because a numeral picks one by position (§3) and a surface that can
+    draw buttons draws one per label (§6).
+
+    A permission's question slot is the same line `text` prints for it, and its
+    labels are the table's `allow` / `deny` (§6): numeral 1 resolves to `allow`
+    on every surface because the labels are Core's. A notice that asks nothing
+    has an empty question and no labels; the layout is the same with the slot
+    empty. `newest` is carried **whole** — cutting it to a surface's limit is
+    that surface's layout act, marked with the table's words where it happens.
+    """
+    question, options, recommendation = _asked(brief)
+    return SessionNotice(
+        state=brief.state,
+        state_word=STATE_WORDING[brief.state],
+        agent=str(brief.agent),
+        name=str(brief.name) if brief.name is not None else str(brief.target),
+        question=question,
+        options=options,
+        recommendation=recommendation,
+        newest=brief.newest.words,
+        cut_marker=NOTICE_WORDING[NoticeWord.TRUNCATED],
+        answerable_here=brief.answerable_here,
+        answer_wording=f"answer {_answer_wording(brief.answerable_here)}",
+        undelivered=_undelivered_wording(brief.undelivered),
+    )
+
+
+def roster_notice(brief: RosterBrief) -> RosterNotice:
+    """The Roster Brief as the Companion Channel seam carries it — `text`'s rows, as data.
+
+    Rows in `text`'s own order, the Focus Session first, and the counts line
+    whole for the reason `SpokenRosterBrief` gives: *the others* is a fact, and
+    an adapter that wrote the heading would be deciding it.
+    """
+    return RosterNotice(
+        rows=tuple(
+            RosterRowNotice(
+                state=row.state,
+                state_word=STATE_WORDING[row.state],
+                agent=str(row.agent),
+                name=str(row.name) if row.name is not None else str(row.target),
+            )
+            for row in brief.rows
+        ),
+        counts=_counts_line(brief),
     )
 
 
@@ -885,11 +982,7 @@ def _decision_lines(brief: SessionBrief) -> list[str]:
     decision = brief.decision
     if decision is None:
         return []
-    if (
-        brief.state is BriefState.PERMISSION
-        or decision.tool is not None
-        or decision.summary is not None
-    ):
+    if _is_permission(brief):
         asked = decision.tool or "a tool"
         return [f"  permission: {asked}" + (f" — {decision.summary}" if decision.summary else "")]
     lines = [f"  asked: {decision.prompt or 'it asked you something'}"]
@@ -902,6 +995,49 @@ def _decision_lines(brief: SessionBrief) -> list[str]:
     if decision.recommendation:
         lines.append(f"  recommends: {decision.recommendation}")
     return lines
+
+
+def _asked(brief: SessionBrief) -> tuple[str, tuple[str, ...], str]:
+    """The question slot, the labels in order and the recommendation, for a notice.
+
+    Which shape a decision is follows `_decision_lines`' rule — the state, not
+    the fields — so the two renderers cannot disagree about whether a stop is a
+    permission. A permission's slot is its `permission:` line and its labels are
+    the table's; a question's slot is the prompt and its labels the options'
+    text; a Session asking nothing has an empty slot and no labels. The
+    recommendation crosses as the whole `recommends:` line `text` prints, so
+    the adapter has a line to place and no word to add to it.
+    """
+    decision = brief.decision
+    if decision is None:
+        return "", (), ""
+    if _is_permission(brief):
+        (line,) = _decision_lines(brief)
+        return (
+            line.strip(),
+            (NOTICE_WORDING[NoticeWord.ALLOW], NOTICE_WORDING[NoticeWord.DENY]),
+            "",
+        )
+    return (
+        decision.prompt or "it asked you something",
+        tuple(option.text for option in decision.options),
+        f"recommends: {decision.recommendation}" if decision.recommendation else "",
+    )
+
+
+def _is_permission(brief: SessionBrief) -> bool:
+    """Whether the decision a brief carries is a permission — the rule `_decision_lines` states.
+
+    The state decides, and the two permission-only fields are the fallback for
+    a permission that reaches here under `UNREADABLE`. One predicate, so the
+    text renderer and the channel notice cannot come to read one stop two ways.
+    """
+    decision = brief.decision
+    return decision is not None and (
+        brief.state is BriefState.PERMISSION
+        or decision.tool is not None
+        or decision.summary is not None
+    )
 
 
 def _roster_lines(brief: RosterBrief) -> list[str]:

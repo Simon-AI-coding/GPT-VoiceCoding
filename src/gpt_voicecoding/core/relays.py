@@ -9,18 +9,24 @@ inside an adapter would be a second ledger and a second policy.
 
 Three rules hang off that, all of them here:
 
-- **The receipt is a grade and a reason, never a sentence.** The verb answers
-  with `RelayOutcome`: where the words are, what the last attempt proved as the
-  seam's own `DeliveryReceipt` — or nothing, when none was made — and one
-  `RelayReason` code. Seven English sentences used to live here and be rendered
+- **The receipt is a grade and a reason, and the sentence for it is held once,
+  here.** The verb answers with `RelayOutcome`: where the words are, what the
+  last attempt proved as the seam's own `DeliveryReceipt` — or nothing, when
+  none was made — one `RelayReason` code, and whether the route carried the
+  user's authority. Seven English sentences used to live here and be rendered
   verbatim by whatever surface asked, which made Bridge Core the author of words
   the user hears. The Voice re-renders whatever it is handed (#175), so those
   sentences were a second renderer for words the model rewrites anyway; they are
-  the Voice's rule now, in the generated instructions. Legacy had no scripted
-  acknowledgement to port (`legacy@1d32845:skill/SKILL.md:63-68` covers failure
-  only) — **dropped**; its synchronous relay reply
-  (`legacy@1d32845:bridge/__main__.py:656-661,683-780`) is **adapted** into this
-  structured answer.
+  the Voice's rule now, in the generated instructions. The Companion Channel is
+  a surface that prints rather than re-renders, and showing it the three codes
+  was refused as the log feel the requirements page rejects (ADR 0021,
+  Receipts); so `receipt_sentence` renders the same facts `receipt_line` prints
+  into one sentence, **once, beside the codes**, with ADR 0013's clause when the
+  words went without the user's authority. `bridgectl relay` keeps the codes.
+  Legacy had no scripted acknowledgement to port
+  (`legacy@1d32845:skill/SKILL.md:63-68` covers failure only) — **dropped**; its
+  synchronous relay reply (`legacy@1d32845:bridge/__main__.py:656-661,683-780`)
+  is **adapted** into this structured answer.
 - **A ten-minute ceiling, then a reported failure.** The number is
   `CorePolicy`'s, not this module's, and expiry takes the entry *out* of the
   ledger, so REPORTED_FAILED means what it says: nothing retries it.
@@ -68,7 +74,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 
+from gpt_voicecoding.core.briefing import brief_state
 from gpt_voicecoding.core.clock import Clock, default_clock
 from gpt_voicecoding.core.lifecycle import Lifecycle, RelayReason
 from gpt_voicecoding.core.policy import CorePolicy
@@ -82,6 +90,7 @@ from gpt_voicecoding.seams.agent import (
     WaitingKind,
     derive_reply_window,
 )
+from gpt_voicecoding.seams.companion_channel import BriefState
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.identity import AgentKind, RequestId, SessionTarget, new_request_id
 
@@ -105,6 +114,28 @@ _REASON_BY_GRADE: Mapping[Delivery | None, RelayReason] = {
 NO_GRADE = "none"
 
 
+class RelayAuthority(StrEnum):
+    """What the route the words took made of them (ADR 0013 §3 and its amendment).
+
+    Three cases, and the third is the one that earns a clause on the receipt.
+    An answer through a question hook the lane still held (ADR 0015) and a
+    permission verdict are **the user's own**. Words into an inbox are a peer's
+    message: whether the Session acts on them is its call. That matters to the
+    user only when there was a question to answer — a Session that merely
+    *said* it, with no hook behind it — because "arrived" is then heard as
+    "accepted as mine". Words for a Session that asked nothing carry no more
+    authority, and nobody needs telling so.
+    """
+
+    #: The held-hook answer or the verdict: the user's own decision, carried whole.
+    AS_THE_USER = "as_the_user"
+    #: Plain text into a Session that ended its turn on a question it merely
+    #: said. The words travel; the user's say-so does not (ADR 0013 §3).
+    WORDS_ON_A_QUESTION = "words_on_a_question"
+    #: Plain text into a Session that asked nothing — an instruction, a supplement.
+    WORDS = "words"
+
+
 def reason_for(receipt: DeliveryReceipt | None) -> RelayReason:
     """The code an attempt earns, or the one that says nothing was attempted."""
     return _REASON_BY_GRADE[None if receipt is None else receipt.outcome]
@@ -124,6 +155,78 @@ def receipt_line(*, state: str, grade: str, reason: str) -> str:
     return f"state={state} grade={grade} reason={reason}"
 
 
+#: ADR 0013's clause, for a receipt on a route that carried the words and not
+#: the user's say-so: the Session may act on them or not, and the user is owed
+#: knowing that "arrived" is not "accepted as yours".
+NO_AUTHORITY_CLAUSE = "The Session may not treat this as your own confirmation."
+
+#: One sentence per reason code — the same three facts `receipt_line` prints,
+#: for a surface that shows the user words rather than a line a harness parses.
+#: Total over the codes, like `_REASON_BY_GRADE` is over the grades.
+_RECEIPT_WORDING: Mapping[RelayReason, str] = {
+    RelayReason.DELIVERED: "Your words arrived.",
+    RelayReason.AWAITING_REPLY_WINDOW: (
+        "Your words are waiting, and go in when the Session next takes a turn."
+    ),
+    RelayReason.DUPLICATE_RISK: (
+        "Nobody can tell whether your words arrived; they are kept and not sent again — "
+        "say them again if you want them to go."
+    ),
+    RelayReason.HELD_FAR_SIDE: (
+        "Your words are held on the far side, in front of a person, and will settle there."
+    ),
+    RelayReason.CEILING_PASSED: "Your words waited too long and were dropped; nothing sends them.",
+    RelayReason.SESSION_ENDED: "That Session ended before your words could go.",
+    RelayReason.QUESTION_UNANSWERABLE: (
+        "That question can no longer be answered from here; answer it at the terminal."
+    ),
+}
+
+#: The one place the grade changes the sentence: words that wait after an
+#: attempt **proved** they did not arrive are not words that never went.
+_FAILED_AND_WAITING = "The attempt did not arrive; your words wait for the Session's next turn."
+
+#: The codes under which the words reached, or may yet reach, the Session — the
+#: only ones where saying what the Session may make of them means anything.
+_WORDS_MAY_LAND = frozenset(
+    {
+        RelayReason.DELIVERED,
+        RelayReason.AWAITING_REPLY_WINDOW,
+        RelayReason.DUPLICATE_RISK,
+        RelayReason.HELD_FAR_SIDE,
+    }
+)
+
+
+def receipt_sentence(outcome: RelayOutcome) -> str:
+    """The receipt as one sentence — the three facts of `receipt_line`, worded once.
+
+    For the surface that prints what it is handed (the Companion Channel, ADR
+    0021 Receipts). The reason chooses the sentence, the grade changes it in the
+    one case where an attempt proved something the code alone does not say, and
+    the clause is added on ADR 0013's test: the words reached, or may reach, the
+    Session **and** answered a question it merely said — plain text into an
+    inbox, on a Session whose turn ended asking, with no held hook and no
+    verdict. Words for a Session that asked nothing get no clause: there is no
+    answer for the user to mistake for their own. Nothing is said about
+    authority where nothing arrived and nothing will.
+    """
+    if (
+        outcome.reason is RelayReason.AWAITING_REPLY_WINDOW
+        and outcome.receipt is not None
+        and outcome.receipt.outcome is Delivery.FAILED
+    ):
+        sentence = _FAILED_AND_WAITING
+    else:
+        sentence = _RECEIPT_WORDING[outcome.reason]
+    if (
+        outcome.reason in _WORDS_MAY_LAND
+        and outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION
+    ):
+        return f"{sentence} {NO_AUTHORITY_CLAUSE}"
+    return sentence
+
+
 def may_be_retried(receipt: DeliveryReceipt | None) -> bool:
     """Whether a waiting Relay may go again on this system's own authority (P9).
 
@@ -138,10 +241,11 @@ def may_be_retried(receipt: DeliveryReceipt | None) -> bool:
 class RelayOutcome:
     """Where one Relay stands: the receipt, and the whole of it.
 
-    Three facts and no sentence. `state` is where the words are, `receipt` is
+    Four facts and no sentence. `state` is where the words are, `receipt` is
     what the last attempt proved — the seam's own value, evidence included, or
-    `None` when nothing has been attempted — and `reason` is the one code that
-    says why it stands there.
+    `None` when nothing has been attempted — `reason` is the one code that says
+    why it stands there, and `authority` is what the route made of them: the
+    user's own answer, or words — on a question, or not (ADR 0013 §3).
 
     **"Not attempted" is the absent attempt, never `UNKNOWN`.** The two are the
     difference between "it may already have arrived" and "it never left this
@@ -157,6 +261,11 @@ class RelayOutcome:
     reason: RelayReason
     #: The last attempt, whole, or `None` when nothing was attempted.
     receipt: DeliveryReceipt | None = None
+    #: What the route made of the words (`RelayAuthority`): the user's own, or
+    #: a peer's message — and if the latter, whether there was a question they
+    #: will be heard as answering. A surface that reports arrival owes the user
+    #: that last difference (`receipt_sentence`).
+    authority: RelayAuthority = RelayAuthority.WORDS
 
     def __post_init__(self) -> None:
         if (self.state is Lifecycle.DELIVERED) is not (
@@ -244,6 +353,24 @@ class RelayPipeline:
                 reason=RelayReason.QUESTION_UNANSWERABLE,
             )
         may_go_now = chosen is RelayRoute.SUPPLEMENT or window is ReplyWindow.OPEN
+        # ADR 0015's route, and the only one here that carries the user's own
+        # say-so: the Session asked through a hook the lane still holds, and the
+        # words go into that hook now. Mid-turn words and words for an idle
+        # Session go over the inbox as a peer's message (ADR 0013 §3) — and
+        # whether that Session had *asked* is Briefing's reading of the row,
+        # because a Codex turn that ended on a question records no wait.
+        held = (
+            chosen is RelayRoute.DELIVER
+            and session.waiting_for.kind is WaitingKind.QUESTION
+            and question_answerable
+            and may_go_now
+        )
+        if held:
+            authority = RelayAuthority.AS_THE_USER
+        elif brief_state(session) is BriefState.DECISION:
+            authority = RelayAuthority.WORDS_ON_A_QUESTION
+        else:
+            authority = RelayAuthority.WORDS
         if may_go_now:
             attempt = await adapter.answer_relay(target, text, request_id=rid, route=chosen)
             if attempt.is_delivered:
@@ -254,6 +381,7 @@ class RelayPipeline:
                     route=chosen,
                     reason=RelayReason.DELIVERED,
                     receipt=attempt,
+                    authority=authority,
                 )
             _log.info(
                 "relay %s not proven delivered (%s: %s); it waits",
@@ -278,6 +406,7 @@ class RelayPipeline:
             route=RelayRoute.DELIVER,
             reason=reason_for(receipt),
             receipt=receipt,
+            authority=authority,
         )
 
     async def reply_window_opened(self, target: SessionTarget) -> tuple[RelayOutcome, ...]:
@@ -425,11 +554,14 @@ class RelayPipeline:
 
 
 __all__ = [
+    "NO_AUTHORITY_CLAUSE",
     "NO_GRADE",
+    "RelayAuthority",
     "RelayOutcome",
     "RelayPipeline",
     "RelayReason",
     "may_be_retried",
     "reason_for",
     "receipt_line",
+    "receipt_sentence",
 ]

@@ -67,10 +67,12 @@ from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import PendingRelay
 from gpt_voicecoding.core.relays import (
+    RelayAuthority,
     RelayOutcome,
     RelayPipeline,
     RelayReason,
     reason_for,
+    receipt_sentence,
 )
 from gpt_voicecoding.core.router import Classification, InboundClass, InboundRouter, TextGrammar
 from gpt_voicecoding.core.sessions import Session, SessionRegistry, UndeliveredRelay
@@ -119,7 +121,12 @@ from gpt_voicecoding.seams.call import (
     UserSpeech,
     VoiceSpeech,
 )
-from gpt_voicecoding.seams.companion_channel import ChannelReceipt, CompanionChannel, InboundText
+from gpt_voicecoding.seams.companion_channel import (
+    ChannelReceipt,
+    CompanionChannel,
+    InboundText,
+    Notice,
+)
 from gpt_voicecoding.seams.events import Event
 from gpt_voicecoding.seams.identity import (
     AgentKind,
@@ -822,6 +829,9 @@ class BridgeCore:
             route=RelayRoute.DELIVER,
             reason=reason_for(receipt),
             receipt=receipt,
+            # A verdict is nothing but the user's own decision (ADR 0013's
+            # amendment): the one route besides the held hook that carries it.
+            authority=RelayAuthority.AS_THE_USER,
         )
         # An Approval Relay is the user's own words arriving too (#165 Q2 sets
         # the focus from it for that reason), so a verdict that lands clears
@@ -1100,12 +1110,18 @@ class BridgeCore:
         # holding is read fresh at the moment it is dialled, from the roster
         # rather than from this reading (ADR 0017, #195). Which is why nothing
         # is returned — there is no route matrix left to report which door the
-        # notice went through.
+        # notice went through. The structured brief travels beside the text
+        # (ADR 0021 §5): same words, and a surface with a layout of its own
+        # arranges them rather than printing the lines.
         # **Every Stop Notice is an Anchor** (ADR 0021 §2), whatever it stopped
         # on: a reply to it is words for this Session, and a numeral picks from
         # the labels registered with it — the question's options, or the two
         # verdicts when it carried a permission (§6), on that dialog's handle.
-        await self._push(briefing.text(brief), anchor=_notice_anchor(target, waiting_for))
+        await self._push(
+            briefing.text(brief),
+            notice=briefing.notice(brief),
+            anchor=_notice_anchor(target, waiting_for),
+        )
 
     async def _session_ended(self, event: SessionEnded) -> None:
         try:
@@ -1204,13 +1220,18 @@ class BridgeCore:
             _log.info("handled inbound Companion Channel message kind=%s", found.kind)
 
     async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
-        """Carry a typed relay in, and answer it with the receipt the CLI prints.
+        """Carry a typed relay in, and answer it with the receipt as one sentence.
 
-        **Every inbound relay is answered**, and with the same three codes, not
-        only the ones that had to wait. The channel used to hear a sentence when
-        the words queued and silence when they went, which made "it worked" and
-        "nothing was read" the same observation. A receipt is a grade and a
-        reason; how it is said aloud is the Voice's business (#175).
+        **Every inbound relay is answered**, and from the same three facts the
+        CLI prints as codes, not only the ones that had to wait. The channel
+        used to hear a sentence when the words queued and silence when they
+        went, which made "it worked" and "nothing was read" the same
+        observation; then it heard the three codes, which is the log feel the
+        requirements page rejects. It hears `receipt_sentence` now (ADR 0021,
+        Receipts): the same facts, worded once in Core beside `receipt_line`,
+        with ADR 0013's clause when the words went without the user's
+        authority. `bridgectl relay` keeps the codes; the Voice keeps composing
+        its own sentence from the facts (#175).
         """
         assert found.target is not None  # the router sets one for every ANSWER_RELAY
         try:
@@ -1222,7 +1243,9 @@ class BridgeCore:
         # A receipt names the Session the words went to, so it is an Anchor: a
         # reply to it is more words for that Session (ADR 0021 §2). It offers
         # nothing to pick, and a numeral on it is refused.
-        await self._reply(outcome.line, origin=origin, anchor=_receipt_anchor(found.target))
+        await self._reply(
+            receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
+        )
 
     async def _approve_inbound(self, found: Classification, *, origin: str = "") -> None:
         """A numeral on a permission notice: the user's verdict, on that dialog (ADR 0021 §6).
@@ -1242,7 +1265,9 @@ class BridgeCore:
         if outcome is None:
             await self._reply(PERMISSION_ALREADY_SETTLED_HINT, origin=origin)
             return
-        await self._reply(outcome.line, origin=origin, anchor=_receipt_anchor(found.target))
+        await self._reply(
+            receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
+        )
 
     async def _settle(self, outcome: RelayOutcome) -> None:
         """Land one Relay's standing on the Session's row, and wake if it is news.
@@ -1356,7 +1381,9 @@ class BridgeCore:
         self._state.sessions.set_undelivered(session.target, undelivered)
         return True
 
-    async def _push(self, text: str, *, anchor: Anchor | None = None) -> None:
+    async def _push(
+        self, text: str, *, notice: Notice | None = None, anchor: Anchor | None = None
+    ) -> None:
         """One Companion Channel push, under the Message Switch. The only outlet left.
 
         What remains of the escalation pipeline (#195). The route matrix,
@@ -1375,7 +1402,7 @@ class BridgeCore:
         if not self.adjudicator.may_push():
             _log.info("the Message Switch is off; this notice reaches no outlet")
             return
-        receipt = await self._send(text, anchor=anchor)
+        receipt = await self._send(text, notice=notice, anchor=anchor)
         if receipt.is_delivered:
             return
         _log.info(
@@ -1421,7 +1448,12 @@ class BridgeCore:
         )
 
     async def _send(
-        self, text: str, *, origin: str = "", anchor: Anchor | None = None
+        self,
+        text: str,
+        *,
+        origin: str = "",
+        notice: Notice | None = None,
+        anchor: Anchor | None = None,
     ) -> ChannelReceipt:
         """One Companion Channel send, the one record every send writes — and its Anchor.
 
@@ -1449,11 +1481,14 @@ class BridgeCore:
         reply to.
 
         `origin` is echoed from the inbound event when this is a reply, and
-        empty for an unbidden push. Nothing here revises: editing a notice in
-        place (ADR 0021 §8) is #266's.
+        empty for an unbidden push. `notice` is the structured brief the text
+        renders, for a push that is one (ADR 0021 §5); a reply carries none.
+        Nothing here revises: editing a notice in place (ADR 0021 §8) is #266's.
         """
         request_id = new_request_id()
-        receipt = await self._channel.send(text, request_id=request_id, origin=origin)
+        receipt = await self._channel.send(
+            text, request_id=request_id, origin=origin, notice=notice
+        )
         _log.info(
             "sent Companion Channel message request=%s outcome=%s message_ids=%s",
             request_id,

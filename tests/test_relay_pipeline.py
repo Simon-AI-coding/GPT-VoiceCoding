@@ -16,6 +16,7 @@ happens to be doing.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,9 +26,21 @@ from gpt_voicecoding.core.errors import StaleSessionError, UnknownSessionError
 from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import RelayKind, RelayQueue
-from gpt_voicecoding.core.relays import RelayPipeline, RelayReason, reason_for
+from gpt_voicecoding.core.relays import (
+    NO_AUTHORITY_CLAUSE,
+    RelayAuthority,
+    RelayOutcome,
+    RelayPipeline,
+    RelayReason,
+    reason_for,
+    receipt_sentence,
+)
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.seams.agent import (
+    ProgressEntry,
+    ProgressObservation,
+    ProgressPhase,
+    ProgressRole,
     RelayRoute,
     ReplyWindow,
     SessionInspection,
@@ -634,3 +647,218 @@ class TestWhatATerminalRelaySaysAboutAnUnprovenAttempt:
 
         assert outcome.reason is RelayReason.SESSION_ENDED
         assert outcome.receipt is None
+
+
+def held_question(harness: Harness, target: SessionTarget = CLAUDE) -> None:
+    """The Session asked through a hook the lane still holds (ADR 0015's route)."""
+    harness.sessions.observed_one(
+        SessionInspection(
+            target=target,
+            workspace=Path("/tmp/workspace"),
+            state=SessionState.WAITING,
+            waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt="Which base?"),
+        ),
+        now=harness.now,
+    )
+    harness.agent.answerable_questions.add(target)
+
+
+def codex_ended_asking(harness: Harness, target: SessionTarget = CODEX) -> None:
+    """A Codex turn that ended on a question it merely said: no hook, no `WaitingFor`."""
+    harness.sessions.observed_one(
+        SessionInspection(
+            target=target,
+            workspace=Path("/tmp/workspace"),
+            state=SessionState.IDLE,
+            progress=ProgressObservation.readable(
+                has_history=True,
+                read_at=datetime(2026, 9, 6, tzinfo=UTC),
+                recent=(
+                    ProgressEntry(
+                        ordinal=0,
+                        role=ProgressRole.ASSISTANT,
+                        text="Merge into main or develop?",
+                        phase=ProgressPhase.FINAL_ANSWER,
+                    ),
+                ),
+            ),
+        ),
+        now=harness.now,
+    )
+
+
+class TestWhatTheRouteMadeOfTheWords:
+    """The fourth fact on a receipt: the user's own answer, or words — on a question or not.
+
+    ADR 0013's amendment and ADR 0021 (Receipts): two routes carry the user's
+    authority — a question the Session offered through a hook the lane still
+    holds, and a permission verdict. Every other Relay is words without their
+    say-so; when those words answered a question the Session merely said, the
+    user is owed that difference, and the surface that says so needs the fact
+    from the outcome rather than from a second reading of a row that may have
+    moved by then.
+    """
+
+    def test_an_answer_through_the_held_hook_is_the_users_own(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "main"))
+
+        assert outcome.state is Lifecycle.DELIVERED
+        assert outcome.authority is RelayAuthority.AS_THE_USER
+
+    def test_words_into_a_session_that_ended_asking_are_words_on_a_question(self) -> None:
+        harness = Harness()
+        codex_ended_asking(harness)
+
+        outcome = harness.relay("main")
+
+        assert outcome.state is Lifecycle.DELIVERED
+        assert outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION
+
+    def test_words_into_an_idle_session_that_asked_nothing_are_words(self) -> None:
+        """A Claude turn that ended without a hook asked nothing (`briefing.FINISHED`)."""
+        harness = Harness(window=ReplyWindow.OPEN, targets=(CLAUDE,))
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "carry on"))
+
+        assert outcome.state is Lifecycle.DELIVERED
+        assert outcome.authority is RelayAuthority.WORDS
+
+    def test_an_unread_codex_stop_is_briefed_as_a_decision_and_the_receipt_agrees(self) -> None:
+        """#166 B2's default, read once: the notice said `decision`, so the receipt says words."""
+        harness = Harness(window=ReplyWindow.OPEN)
+
+        assert harness.relay("carry on").authority is RelayAuthority.WORDS_ON_A_QUESTION
+
+    def test_words_that_queue_for_a_working_session_are_words(self) -> None:
+        assert Harness().relay().authority is RelayAuthority.WORDS
+
+    def test_a_question_the_lane_no_longer_holds_is_refused_as_words(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+        harness.agent.answerable_questions.clear()
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "main"))
+
+        assert outcome.reason is RelayReason.QUESTION_UNANSWERABLE
+        assert outcome.authority is not RelayAuthority.AS_THE_USER
+
+
+class TestTheReceiptSentence:
+    """The three codes as one sentence, held once beside the codes (ADR 0021, Receipts).
+
+    `bridgectl relay` keeps the codes; the Companion Channel answers with this.
+    The clause is ADR 0013's: added exactly when the words answered a question
+    the Session merely said — plain text, no held hook — and never on the
+    held-hook or permission routes, because both carry the user's authority.
+    """
+
+    def test_an_answer_over_the_inbox_to_a_said_question_arrives_with_the_clause(self) -> None:
+        harness = Harness()
+        codex_ended_asking(harness)
+
+        sentence = receipt_sentence(harness.relay("main"))
+
+        assert sentence.startswith("Your words arrived.")
+        assert sentence.endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_an_instruction_to_a_session_that_asked_nothing_gets_no_clause(self) -> None:
+        """No question, no answer to mistake for the user's own: the clause would mislead."""
+        harness = Harness(window=ReplyWindow.OPEN, targets=(CLAUDE,))
+
+        sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "carry on")))
+
+        assert sentence == "Your words arrived."
+
+    def test_a_delivered_answer_through_the_held_hook_gets_no_clause(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+
+        sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "main")))
+
+        assert sentence == "Your words arrived."
+
+    def test_a_permission_verdict_gets_no_clause(self) -> None:
+        outcome = RelayOutcome(
+            request_id=RequestId("rq-1"),
+            target=CLAUDE,
+            state=Lifecycle.DELIVERED,
+            route=RelayRoute.DELIVER,
+            reason=RelayReason.DELIVERED,
+            receipt=DeliveryReceipt(request_id=RequestId("rq-1"), outcome=Delivery.DELIVERED),
+            authority=RelayAuthority.AS_THE_USER,
+        )
+
+        assert receipt_sentence(outcome) == "Your words arrived."
+
+    def test_queued_words_say_they_wait(self) -> None:
+        sentence = receipt_sentence(Harness().relay())
+
+        assert sentence == "Your words are waiting, and go in when the Session next takes a turn."
+
+    def test_words_that_wait_on_a_question_carry_the_clause_for_when_they_land(self) -> None:
+        outcome = RelayOutcome(
+            request_id=RequestId("rq-1"),
+            target=CODEX,
+            state=Lifecycle.RETAINED,
+            route=RelayRoute.DELIVER,
+            reason=RelayReason.AWAITING_REPLY_WINDOW,
+            authority=RelayAuthority.WORDS_ON_A_QUESTION,
+        )
+
+        assert receipt_sentence(outcome).endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_a_proven_failure_that_waits_says_the_attempt_did_not_arrive(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN, agent=FakeAgent(outcome=Delivery.FAILED))
+
+        sentence = receipt_sentence(harness.relay())
+
+        assert "did not arrive" in sentence
+        assert "wait" in sentence
+
+    def test_an_unproven_attempt_is_said_to_be_kept_and_not_sent_again(self) -> None:
+        harness = Harness(agent=FakeAgent(outcome=Delivery.UNKNOWN))
+        codex_ended_asking(harness)
+
+        sentence = receipt_sentence(harness.relay())
+
+        assert "not sent again" in sentence
+        assert sentence.endswith(NO_AUTHORITY_CLAUSE)
+
+    def test_a_held_relay_is_said_to_be_in_front_of_a_person(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN, agent=FakeAgent(outcome=Delivery.HELD))
+
+        assert "held" in receipt_sentence(harness.relay())
+
+    def test_a_refused_question_names_the_terminal_and_carries_no_clause(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+        harness.agent.answerable_questions.clear()
+
+        sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "main")))
+
+        assert "terminal" in sentence
+        assert NO_AUTHORITY_CLAUSE not in sentence
+
+    def test_every_reason_has_a_sentence(self) -> None:
+        for reason in RelayReason:
+            outcome = RelayOutcome(
+                request_id=RequestId("rq-1"),
+                target=CODEX,
+                state=Lifecycle.REPORTED_FAILED
+                if reason
+                in {
+                    RelayReason.CEILING_PASSED,
+                    RelayReason.SESSION_ENDED,
+                    RelayReason.QUESTION_UNANSWERABLE,
+                }
+                else Lifecycle.RETAINED,
+                route=RelayRoute.DELIVER,
+                reason=reason,
+            )
+            if reason is RelayReason.DELIVERED:
+                continue
+            assert receipt_sentence(outcome).strip(), reason
+            assert "=" not in receipt_sentence(outcome), "a sentence, not the codes"

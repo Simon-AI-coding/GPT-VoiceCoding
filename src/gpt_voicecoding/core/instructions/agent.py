@@ -6,13 +6,16 @@ back to the Voice. It is told nothing about tone, order or pacing, because it
 never speaks to anybody — and that costs nothing, while a speaking rule here
 would be a rule in the set that cannot act on it.
 
-**Five actions, six forms, and three the call does not get.** `status`, the
-switch flip and the seam report are withheld: the voice call neither queries the
+**Five actions, six forms, and six the call does not get.** `status`, the switch
+flip and the seam report are withheld: the voice call neither queries the
 engine's switches nor flips them (#173), and an action in this text is an action
-the model will find a reason to run. The split is total over the closed action
-set by construction, so a ninth action fails generation until somebody decides
-which side of the line it is on — the same forcing function the Delegated set
-has for its own card.
+the model will find a reason to run. The three menu verbs — `sessions`, `config`
+and `assistant` (#264) — are withheld beside them: a screen is a surface's way
+of offering the user choices to press, and this half has `brief` for the roster
+and nothing to press on. The split is total over the closed action set by
+construction, so a twelfth action fails generation until somebody decides which
+side of the line it is on — the same forcing function the Delegated set has for
+its own card.
 
 **The forms come from the shared vocabulary, never from memory.** `USAGE` sits
 in `seams/control_plane.py` beside `Action`, and it is what `bridgectl` prints

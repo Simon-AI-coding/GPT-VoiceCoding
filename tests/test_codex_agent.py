@@ -1249,6 +1249,24 @@ class TestWhatItRaisesUpward:
         asyncio.run(scenario())
         assert [event.target for event in sink.of(SessionEnded)] == [TARGET]
 
+    def test_shutting_the_engine_down_ends_no_session(self, socket_path: Path) -> None:
+        """The Sessions are let go of, not ended (ADR 0021 §9, #266).
+
+        They are still running in their terminals and are re-recognised at the
+        next start, so an engine that stopped must not tell the user that
+        everything it was watching is gone.
+        """
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                await adapter.aclose()
+                await _settled()
+
+        asyncio.run(scenario())
+        assert sink.of(SessionEnded) == []
+
     def test_a_closed_thread_is_dropped_as_well_as_reported(self, socket_path: Path) -> None:
         """The Session ended, so nothing here goes on holding it (#98).
 

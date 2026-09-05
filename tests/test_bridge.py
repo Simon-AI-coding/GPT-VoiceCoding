@@ -4077,6 +4077,22 @@ class TestAClosedNoticeIsEditedInPlace:
 
         assert hub.channel.revisions == [()]
 
+    def test_duty_off_leaves_the_row_open_for_the_next_fact_to_close(self) -> None:
+        """A refusal is not a failed attempt: nothing was spent, so nothing is used up."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.flip("duty", False)
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+        hub.flip("duty", True)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.revisions.count(("1",)) == 1
+        # The ended line follows the edit, and carries no brief of its own.
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
     def test_a_session_that_left_the_roster_has_its_notices_closed(self) -> None:
         """One of §8's five causes: discovery no longer holds the Session."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)

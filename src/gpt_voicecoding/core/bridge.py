@@ -1530,7 +1530,8 @@ class BridgeCore:
         if not ids:
             return
         screen = self.switches_screen()
-        await self._send(screen.text, revises=ids, notice=screen.notice)
+        if screen.notice is not None:
+            await self._correct(ids, screen.notice)
 
     async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
         """Carry a typed relay in, and answer it with the receipt as one sentence.
@@ -1737,7 +1738,21 @@ class BridgeCore:
         be on screen at once and a fact that closes one closes both. A row whose
         brief carried no decision is left alone — a `finished` notice records a
         turn that ended, and there is nothing on it to close.
+
+        **Duty, and not the Message Switch.** An edit is not a push: it notifies
+        nobody and only settles a message the user already has, so it obeys the
+        master switch like every unbidden act toward the user, and outlives the
+        Message Switch going off — a notice already out still has to close, or
+        its stale buttons invite a press that earns only a refusal.
+
+        **Duty off leaves the row open**, where a failure closes it. Nothing was
+        attempted, so nothing was spent: the next fact about this Session — it
+        ends, it leaves the roster — closes the notice then, with the switch back
+        on. A refusal is not a failed attempt, and only an attempt is spent once.
         """
+        if not self.adjudicator.may_correct():
+            _log.info("the Duty Switch is off; a closed notice is left as it was sent")
+            return
         for sent in self.anchors.open_notices(target):
             notice = sent.anchor.notice
             if not isinstance(notice, SessionNotice) or not notice.question:
@@ -1748,13 +1763,14 @@ class BridgeCore:
             await self._correct(sent.ids, _handled(notice))
 
     async def _correct(self, ids: tuple[str, ...], notice: Notice) -> None:
-        """Rewrite messages already sent. **Duty, and not the Message Switch** (ADR 0021 §8).
+        """Rewrite messages already sent (ADR 0021 §8). One attempt, never repeated.
 
-        A correction is not a push: it notifies nobody and only settles a
-        message the user already has. So it obeys Duty, like every unbidden act
-        toward the user, and not Message — a notice that is already out still
-        closes on screen after the user flips Message off, because stale buttons
-        invite a press that earns only a refusal.
+        **Ungated here, deliberately**, because the two callers answer to
+        different switches and neither answer belongs to the mechanism: closing
+        a notice obeys Duty (`_close_open_notices`), while the switches screen
+        re-sent onto itself passes every switch, being the answer to a
+        control-plane action (`_redraw_switches`, ADR 0002). A gate written here
+        would have to be right for both, and there is no such gate.
 
         **Failure is logged and dropped**: an edit Telegram rejects, or a row
         that a restart left behind, gets no retry and no fresh message — a
@@ -1766,9 +1782,6 @@ class BridgeCore:
         text would carry reach nobody by construction; the brief is the message
         here.
         """
-        if not self.adjudicator.may_correct():
-            _log.info("the Duty Switch is off; a closed notice is left as it was sent")
-            return
         receipt = await self._send("", revises=ids, notice=notice)
         if receipt.is_delivered:
             return

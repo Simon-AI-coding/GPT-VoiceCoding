@@ -207,3 +207,16 @@ set, so the protocol version moves again when this lands: protocol 6 retired
 cursor of any kind; `overview` took no arguments (`bridge/daemon.py:1552`). **Legacy has
 no paging behaviour** — the count-bounded page and the ordinal cursor are new; the
 whole-entry rule and the exact one-Session read remain adapted as above.
+
+## Amendment 2026-09-06: one surface may cut what it lays out
+
+Source: [ADR 0021](0021-the-companion-channel-is-a-surface-the-user-replies-on.md) §5, from
+[#251](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/251).
+
+The whole-or-omitted rule above governs what Core reads, carries and hands across a seam, and it
+is unchanged there: the structured brief a Stop Notice is laid out from still holds the newest
+entry whole. What ADR 0021 adds is one layout act on one surface with a hard limit — the Telegram
+adapter cuts the folded original to what the message can hold and ends the fold with a fixed
+marker from Core's wording table saying the rest is on the terminal. A notice is one message by
+decision; splitting it would break the fold and fetching the rest was refused as machinery. The cut
+is marked where it happens, never silent, and this is the only place a text is cut.

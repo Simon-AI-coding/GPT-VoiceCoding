@@ -27,11 +27,11 @@ What the system knows about one Session, structured for telling the user: its na
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
-The count of Sessions in each state, with one header row per live Session. Spoken when several Sessions need the user, or on request.
+The count of Sessions in each state, with one header row per live Session. Spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions.
 _Avoid_: 多项目简报, overview, summary
 
 **Focus Session**:
-The one Session the user last replied to — by Answer Relay or Approval Relay. Its news is spoken first; another Session's news only rings. Cleared when it ends; never set by merely asking about a Session.
+The one Session the user last replied to — by Answer Relay or Approval Relay. Its news is spoken first; another Session's news only rings. Cleared when it ends; never set by merely asking about a Session. A voice-side notion only: on the Companion Channel, where messages lie flat, the newest Anchor takes its place.
 _Avoid_: current session, active session, last session
 
 **Detail**:
@@ -43,7 +43,7 @@ What one Session said and was told, read on request in pages of a configured siz
 _Avoid_: progress (the retired verb), transcript, log, tail
 
 **Stop Notice**:
-A Session Brief published as text — what the Companion Channel receives when a Session stops and may need the user. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
+A Session Brief published as text — what the Companion Channel receives whenever a Session stops, whatever it stopped on, with the Session's newest message carried whole when the surface can hold it and cut with a marker that says so when it cannot. It is an Anchor; once the decision it carried can no longer be answered from here it is marked as handled where it was sent, and it stays a reply target for the user's words. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
 _Avoid_: announcement (the act, not the thing)
 
 **Cool-down**:
@@ -67,7 +67,7 @@ The Live Call's acting half — the coding model behind the Voice and the only o
 _Avoid_: backing Codex model, the agent behind the call, delegate
 
 **Delegated Turn**:
-Work the system hands to a coding model on the user's behalf during a Live Call, distinct from the call's own speech. Its model is a user-facing setting.
+Work the system hands to a coding model on the user's behalf, asked for from any surface — during a Live Call, distinct from the call's own speech, or from the Companion Channel. Its model is a user-facing setting, one for every surface.
 _Avoid_: side request, background query
 
 ### Control side
@@ -111,8 +111,20 @@ _Avoid_: setup, configuration (that is the user's own file, which the system onl
 ### Reach and sessions
 
 **Companion Channel**:
-The pluggable text surface: it pushes the system's messages to the user and accepts their inbound text.
+The pluggable text surface: it pushes the system's messages to the user and accepts their inbound text, saying which of its own messages that text answered when the user replied to one. It reports facts about a message — which one it answered, which ids it landed under — and never an opinion about what the text means.
 _Avoid_: Telegram (one adapter, not the concept)
+
+**Anchor**:
+One message the system sent through the Companion Channel that names a single target — a Session or an Assistant Conversation — so that a reply to it, or plain text typed after it, reaches that target with no prefix and no Session Name. An Anchor may offer choices in order; a numeral picks one by position, and a surface may draw them as buttons, which are nothing more than that numeral.
+_Avoid_: thread (Telegram has none), context message, reply target
+
+**Anchor Table**:
+Bridge Core's memory of the Anchors still worth replying to: each Session's newest few, gone when the Session goes, never written to disk. The message id is its only key; the words Telegram echoes back are never read.
+_Avoid_: reply map, message cache, conversation state
+
+**Assistant Conversation**:
+A conversation with a coding model opened from the Companion Channel's menu and continued by replying to any of its messages. Each turn is a Delegated Turn; its memory is the model's own thread, which Bridge Core names but never stores. Not a Session, and not the Call Agent.
+_Avoid_: assistant (unqualified), bot, chat, Session-level assistant
 
 **Session**:
 One interactive terminal run of Claude Code or Codex. The system sees every Session on the machine, reads what it stopped on, and Relays into it. It sees one by recognising it from what the machine already shows — never by wrapping or instrumenting it — so a Session it cannot recognise is under-reported and said to be, never invented (ADR 0020).

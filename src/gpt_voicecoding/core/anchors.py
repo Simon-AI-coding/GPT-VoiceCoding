@@ -37,7 +37,7 @@ Legacy (ADR 0010): `legacy@1d32845` has no reply anchoring — **new**.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -162,7 +162,13 @@ class _Row:
 class AnchorTable:
     """The Anchors still worth replying to. Memory only; see the module docstring."""
 
-    def __init__(self, *, rows_per_target: int, conversations: int) -> None:
+    def __init__(
+        self,
+        *,
+        rows_per_target: int,
+        conversations: int,
+        forgotten: Callable[[str], None] | None = None,
+    ) -> None:
         # The dials' spelling is `CorePolicy`'s to check; these guard the two
         # values that would make the table forget each row as it was entered.
         if rows_per_target < 1:
@@ -177,6 +183,12 @@ class AnchorTable:
             )
         self._cap = rows_per_target
         self._conversation_cap = conversations
+        #: Told the thread id of every Assistant Conversation this table stops
+        #: holding, however it went — a thread that ended, or the oldest evicted
+        #: past the cap. Whoever else keeps something per conversation hangs it
+        #: here, so there is one moment a conversation is forgotten rather than
+        #: one per table (#268: the replies queued behind a running turn).
+        self._forgotten = forgotten
         #: Oldest first. The last is the newest Anchor.
         self._rows: list[_Row] = []
         self._by_id: dict[str, _Row] = {}
@@ -252,9 +264,17 @@ class AnchorTable:
         return self._rows[-1].anchor if self._rows else None
 
     def drop(self, target: AnchorTarget) -> None:
-        """Forget every row of one target. A Session that left the roster; a thread that ended."""
+        """Forget every row of one target. A Session that left the roster; a thread that ended.
+
+        The one way a conversation is forgotten — the eviction past the cap
+        below drops it through here too — so `forgotten` is told from this one
+        place and everything else kept per conversation goes with the rows.
+        """
         for row in [row for row in self._rows if row.anchor.target == target]:
             self._forget(row)
+        is_conversation = isinstance(target, str) and not isinstance(target, Screen) and target
+        if is_conversation and self._forgotten is not None:
+            self._forgotten(str(target))
 
     def keep_sessions(self, live: Collection[SessionTarget]) -> None:
         """Forget every Session row whose target is not among `live`.

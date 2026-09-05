@@ -51,7 +51,7 @@ from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.commands import CommandError, build_request, render
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.control_plane.server import ControlPlaneServer
-from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer, DelegatedAnswer
+from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer
 from gpt_voicecoding.core.errors import BridgeCoreError
 from gpt_voicecoding.core.events import EventQueue
 from gpt_voicecoding.core.instructions import ControlPlaneCli, InstructionContext
@@ -61,6 +61,7 @@ from gpt_voicecoding.core.router import Classification, TextGrammar
 from gpt_voicecoding.core.sessions import SessionRegistry
 from gpt_voicecoding.core.state import BridgeState
 from gpt_voicecoding.core.switches import Switchboard
+from gpt_voicecoding.core.turns import DelegatedAnswer
 from gpt_voicecoding.core.verification import SeamLoad
 from gpt_voicecoding.seams.agent import AgentAdapter, ProgressCapture
 from gpt_voicecoding.seams.call import CallAdapter, DelegatedTurnError, ThreadGoneError
@@ -350,6 +351,17 @@ class Engine:
             except asyncio.CancelledError:
                 pass
         self._loops = []
+        # **Before the adapters, because cancelling is what reaches their
+        # teardown** (#268). A Delegated Turn runs beside the dispatch loop now,
+        # so a shutdown can find one in flight; cancelling it raises inside
+        # `CallAdapter.delegate`, whose `finally` interrupts the turn and
+        # unsubscribes from the thread. Close the Call adapter first and there
+        # is no connection left to interrupt over, and a bridge-owned thread —
+        # which runs approval-free in a full sandbox — would go on acting on the
+        # user's machine. No answer is sent for a cancelled turn: the loop that
+        # would dispatch one is already gone.
+        _log.info("stopping: cancelling the Delegated Turns in flight")
+        await self.core.turns.aclose()
         _log.info("stopping: closing the control plane")
         await self._server.aclose()
         _log.info("stopping: closing the adapters")

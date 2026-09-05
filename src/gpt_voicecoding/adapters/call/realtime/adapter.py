@@ -521,11 +521,11 @@ class RealtimeCallAdapter:
         caller says so rather than showing the user a wire error. A thread with
         no rollout **yet** is the opposite fact and is read as one, below.
 
-        **A second reply cannot meet a busy thread from the Companion Channel.**
-        The hub handles one message at a time (`engine/composition.py`), so a
-        reply typed while a turn is running is answered after that turn ends
-        rather than refused by codex. A caller that does reach this
-        concurrently — two surfaces at once — gets codex's own refusal of
+        **Nothing here ever meets a busy thread from the Companion Channel.**
+        The hub runs one turn per thread and queues the replies typed behind it
+        (`core/turns.py`, #268), so a second `turn/start` on a thread this
+        engine is already running is never issued. A caller that did reach this
+        concurrently — two surfaces at once — would get codex's own refusal of
         `turn/start` as the answer, which is what `_delegated` already returns.
         """
         try:

@@ -155,6 +155,13 @@ COMMAND_MENU: list[dict[str, str]] = [
     {"command": str(action), "description": description} for action, description in MENU.items()
 ]
 
+#: How many times one process tries to set the command menu before it gives up.
+#: The retry is paid in front of a poll, so a persistently refused call is a
+#: fixed delay on every inbound message rather than a one-off cost. Three:
+#: enough to ride out a transient refusal, few enough that a permanent one is
+#: paid briefly and then dropped.
+MENU_ATTEMPTS = 3
+
 #: How long `aclose` gives the reader to notice it was stopped. Short on purpose:
 #: it covers the ordinary case, where the reader is between polls, and it is
 #: never the thing that lets the process exit — the daemon flag is.
@@ -214,6 +221,9 @@ class TelegramCompanionChannel:
         #: a menu that persists on the bot is still worth setting again, because
         #: the entries are what this engine accepts and an older engine's may not be.
         self._advertised = False
+        #: How many times setting it has been tried. Bounds the retry, which is
+        #: paid in front of a poll (`_advertise_menu`).
+        self._menu_attempts = 0
         self._reader: threading.Thread | None = None
         #: How the reader is told to stop, and the only thing `aclose` waits on.
         self._stop = threading.Event()
@@ -504,7 +514,7 @@ class TelegramCompanionChannel:
                 if not self._joined:
                     self._skip_backlog()
                     self._joined = True
-                if not self._advertised:
+                if not self._advertised and self._menu_attempts < MENU_ATTEMPTS:
                     self._advertise_menu()
                 updates = self._transport(
                     "getUpdates", self._poll(), timeout_seconds=self._patience()
@@ -559,7 +569,16 @@ class TelegramCompanionChannel:
         is part of being reachable, and a refusal is logged and tried again at
         the next contact rather than ending the reader. `getUpdates` is not
         held up by it — the call is bounded by the request timeout.
+
+        **Bounded, because the retry is paid before every poll** (#264 review).
+        A refusal leaves the menu unset, and the next pass through the reader's
+        loop is the next contact — so a call that is refused *persistently*
+        would add one request's wait in front of every `getUpdates` for the life
+        of the process, and delay every inbound message by it. After
+        `MENU_ATTEMPTS` the adapter says so once and stops trying; the menu is a
+        convenience, and every verb it advertises stays typeable without it.
         """
+        self._menu_attempts += 1
         try:
             self._transport(
                 "setMyCommands",
@@ -568,6 +587,12 @@ class TelegramCompanionChannel:
             )
         except TelegramError as refused:
             _log.warning("the command menu could not be set: %s", refused.detail)
+            if self._menu_attempts >= MENU_ATTEMPTS:
+                _log.warning(
+                    "the command menu was refused %d times and will not be tried again; "
+                    "every verb it advertises is still typeable",
+                    self._menu_attempts,
+                )
             return
         self._advertised = True
 

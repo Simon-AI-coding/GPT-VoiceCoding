@@ -649,11 +649,28 @@ class BridgeCore:
         """
         if target is None:
             return briefing.roster(self._state.sessions.all(), self._state.sessions.focus)
+        brief, _ = await self._session_brief_now(target)
+        return brief
+
+    async def _session_brief_now(self, target: SessionTarget) -> tuple[SessionBrief, Session]:
+        """One Session Brief, and the reading it was made from.
+
+        Two callers need the reading itself and not only its words: `brief`
+        returns the brief alone, and the Companion Channel's `brief` choice
+        registers an Anchor whose labels must be *this* reading's wait. Taking
+        the wait off a Session resolved before the read would let the row's
+        labels disagree with the ones the notice printed — the same fault the
+        unbidden Stop Notice path avoids by passing one reading to both
+        (`_notice_anchor`, ADR 0021 §2).
+        """
         row = await self._inspect_now(target)
         read = self._state.sessions.observed_one(row, now=self._stamp())
-        return briefing.session(
-            _as_read_now(read, row.progress),
-            question_answerable=self._question_answerable(read.target),
+        return (
+            briefing.session(
+                _as_read_now(read, row.progress),
+                question_answerable=self._question_answerable(read.target),
+            ),
+            read,
         )
 
     async def _inspect_now(self, target: SessionTarget) -> SessionInspection:
@@ -1359,18 +1376,23 @@ class BridgeCore:
                 await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
 
     async def _brief_as_anchor(self, session: Session, *, origin: str) -> None:
-        """That Session's brief, sent as a notice: the same Anchor a Stop Notice is."""
+        """That Session's brief, sent as a notice: the same Anchor a Stop Notice is.
+
+        The row's labels come from the reading the brief was made from, never
+        from the Session resolved before it: the read is an `await`, the wait
+        can move under it, and a row carrying the older wait would offer a
+        numeral a label the notice never printed.
+        """
         try:
-            brief = await self.brief(session.target)
+            brief, read = await self._session_brief_now(session.target)
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
-        assert isinstance(brief, SessionBrief)  # `brief` with a target is one Session's
         await self._reply(
             briefing.text(brief),
             origin=origin,
             notice=briefing.notice(brief),
-            anchor=_notice_anchor(session.target, session.waiting_for),
+            anchor=_notice_anchor(read.target, read.waiting_for),
         )
 
     async def _config_pick(self, word: str, *, origin: str) -> None:

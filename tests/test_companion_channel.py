@@ -45,7 +45,10 @@ from gpt_voicecoding.adapters.companion_channel.telegram import (
     telegram_channel,
     utf16_length,
 )
-from gpt_voicecoding.adapters.companion_channel.telegram.adapter import COMMAND_MENU
+from gpt_voicecoding.adapters.companion_channel.telegram.adapter import (
+    COMMAND_MENU,
+    MENU_ATTEMPTS,
+)
 from gpt_voicecoding.adapters.companion_channel.telegram.layout import keyboard
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
 from gpt_voicecoding.engine.composition import import_factory
@@ -1916,6 +1919,38 @@ class TestAdvertisingTheCommandMenu:
 
         assert "command menu could not be set" in caplog.text
         assert len(api.method_calls("getUpdates")) >= 1
+
+    def test_a_menu_refused_to_the_last_attempt_is_given_up_on_and_said_once(self, caplog) -> None:
+        """The retry is bounded: it is paid in front of a poll (#264 review).
+
+        A persistently refused `setMyCommands` would otherwise put one request's
+        wait ahead of every `getUpdates` for the life of the process, delaying
+        every inbound message by it. The adapter tries `MENU_ATTEMPTS` times,
+        says once that it is giving up, and keeps reading.
+        """
+        api = FakeTelegram()
+        # More refusals queued than the budget allows attempts: what stops the
+        # retry has to be the bound, not the fake running out of refusals.
+        api.refuse(
+            "setMyCommands",
+            TelegramError(FailureLayer.API, "setMyCommands was refused"),
+            times=MENU_ATTEMPTS + 2,
+        )
+
+        async def listening() -> None:
+            listener = channel(api)
+            await listener.connect()
+            await until(
+                lambda: len(api.method_calls("getUpdates")) > MENU_ATTEMPTS + 2,
+                what="polls past the last menu attempt",
+            )
+            await listener.aclose()
+
+        with caplog.at_level("WARNING"):
+            asyncio.run(listening())
+
+        assert len(api.method_calls("setMyCommands")) == MENU_ATTEMPTS
+        assert "will not be tried again" in caplog.text
 
     def test_every_advertised_entry_is_a_verb_the_shared_parser_accepts(self) -> None:
         for entry in COMMAND_MENU:

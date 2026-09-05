@@ -3581,6 +3581,36 @@ class TestEveryMenuScreenIsAnAnchor:
         assert row.target == CLAUDE
         assert row.options == ("main", "feature")
 
+    def test_the_brief_press_anchors_the_wait_it_printed_and_not_the_earlier_one(self) -> None:
+        """The row's labels come from the reading the notice was made from (#264 review).
+
+        The brief is an `await` on the Session's own lane, so the wait can move
+        under it. Taking the labels off the Session resolved before that read
+        would register a row offering a numeral a label the notice never
+        printed — and the numeral would answer the wrong question.
+        """
+        hub, _ = self.greeted()
+        self.asking(hub, "main", "feature")
+        # The lane's next reading — what the brief will print — is a different
+        # question from the one the greeting was standing on.
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CLAUDE,
+                    workspace=Path("/tmp/workspace"),
+                    state=SessionState.WAITING,
+                    waiting_for=self.question("rebase"),
+                ),
+            )
+        )
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, SessionNotice)
+        assert notice.options == ("rebase",)
+        assert self.anchor(hub, "4").options == ("rebase",)
+
     def test_a_numeral_on_the_re_sent_brief_picks_its_option(self) -> None:
         hub, _ = self.greeted()
         self.asking(hub, "main", "feature")

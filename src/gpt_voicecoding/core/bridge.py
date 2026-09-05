@@ -84,6 +84,12 @@ from gpt_voicecoding.core.router import Classification, InboundClass, InboundRou
 from gpt_voicecoding.core.sessions import Session, SessionRegistry, UndeliveredRelay
 from gpt_voicecoding.core.state import BridgeState
 from gpt_voicecoding.core.switches import SwitchSnapshot
+from gpt_voicecoding.core.turns import (
+    THE_NAMELESS_ONE,
+    DelegatedAnswer,
+    DelegatedTurnFinished,
+    DelegatedTurns,
+)
 from gpt_voicecoding.core.verification import (
     AGENT_SEAM_PREFIX,
     CALL_SEAM,
@@ -164,22 +170,6 @@ class ControlAnswer:
 
     text: str
     ok: bool
-
-
-@dataclass(frozen=True, slots=True)
-class DelegatedAnswer:
-    """What one Delegated Turn came back with, and the one fact its words hide.
-
-    `text` is what the user is shown either way — the coding model's answer, or
-    the failure's own words, a busy thread's refusal included (ADR 0021 §7).
-    `thread_gone` is the one outcome that is not words to show: the conversation
-    itself has ended, and Bridge Core answers that with its own fixed hint and
-    anchors nothing. Shaped after `ControlAnswer` for the same reason it has an
-    `ok`: a fact that cannot be recovered from prose has to travel beside it.
-    """
-
-    text: str = ""
-    thread_gone: bool = False
 
 
 #: The three menu verbs this hub answers with a screen of its own (ADR 0021 §6
@@ -541,6 +531,11 @@ class BridgeCore:
             policy=self._policy,
             clock=clock,
         )
+        #: The Delegated Turns in flight, and the replies queued behind each
+        #: conversation (#268). Beside the Anchor Table for the same reason and
+        #: with the same lifetime: memory only, and gone with the process that
+        #: holds the threads they resume.
+        self.turns = DelegatedTurns(run=self._run_turn, events=self._events)
         #: The Anchor Table (ADR 0021 §2): memory only, never persisted, empty
         #: after every restart. Held here beside the router that reads it and
         #: the send path that fills it, and deliberately **not** on
@@ -548,6 +543,14 @@ class BridgeCore:
         self.anchors = AnchorTable(
             rows_per_target=self._policy.anchor_rows_per_session,
             conversations=self._policy.assistant_conversations,
+            # **A conversation's queue goes with its rows, however they go.** The
+            # table forgets a conversation on two occasions — the thread ended,
+            # or it fell out past the per-chat cap — and only the first is one
+            # this hub can see. A queue left behind the second would answer a
+            # reply on a conversation the table no longer holds and re-register
+            # it as the newest Anchor, sending the next thing typed to the
+            # conversation the cap had just forgotten (#268 review).
+            forgotten=self.turns.drop,
         )
         self.router = InboundRouter(
             sessions=state.sessions,
@@ -1163,6 +1166,12 @@ class BridgeCore:
                 await self.keeper.heard(event)
             case InboundText():
                 await self._inbound_text(event)
+            case DelegatedTurnFinished():
+                # The one event this hub raises for itself: a Delegated Turn ran
+                # beside the loop and its answer comes back on it, so the send,
+                # the Anchor and the reply bar are written where every other
+                # piece of state is (#268).
+                await self._turn_finished(event)
             case UserSpeaking():
                 await self.keeper.heard(event)
             case VoiceSpeech():
@@ -1442,27 +1451,23 @@ class BridgeCore:
     async def _delegated_turn(self, found: Classification, *, origin: str) -> None:
         """One turn handed to a coding model: the top-level `>`, or a conversation's.
 
-        **The two differ only in what the answer is.** A `>` is one shot with no
-        Session context and no thread to continue, so its answer names no target
-        this hub can see and registers no row (ADR 0021 §3). A turn on an
-        Assistant Conversation's thread answers *as* that conversation: the
-        answer is an Anchor of the same thread, so a reply to it continues the
-        conversation, and a split answer is an Anchor in every part of itself,
-        which the send site does by entering the row under every id it landed on.
+        **The dispatch loop is not held while the model thinks.** A turn is
+        bounded only by `delegated_turn_timeout_seconds` — five minutes by
+        default — and awaiting one here made every other event wait behind it:
+        a Stop Notice for a Session that just hit a permission prompt, a numeral
+        verdict, an Answer Relay, a `/status` (#268). So the turn is handed to
+        `DelegatedTurns`, which runs it as a task and raises
+        `DelegatedTurnFinished` on this hub's own queue when it ends; the answer
+        is sent from `_turn_finished`, on the serial loop, where every other
+        piece of state is written (ADR 0001).
 
-        **The answer is whatever came back, including a refusal.** A busy thread
-        meets the coding model's own refusal of a second turn and those words are
-        the answer — nothing is queued (ADR 0021 §7). The one outcome that is not
-        words is a thread that cannot be resumed: the conversation has ended,
-        so Core says its own fixed hint, drops the conversation's rows and
-        anchors nothing, and a reply to the hint is words with an unknown Anchor.
-
-        **A second reply cannot meet a busy thread from this surface.** The hub
-        handles one message at a time (`engine/composition.py::_dispatching`),
-        so a reply typed while a turn is running waits and is answered after it
-        ends. The coding model's own refusal of a second turn is still what
-        comes back as the answer if two surfaces ever do reach one thread at
-        once, and nothing is queued on the thread either way.
+        **Replies to a conversation whose turn is running are queued, in order,
+        and each becomes its own turn** (ADR 0021 §7, amended by #268). No cap,
+        no coalescing, no refusal: the user may send several messages and each
+        is answered in the order typed. Two conversations run at the same time.
+        The top-level `>` is one more conversation — the nameless one — so two
+        of them are sequential as well: each runs on its own fresh thread, one
+        after another, and never as two approval-free agents at once.
 
         Legacy (ADR 0010): `legacy@1d32845` has no assistant of any kind — no
         model the user talks to, and no delegated turn. This is **adapted** from
@@ -1470,30 +1475,71 @@ class BridgeCore:
         (`adapters/call/realtime/adapter.py::delegate`), which is unchanged
         under it: the same instructions, the same action set, the same model
         setting. What is new is that the thread it runs on can be named, kept,
-        and resumed (ADR 0021 §7).
+        and resumed (ADR 0021 §7), and that the turn runs beside the loop.
         """
         if self._delegate is None:
             await self._reply(NO_DELEGATE_HANDLER, origin=origin)
             return
-        answer = await self._delegate(found)
+        self.turns.submit(found, origin)
+
+    async def _run_turn(self, found: Classification) -> DelegatedAnswer:
+        """Run one turn on whatever is wired to answer it. `DelegatedTurns` calls this."""
+        if self._delegate is None:  # unreachable: `_delegated_turn` refuses before submitting
+            return DelegatedAnswer(text=NO_DELEGATE_HANDLER)
+        return await self._delegate(found)
+
+    async def _turn_finished(self, event: DelegatedTurnFinished) -> None:
+        """A Delegated Turn ended. Answer it, and let the next reply on its thread go.
+
+        **The two kinds of turn differ only in what the answer is.** A `>` is one
+        shot with no Session context and no thread to continue, so its answer
+        names no target this hub can see and registers no row (ADR 0021 §3). A
+        turn on an Assistant Conversation's thread answers *as* that
+        conversation: the answer is an Anchor of the same thread, so a reply to
+        it continues the conversation, and a split answer is an Anchor in every
+        part of itself, which the send site does by entering the row under every
+        id it landed on.
+
+        **The answer is whatever came back, including a refusal.** The one
+        outcome that is not words is a thread that cannot be resumed: the
+        conversation has ended, so Core says its own fixed hint **once**, drops
+        the conversation's rows *and* whatever was typed behind it — every one
+        of those replies would earn this same hint — and anchors nothing. A
+        reply to the hint is words with an unknown Anchor.
+
+        The next queued turn starts only once this answer has left, so the
+        answers arrive in the order the replies were typed and not merely the
+        turns. It starts even if the send raised: a queue stopped on a failed
+        push would leave every reply behind it unanswered, with nothing to say
+        so.
+        """
+        found = event.found
         if not found.thread_id:
-            await self._reply(answer.text, origin=origin)
+            try:
+                await self._reply(event.answer.text, origin=event.origin)
+            finally:
+                # The nameless conversation is released like any other: a second
+                # `>` typed while this one ran is waiting on it (`core/turns.py`).
+                self.turns.ended(THE_NAMELESS_ONE)
             return
-        if answer.thread_gone:
+        if event.answer.thread_gone:
             # **The rows go with the conversation** (`AnchorTable.drop`'s own
             # case: "a thread that ended"). Left in place they would still be
             # the newest Anchor, so the next thing typed in the chat — meant
             # for a Session — would be classified as a turn on a thread that is
             # gone, and answered with this hint again, and again.
-            self.anchors.drop(found.thread_id)
-            await self._reply(briefing.ASSISTANT_CONVERSATION_GONE_HINT, origin=origin)
+            self.anchors.drop(found.thread_id)  # and the queue behind it, with the rows
+            await self._reply(briefing.ASSISTANT_CONVERSATION_GONE_HINT, origin=event.origin)
             return
-        await self._reply(
-            answer.text,
-            origin=origin,
-            anchor=menu.assistant_answer(found.thread_id),
-            reply_bar=briefing.ASSISTANT_REPLY_PLACEHOLDER,
-        )
+        try:
+            await self._reply(
+                event.answer.text,
+                origin=event.origin,
+                anchor=menu.assistant_answer(found.thread_id),
+                reply_bar=briefing.ASSISTANT_REPLY_PLACEHOLDER,
+            )
+        finally:
+            self.turns.ended(found.thread_id)
 
     async def _answer_command(self, found: Classification) -> ControlAnswer:
         """One control-plane command, answered by the surface wired to this hub.

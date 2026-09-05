@@ -41,10 +41,10 @@ from gpt_voicecoding.seams.agent import (
     ReplyWindowChanged,
     SessionInspection,
 )
-from gpt_voicecoding.seams.call import DelegatedTurnError, ThreadGoneError
+from gpt_voicecoding.seams.call import DelegatedReply, DelegatedTurnError, ThreadGoneError
 from gpt_voicecoding.seams.companion_channel import InboundText
 from gpt_voicecoding.seams.control_plane import Action, Reply, Request
-from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
+from gpt_voicecoding.seams.identity import AgentKind, RequestId, SessionName, SessionTarget
 
 CODEX = SessionTarget(agent=AgentKind.CODEX, session_id="abc")
 CLAUDE = SessionTarget(
@@ -730,3 +730,94 @@ class TestTheInstructionsThisEngineGenerates:
         monkeypatch.setattr(sys, "executable", str(home / "python"))
         with pytest.raises(EngineAssemblyError, match="no control-plane CLI"):
             Engine.assemble(load(configured(home)))
+
+
+class HangingCall(FakeCall):
+    """A Call adapter whose Delegated Turn never answers, and says how it was let go.
+
+    It stands in for the real one on the fact a shutdown turns on: a turn in
+    flight is cancelled *inside* `delegate`, so the adapter's own `finally` runs
+    — which in the realtime adapter interrupts the turn and unsubscribes from
+    the thread (`adapters/call/realtime/adapter.py::_retire`, proved against a
+    fake app-server in `test_realtime_call.py`). Here that teardown is one line
+    in `retired`.
+    """
+
+    def __init__(self, **held: object) -> None:
+        super().__init__(**held)  # type: ignore[arg-type]
+        self.turn_started = asyncio.Event()
+        self.retired: list[str] = []
+
+    async def delegate(
+        self,
+        text: str,
+        *,
+        model: str,
+        instructions: str,
+        request_id: RequestId,
+        resume: str = "",
+    ) -> DelegatedReply:
+        self.delegated.append((text, model))
+        self.resumed.append(resume)
+        self.turn_started.set()
+        try:
+            await asyncio.Event().wait()  # a model thinking, for as long as it likes
+        finally:
+            self.retired.append(resume or "a thread of its own")
+        raise AssertionError("unreachable: the wait above never returns")
+
+
+def call_that_hangs(*, sink: object = None) -> HangingCall:
+    return HangingCall(sink=sink)
+
+
+class TestShutdownWithATurnInFlight:
+    """#268: a turn runs beside the dispatch loop, so a shutdown can find one running."""
+
+    HANGING = CONFIG.replace('call = "fakes:FakeCall"', 'call = "test_engine:call_that_hangs"')
+
+    def test_the_turn_is_cancelled_the_adapter_is_torn_down_and_nothing_is_answered(
+        self, home: Path
+    ) -> None:
+        engine = assembled(home, self.HANGING)
+        call: HangingCall = engine.adapters.call
+
+        async def scenario() -> None:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="> summarise the diff"))
+                await asyncio.wait_for(
+                    call.turn_started.wait(), timeout=EVENT_SETTLE_TIMEOUT_SECONDS
+                )
+            finally:
+                await engine.aclose()
+
+        asyncio.run(scenario())
+
+        # It ended cleanly, the adapter got its turn to let the thread go, and
+        # the user was told nothing about a turn that never finished.
+        assert call.retired == ["a thread of its own"]
+        assert engine.adapters.channel.sent == []
+        assert engine.core.turns.in_flight() == 0
+
+    def test_the_loop_is_free_while_the_turn_hangs(self, home: Path) -> None:
+        """The defect itself, at the engine: a `/status` behind a turn used to wait."""
+        engine = assembled(home, self.HANGING)
+        call: HangingCall = engine.adapters.call
+
+        async def scenario() -> list[str]:
+            await engine.start()
+            try:
+                engine.core.events.emit(InboundText(text="> summarise the diff"))
+                await asyncio.wait_for(
+                    call.turn_started.wait(), timeout=EVENT_SETTLE_TIMEOUT_SECONDS
+                )
+                engine.core.events.emit(InboundText(text="/status"))
+                await _until(lambda: bool(engine.adapters.channel.sent))
+                return list(engine.adapters.channel.sent)
+            finally:
+                await engine.aclose()
+
+        sent = asyncio.run(scenario())
+
+        assert sent and "duty" in sent[0]

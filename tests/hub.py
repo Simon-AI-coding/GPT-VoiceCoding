@@ -106,7 +106,27 @@ class Hub:
     def emit(self, *events: object) -> int:
         for event in events:
             self.core.events.emit(event)  # type: ignore[arg-type]
-        return asyncio.run(self.core.drain())
+        return asyncio.run(self._settling())
+
+    async def _settling(self) -> int:
+        """Dispatch what was emitted, and everything a Delegated Turn raises after it.
+
+        A turn runs beside the dispatch loop now (#268), so what a test emits
+        here is answered in two passes: the drain that starts the turn, and the
+        drain that takes the `DelegatedTurnFinished` it raises when it ends.
+        There is no loop in a test to take the second one, so this waits on the
+        tasks themselves — no clock, and no sleeping on a real turn. A queued
+        reply starts its own turn as the answer before it leaves, which is why
+        this repeats until nothing is in flight.
+
+        A test that wants to *see* the loop free while a turn runs drives
+        `core.drain` itself, inside one loop of its own.
+        """
+        dispatched = await self.core.drain()
+        while self.core.turns.in_flight():
+            await self.core.turns.settle()
+            dispatched += await self.core.drain()
+        return dispatched
 
     def tick(self) -> object:
         return asyncio.run(self.core.tick())

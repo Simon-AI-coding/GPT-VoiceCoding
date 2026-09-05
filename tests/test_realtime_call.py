@@ -1726,7 +1726,11 @@ class TestTheDelegatedTurn:
         asyncio.run(scenario())
 
     def test_a_busy_thread_comes_back_as_codexs_own_refusal(self, socket_path: Path) -> None:
-        """A second reply while a turn runs meets Codex's refusal, which is the answer (§7)."""
+        """A refused `turn/start` is the answer in codex's own words (§7).
+
+        Core never issues one on a thread it is already running (#268), so this
+        is the seam's contract rather than a case the hub can reach.
+        """
 
         async def scenario() -> str:
             async with FakeAppServer(socket_path) as server:
@@ -1753,6 +1757,46 @@ class TestTheDelegatedTurn:
         said = asyncio.run(scenario())
 
         assert "a turn is already running on that thread" in said
+
+    def test_a_turn_cancelled_by_a_shutdown_is_interrupted_and_unsubscribed(
+        self, socket_path: Path
+    ) -> None:
+        """#268: a turn runs beside the dispatch loop, so a shutdown cancels it here.
+
+        The same teardown a timeout gets, reached the other way. It has to run on
+        this path too: a bridge-owned thread runs approval-free in a full
+        sandbox, so a turn an engine walked away from would go on acting on the
+        user's machine with nothing watching it.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="delegated-1")
+                server.answers("turn/start", {"turn": {"id": "turn-1"}})  # never completes
+                adapter, _ = await riding(server, Sink())
+
+                turn = asyncio.create_task(
+                    adapter.delegate(
+                        "summarise the diff",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                    )
+                )
+                while not server.calls_to("turn/start"):
+                    await asyncio.sleep(0.05)
+
+                turn.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await turn
+
+                assert server.calls_to("turn/interrupt") == [
+                    {"threadId": "delegated-1", "turnId": "turn-1"}
+                ]
+                assert server.calls_to("thread/unsubscribe") == [{"threadId": "delegated-1"}]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
 
     def test_a_turn_that_never_answers_is_a_classified_failure_and_leaks_nothing(
         self, socket_path: Path

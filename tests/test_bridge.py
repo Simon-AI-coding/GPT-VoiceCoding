@@ -26,7 +26,7 @@ from claude_adapter_fake import ParkedApproval, claude_waiting_roster
 from fakes import PROGRESS_CAPTURE, FakeCall, UnreachableFarSide, handed_over, spoken_words
 from gpt_voicecoding.adapters.agent.claude import adapter as claude_adapter
 from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, SessionReport
-from gpt_voicecoding.core import briefing
+from gpt_voicecoding.core import briefing, menu
 from gpt_voicecoding.core.anchors import Anchor, AnchorKind, Screen
 from gpt_voicecoding.core.bridge import (
     NO_CONTROL_SURFACE,
@@ -34,7 +34,6 @@ from gpt_voicecoding.core.bridge import (
     VOICE_QUIET_LINE,
     VOICE_SPEAKING_LINE,
     ControlAnswer,
-    DelegatedAnswer,
 )
 from gpt_voicecoding.core.briefing import (
     ASSISTANT_CONVERSATION_GONE_HINT,
@@ -58,6 +57,7 @@ from gpt_voicecoding.core.relays import RelayReason
 from gpt_voicecoding.core.router import Classification
 from gpt_voicecoding.core.sessions import Session, UndeliveredRelay
 from gpt_voicecoding.core.switches import SwitchName
+from gpt_voicecoding.core.turns import DelegatedAnswer
 from gpt_voicecoding.seams.agent import (
     ApprovalRequest,
     ApprovalVerdict,
@@ -4614,11 +4614,11 @@ class TestTheAssistantConversation:
 
         assert hub.core.anchors.lookup(hub.channel.receipts[-1].message_ids[0]) is None
 
-    def test_a_busy_thread_answers_with_the_engines_own_refusal(self) -> None:
-        """§7: Codex's refusal of a second turn is the answer, and nothing is queued."""
+    def test_a_turn_that_came_back_with_a_refusal_answers_with_its_words(self) -> None:
+        """§7: whatever the turn came back with is the answer, a refusal included."""
 
         async def delegate(found: Classification) -> DelegatedAnswer:
-            return DelegatedAnswer(text="a turn is already running on that thread")
+            return DelegatedAnswer(text="codex would not take that turn")
 
         async def open_conversation() -> str:
             return "thread-1"
@@ -4633,7 +4633,7 @@ class TestTheAssistantConversation:
 
         hub.emit(InboundText(text="and again", in_reply_to=opening))
 
-        assert hub.channel.sent[-1] == "a turn is already running on that thread"
+        assert hub.channel.sent[-1] == "codex would not take that turn"
 
     def test_an_assistant_this_engine_cannot_open_says_so_and_anchors_nothing(self) -> None:
         hub = Hub(commands=ASSISTANT_COMMANDS)  # nothing wired to open a conversation
@@ -4699,3 +4699,337 @@ class TestTheAssistantConversation:
 
         assert hub.channel.sent == ["answering 'summarise the diff' on "]
         assert hub.core.anchors.newest() is None
+
+
+class HeldTurns:
+    """A Delegated Turn handler a test holds open, and lets go of on command.
+
+    What every case in the class below needs is a turn that is *running* while
+    the test looks at the hub — the thing an awaited turn made unobservable,
+    because the loop that would have shown it was inside the turn. `started`
+    records what each turn was asked, in the order the handler was entered, and
+    `peak` how many were ever inside it at once: one per thread is the ordering
+    rule, more than one across threads is the concurrency rule.
+    """
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.started: list[tuple[str, str]] = []
+        self.answer: DelegatedAnswer | None = None
+        self._running = 0
+        self.peak = 0
+
+    async def delegate(self, found: Classification) -> DelegatedAnswer:
+        self.started.append((found.thread_id, found.text))
+        self._running += 1
+        self.peak = max(self.peak, self._running)
+        try:
+            await self.gate.wait()
+        finally:
+            self._running -= 1
+        if self.answer is not None:
+            return self.answer
+        return DelegatedAnswer(text=f"answering {found.text!r} on {found.thread_id}")
+
+
+async def _drained(hub: Hub) -> None:
+    """Dispatch what is waiting, and let every turn it started reach the model.
+
+    A turn is a task, and a task created inside `drain` has not run a line of
+    itself when `drain` returns — so the yield is what puts the loop in the state
+    a running engine is in a moment later, with the turn inside the handler and
+    the hub free.
+    """
+    await hub.core.drain()
+    await asyncio.sleep(0)
+
+
+async def _settled(hub: Hub) -> None:
+    """Take everything a finished turn raised, standing in for the dispatch loop.
+
+    A test that drives `drain` by hand has no loop to take the
+    `DelegatedTurnFinished` a turn raises when it ends, and a queued reply
+    starts its own turn as that answer leaves — so this repeats until nothing
+    is in flight.
+    """
+    while hub.core.turns.in_flight():
+        await hub.core.turns.settle()
+        await hub.core.drain()
+
+
+class TestADelegatedTurnDoesNotHoldTheDispatchLoop:
+    """#268: the turn runs beside the loop, and per thread the turns queue in order.
+
+    A Delegated Turn is bounded only by `delegated_turn_timeout_seconds` — five
+    minutes by default — and awaiting one inside `dispatch` made every other
+    event wait behind it. These cases are written the way the defect had to be
+    reproduced: the turn is held open, and the hub is asked what it can still do.
+    """
+
+    def hub(self, turns: HeldTurns, **fields: object) -> Hub:
+        async def open_conversation() -> str:
+            return await hub.call.open_conversation(model="a-model", instructions="the rules")
+
+        hub = Hub(
+            delegate=turns.delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+            **fields,  # type: ignore[arg-type]
+        )
+        return hub
+
+    def opened(self, hub: Hub) -> str:
+        """One Assistant Conversation, and the id of the line that opened it."""
+        hub.emit(InboundText(text="/assistant"))
+        return hub.channel.receipts[-1].message_ids[0]
+
+    def test_a_stop_notice_raised_during_a_turn_is_pushed_before_the_answer(self) -> None:
+        """The defect itself: a Session needing the user waited minutes behind a turn."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="how goes it?", in_reply_to=opening))
+            await _drained(hub)
+            # The loop came back while the model is still thinking.
+            assert turns.started == [("thread-1", "how goes it?")]
+            assert hub.channel.sent == [ASSISTANT_OPENING_LINE]
+
+            hub.core.events.emit(SessionStopped(target=CODEX))
+            await _drained(hub)
+            # And the notice is out before the turn has said anything.
+            assert len(hub.channel.sent) == 2
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert "port the log" in hub.channel.sent[1]
+        assert hub.channel.sent[2] == "answering 'how goes it?' on thread-1"
+
+    def test_replies_typed_during_a_turn_each_become_their_own_turn_in_order(self) -> None:
+        """No cap, no coalescing, no refusal: every message typed is answered, in order."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            for word in ("one", "two", "three", "four"):
+                hub.core.events.emit(InboundText(text=word, in_reply_to=opening))
+            await _drained(hub)
+            # All four were classified; only the first reached the model.
+            assert turns.started == [("thread-1", "one")]
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert turns.started == [
+            ("thread-1", "one"),
+            ("thread-1", "two"),
+            ("thread-1", "three"),
+            ("thread-1", "four"),
+        ]
+        # Sequential, on the one thread: never two turns inside the handler.
+        assert turns.peak == 1
+        assert hub.channel.sent[1:] == [
+            "answering 'one' on thread-1",
+            "answering 'two' on thread-1",
+            "answering 'three' on thread-1",
+            "answering 'four' on thread-1",
+        ]
+
+    def test_two_conversations_run_at_the_same_time(self) -> None:
+        """The queue is per thread: one conversation thinking never holds the other."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+        first = self.opened(hub)
+        second = self.opened(hub)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="ask the first", in_reply_to=first))
+            hub.core.events.emit(InboundText(text="ask the second", in_reply_to=second))
+            await _drained(hub)
+
+            assert turns.peak == 2
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert turns.started == [
+            ("thread-1", "ask the first"),
+            ("thread-2", "ask the second"),
+        ]
+
+    def test_a_queued_turns_answer_anchors_and_draws_the_bar_like_a_direct_one(self) -> None:
+        """A reply to the second answer continues the same conversation (ADR 0021 §7)."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="one", in_reply_to=opening))
+            hub.core.events.emit(InboundText(text="two", in_reply_to=opening))
+            await _drained(hub)
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        landed = hub.channel.receipts[-1].message_ids[0]
+        row = hub.core.anchors.lookup(landed)
+        assert row is not None
+        # The same row `menu.assistant_answer` makes for a turn nothing queued
+        # behind: an answer of that conversation, replied to on the same thread.
+        assert row == replace(menu.assistant_answer("thread-1"), sent_at=row.sent_at)
+        assert hub.channel.reply_bars[-1] == ASSISTANT_REPLY_PLACEHOLDER
+
+    def test_a_top_level_delegation_runs_off_the_loop_and_anchors_nothing(self) -> None:
+        """One mechanism, not two: the `>` takes the same path and keeps ADR 0021 §3."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text=">summarise the diff"))
+            await _drained(hub)
+            assert turns.started == [("", "summarise the diff")]
+            assert hub.channel.sent == []
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert hub.channel.sent == ["answering 'summarise the diff' on "]
+        assert hub.core.anchors.newest() is None
+
+    def test_top_level_delegations_run_one_after_another(self) -> None:
+        """The `>` is the nameless conversation, and its turns are sequential too.
+
+        Each one is a fresh thread running approval-free in a full sandbox, so
+        three typed in a row must not become three simultaneous agents on the
+        user's machine — which is what the dispatch loop used to prevent by
+        holding the second behind the first (ruled on #268, 2026-09-06).
+        """
+        turns = HeldTurns()
+        hub = self.hub(turns)
+
+        async def scenario() -> None:
+            for word in (">the first", ">the second", ">the third"):
+                hub.core.events.emit(InboundText(text=word))
+            await _drained(hub)
+            # One is running; the other two are waiting, neither refused.
+            assert turns.started == [("", "the first")]
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert turns.peak == 1
+        assert turns.started == [
+            ("", "the first"),
+            ("", "the second"),
+            ("", "the third"),
+        ]
+        assert hub.channel.sent == [
+            "answering 'the first' on ",
+            "answering 'the second' on ",
+            "answering 'the third' on ",
+        ]
+        assert hub.core.anchors.newest() is None
+
+    def test_a_queued_reply_on_a_thread_that_is_gone_gets_the_hint_once(self) -> None:
+        """The queue goes with the conversation's rows: the rest would earn the same hint."""
+        turns = HeldTurns()
+        turns.answer = DelegatedAnswer(thread_gone=True)
+        hub = self.hub(turns)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            for word in ("one", "two", "three"):
+                hub.core.events.emit(InboundText(text=word, in_reply_to=opening))
+            await _drained(hub)
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        # One turn ran; the two behind it were dropped with the conversation.
+        assert turns.started == [("thread-1", "one")]
+        assert hub.channel.sent[1:] == [ASSISTANT_CONVERSATION_GONE_HINT]
+        assert hub.core.anchors.lookup(opening) is None
+        assert hub.core.turns.in_flight() == 0
+
+    def test_a_conversation_evicted_past_the_cap_takes_its_queue_with_it(self) -> None:
+        """The two tables stay in step, or the cap forgets rows a queue then re-registers."""
+        turns = HeldTurns()
+        hub = self.hub(turns, assistant_conversations=1)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="one", in_reply_to=opening))
+            hub.core.events.emit(InboundText(text="two", in_reply_to=opening))
+            await _drained(hub)
+            assert turns.started == [("thread-1", "one")]
+
+            # A second conversation pushes the first past the cap of one: its
+            # rows go, and the reply queued behind its running turn goes too.
+            hub.core.events.emit(InboundText(text="/assistant"))
+            await _drained(hub)
+
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert turns.started == [("thread-1", "one")]
+        assert hub.core.anchors.lookup(opening) is None
+        newest = hub.core.anchors.newest()
+        assert newest is not None
+        assert newest.target == "thread-2"
+
+    def test_a_turn_that_raised_says_nothing_and_lets_the_next_reply_go(self) -> None:
+        """A failure with no words is a bug, not an answer — but it is still an ending."""
+
+        class Raising(HeldTurns):
+            async def delegate(self, found: Classification) -> DelegatedAnswer:
+                self.started.append((found.thread_id, found.text))
+                await self.gate.wait()
+                if len(self.started) == 1:
+                    raise RuntimeError("nobody classified this")
+                return DelegatedAnswer(text=f"answering {found.text!r} on {found.thread_id}")
+
+        turns = Raising()
+        hub = self.hub(turns)
+        opening = self.opened(hub)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="one", in_reply_to=opening))
+            hub.core.events.emit(InboundText(text="two", in_reply_to=opening))
+            await _drained(hub)
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert [thread for thread, _ in turns.started] == ["thread-1", "thread-1"]
+        assert hub.channel.sent[1:] == ["answering 'two' on thread-1"]
+
+    def test_a_hub_with_nothing_wired_refuses_before_it_starts_a_turn(self) -> None:
+        """The refusal is still the loop's own, and no task is left holding a queue."""
+        hub = Hub(
+            delegate=None,
+            open_conversation=None,
+            commands=ASSISTANT_COMMANDS,
+        )
+
+        hub.emit(InboundText(text=">summarise the diff"))
+
+        assert hub.channel.sent == [NO_DELEGATE_HANDLER]
+        assert hub.core.turns.in_flight() == 0

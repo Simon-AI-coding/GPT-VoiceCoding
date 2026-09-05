@@ -118,7 +118,7 @@ from gpt_voicecoding.seams.call import (
     UserSpeech,
     VoiceSpeech,
 )
-from gpt_voicecoding.seams.companion_channel import CompanionChannel, InboundText
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt, CompanionChannel, InboundText
 from gpt_voicecoding.seams.events import Event
 from gpt_voicecoding.seams.identity import (
     AgentKind,
@@ -1109,19 +1109,23 @@ class BridgeCore:
     async def _inbound_text(self, event: InboundText) -> None:
         """Classify one inbound line, act on it, and always answer the user."""
         found = self.router.classify(event.text)
+        # Every answer goes back the way the text came: the event's `origin` is
+        # echoed onto the reply (ADR 0021 §4), which is what the field promised.
         match found.kind:
             case InboundClass.CONTROL:
                 await self._reply(
-                    await self._control(found) if self._control else NO_CONTROL_SURFACE
+                    await self._control(found) if self._control else NO_CONTROL_SURFACE,
+                    origin=event.origin,
                 )
             case InboundClass.DELEGATION:
                 await self._reply(
-                    await self._delegate(found) if self._delegate else NO_DELEGATE_HANDLER
+                    await self._delegate(found) if self._delegate else NO_DELEGATE_HANDLER,
+                    origin=event.origin,
                 )
             case InboundClass.ANSWER_RELAY:
-                await self._relay_inbound(found)
+                await self._relay_inbound(found, origin=event.origin)
             case InboundClass.UNKNOWN:
-                await self._reply(found.reply)
+                await self._reply(found.reply, origin=event.origin)
         if found.kind is InboundClass.ANSWER_RELAY:
             assert found.target is not None  # the router sets one for every ANSWER_RELAY
             _log.info(
@@ -1132,7 +1136,7 @@ class BridgeCore:
         else:
             _log.info("handled inbound Companion Channel message kind=%s", found.kind)
 
-    async def _relay_inbound(self, found: Classification) -> None:
+    async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
         """Carry a typed relay in, and answer it with the receipt the CLI prints.
 
         **Every inbound relay is answered**, and with the same three codes, not
@@ -1145,10 +1149,10 @@ class BridgeCore:
         try:
             outcome = await self.relays.relay(found.target, found.text)
         except BridgeCoreError as refusal:
-            await self._reply(str(refusal))
+            await self._reply(str(refusal), origin=origin)
             return
         await self._settle(outcome)
-        await self._reply(outcome.line)
+        await self._reply(outcome.line, origin=origin)
 
     async def _settle(self, outcome: RelayOutcome) -> None:
         """Land one Relay's standing on the Session's row, and wake if it is news.
@@ -1281,7 +1285,7 @@ class BridgeCore:
         if not self.adjudicator.may_push():
             _log.info("the Message Switch is off; this notice reaches no outlet")
             return
-        receipt = await self._channel.send(text, request_id=new_request_id())
+        receipt = await self._send(text)
         if receipt.is_delivered:
             return
         _log.info(
@@ -1290,7 +1294,7 @@ class BridgeCore:
             receipt.reason,
         )
 
-    async def _reply(self, text: str) -> None:
+    async def _reply(self, text: str, *, origin: str = "") -> None:
         """Answer text the user sent. **Never gated** — a reply is not a push.
 
         ADR 0002 is absolute, and the Companion Channel is one of the surfaces it
@@ -1317,7 +1321,7 @@ class BridgeCore:
         """
         if not text:
             return
-        receipt = await self._channel.send(text, request_id=new_request_id())
+        receipt = await self._send(text, origin=origin)
         if receipt.is_delivered:
             return
         _log.warning(
@@ -1325,6 +1329,35 @@ class BridgeCore:
             receipt.outcome,
             receipt.reason,
         )
+
+    async def _send(self, text: str, *, origin: str = "") -> ChannelReceipt:
+        """One Companion Channel send, and the one record every send writes.
+
+        **The only place `_channel.send` is called**, so that the record below
+        is written for every send there is — a push and a reply alike — and
+        for every channel there is, the null one included. ADR 0021 §10 makes
+        it part of the acceptance contract, beside the #48 inbound line: a
+        Stop Notice is unbidden, so this line is the only way an outside
+        observer learns which provider ids it landed under, and the harness
+        reads the message by that id rather than waiting for a window. The
+        format is therefore fixed: `key=value`, ids comma-joined in sending
+        order, empty when nothing landed. An UNKNOWN receipt from a split send
+        still names the parts that did land — those are messages the user can
+        reply to.
+
+        `origin` is echoed from the inbound event when this is a reply, and
+        empty for an unbidden push. Nothing here revises: editing a notice in
+        place (ADR 0021 §8) is #266's.
+        """
+        request_id = new_request_id()
+        receipt = await self._channel.send(text, request_id=request_id, origin=origin)
+        _log.info(
+            "sent Companion Channel message request=%s outcome=%s message_ids=%s",
+            request_id,
+            receipt.outcome,
+            ",".join(receipt.message_ids),
+        )
+        return receipt
 
     def _spawned(self, target: SessionTarget) -> bool:
         """Whether the roster **positively says** this is a Child Process (#79).

@@ -61,6 +61,24 @@ and `origin` is opaque to it by design, so the only component that can tell the
 user's chat from a passer-by's is this one. A reply — even a refusal — would
 confirm to a prober that the bot is alive and attended, so the drop is silent
 and goes to the log.
+
+**A button never crosses the seam** (ADR 0021 §4). A press arrives from Telegram
+as a `callback_query`; it leaves here as the numeral the button stood for, in a
+reply to the message the button was under — `InboundText(text=<data>,
+in_reply_to=<that message's id>)` — with an `origin` only this adapter can read,
+carrying the callback's id. When Bridge Core replies to that origin, the words
+are shown as a **toast** through `answerCallbackQuery`, which is no chat message
+and so lands under no id. A callback can be answered once and a toast holds 200
+characters, so a longer reply, a second one, or one to a callback this process
+never saw goes as an ordinary message; a toast Telegram refuses is logged and the
+reply goes as a message too. Core never learns the word "button".
+
+**The adapter reports facts about a message, never what it means.** Which message
+the user replied to (`reply_to_message.message_id`), and which ids a push landed
+under (`sendMessage`'s `message_id`, one per part), are read off the wire and
+handed up as opaque strings. A message from the user's chat that carries no text
+at all — a voice note, a photo — is handed up as empty text, so that Core's
+own cannot-classify path answers it; this channel is text only.
 """
 
 from __future__ import annotations
@@ -77,17 +95,38 @@ from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     MESSAGE_LIMIT_UTF16_UNITS,
     TelegramSettings,
 )
-from gpt_voicecoding.seams.companion_channel import InboundText
-from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt, InboundText
+from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
 
 _log = logging.getLogger(__name__)
 
-#: The one update kind this channel is about. Asking for it by name keeps every
-#: other thing Telegram might invent out of the reader loop entirely.
-ALLOWED_UPDATES = ["message"]
+#: The two update kinds this channel is about: the user's messages and their
+#: button presses. Asking for them by name keeps every other thing Telegram
+#: might invent out of the reader loop entirely — and the list *persists on the
+#: bot* once set (#247): the one that named `message` alone was what had been
+#: keeping presses from ever arriving.
+ALLOWED_UPDATES = ["message", "callback_query"]
+
+#: How a press's origin is spelled: this prefix, then the callback query's id.
+#: Adapter-private. Bridge Core echoes the string back and never reads it.
+CALLBACK_ORIGIN = "callback:"
+
+#: What a toast may hold — `answerCallbackQuery`'s own cap on `text`, "0-200
+#: characters" in the API's words and counted as characters here. A longer
+#: reply goes as a message; so does one Telegram refuses at its own ruler.
+TOAST_LIMIT_CHARACTERS = 200
+
+#: How many unanswered presses this adapter remembers, newest kept. A callback
+#: Telegram itself forgets within seconds cannot be answered anyway, so a press
+#: that fell off this list gets what it would have got: a message.
+UNANSWERED_PRESSES_KEPT = 64
+
+#: Telegram's own words for an edit that changed nothing. That is success: the
+#: message already says what it was asked to say (ADR 0021 §8).
+NOT_MODIFIED = "message is not modified"
 
 #: What `getUpdates` is passed to make it hand back the last pending update and
 #: nothing else, which is how the backlog's far end is found in one call.
@@ -169,6 +208,10 @@ class TelegramCompanionChannel:
         #: touches anything of Bridge Core's directly — one hand-off, through
         #: `call_soon_threadsafe`, and nothing else is shared.
         self._loop: asyncio.AbstractEventLoop | None = None
+        #: Presses handed up and not yet answered, oldest first. Written and
+        #: read on the loop only — registered in `_surface`, consumed in `send`
+        #: — so the reader thread never touches it.
+        self._unanswered: dict[str, None] = {}
 
     # -- what the composition root opens and closes ------------------------
 
@@ -201,7 +244,14 @@ class TelegramCompanionChannel:
 
     # -- the seam ---------------------------------------------------------
 
-    async def send(self, text: str, *, request_id: RequestId) -> DeliveryReceipt:
+    async def send(
+        self,
+        text: str,
+        *,
+        request_id: RequestId,
+        origin: str = "",
+        revises: tuple[str, ...] = (),
+    ) -> ChannelReceipt:
         """Push one message, in as many parts as the API's cap requires.
 
         One request id, one receipt, whatever the message was cut into. The
@@ -214,45 +264,176 @@ class TelegramCompanionChannel:
           much arrived. Never FAILED: words did reach the user, and FAILED means
           a positive reason to believe they did not.
 
+        The receipt names the id every landed part got, in order — an UNKNOWN
+        one included, because those parts exist and can be replied to.
+
         A failure **stops the send**. A later part delivered on top of a missing
         one is a message with a hole in the middle, which reads as a different
         message rather than as a broken one.
+
+        Two variations, both decided by the caller's arguments and neither by
+        anything this adapter infers: `revises` names messages to edit in place
+        rather than send (`_revise`); an `origin` naming an unanswered press
+        makes a short reply a toast (`_toast`). Everything else — a chat's
+        origin, an empty one — is an ordinary message to the one chat.
 
         Nothing is queued here. An unreachable network is a classified failure
         returned at once — the engine's loop is never held. Bridge Core decides
         whether a later outlet transition should reconcile the current Session
         state; this adapter never replays the notice object.
         """
+        if revises:
+            return await self._revise(text, request_id=request_id, revises=revises)
         parts = split_message(text)
         if not parts:
-            return DeliveryReceipt(
+            return ChannelReceipt(
                 request_id=request_id,
                 outcome=Delivery.FAILED,
                 reason="there were no words to send",
             )
+        callback = self._press_to_answer(origin)
+        if callback is not None and await self._toast(callback, text):
+            return ChannelReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
 
-        landed = 0
+        landed: list[str] = []
         for part in parts:
             try:
-                await self._ask(
+                result = await self._ask(
                     "sendMessage",
                     {"chat_id": self._settings.chat_id, "text": part},
                     timeout_seconds=self._settings.request_timeout_seconds,
                 )
             except TelegramError as refused:
-                if landed == 0:
-                    return DeliveryReceipt(
+                if not landed:
+                    return ChannelReceipt(
                         request_id=request_id, outcome=Delivery.FAILED, reason=refused.detail
                     )
-                return DeliveryReceipt(
+                return ChannelReceipt(
                     request_id=request_id,
                     outcome=Delivery.UNKNOWN,
                     reason=(
-                        f"{landed} of {len(parts)} parts reached the chat, then {refused.detail}"
+                        f"{len(landed)} of {len(parts)} parts reached the chat, "
+                        f"then {refused.detail}"
                     ),
+                    message_ids=tuple(landed),
                 )
-            landed += 1
-        return DeliveryReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
+            landed.append(_message_id_of(result))
+        return ChannelReceipt(
+            request_id=request_id, outcome=Delivery.DELIVERED, message_ids=tuple(landed)
+        )
+
+    async def _revise(
+        self, text: str, *, request_id: RequestId, revises: tuple[str, ...]
+    ) -> ChannelReceipt:
+        """Replace the content of messages sent earlier, one part per id (ADR 0021 §8).
+
+        Pairwise and whole: the text is cut exactly as a fresh send would cut
+        it, and it must fall into as many parts as there are messages to
+        revise. A mismatch edits nothing and says so — a notice half-rewritten
+        is a message with a hole in it. `editMessageText` keeps whatever the
+        message already had that this call does not name, and a refusal that
+        says the content is unchanged is the outcome that was wanted.
+
+        **Text only, for now — by design, not by omission.** ADR 0021 §8 has an
+        edit carry the same `entities` and an inline markup drawn from the
+        brief's labels (empty labels draw no buttons). Neither exists yet:
+        entities arrive with the structured brief (#262) and labels with the
+        inline keyboard (#264). The issue that edits a closed notice to
+        `handled` (#266) grows this call to carry both; a `send` that revises
+        must then edit with the same layout a fresh send would have used.
+        """
+        parts = split_message(text)
+        if len(parts) != len(revises):
+            return ChannelReceipt(
+                request_id=request_id,
+                outcome=Delivery.FAILED,
+                reason=(
+                    f"{len(revises)} message(s) cannot be revised into {len(parts)} part(s); "
+                    "nothing was edited"
+                ),
+            )
+        edited: list[str] = []
+        for message_id, part in zip(revises, parts, strict=True):
+            try:
+                await self._ask(
+                    "editMessageText",
+                    {
+                        "chat_id": self._settings.chat_id,
+                        "message_id": _message_id_on_the_wire(message_id),
+                        "text": part,
+                    },
+                    timeout_seconds=self._settings.request_timeout_seconds,
+                )
+            except TelegramError as refused:
+                if NOT_MODIFIED not in str(refused).casefold():
+                    if not edited:
+                        return ChannelReceipt(
+                            request_id=request_id, outcome=Delivery.FAILED, reason=refused.detail
+                        )
+                    return ChannelReceipt(
+                        request_id=request_id,
+                        outcome=Delivery.UNKNOWN,
+                        reason=(
+                            f"{len(edited)} of {len(parts)} messages were revised, "
+                            f"then {refused.detail}"
+                        ),
+                        message_ids=tuple(edited),
+                    )
+            edited.append(message_id)
+        return ChannelReceipt(
+            request_id=request_id, outcome=Delivery.DELIVERED, message_ids=tuple(edited)
+        )
+
+    def _press_to_answer(self, origin: str) -> str | None:
+        """The callback id this reply answers, if it is a press still waiting for one.
+
+        Consumed on the way out whatever happens next: a callback is answered
+        once, so the second reply to the same press — and every reply to a
+        press this process never saw — is an ordinary message. A press that
+        fell past `UNANSWERED_PRESSES_KEPT` is one Telegram has also forgotten
+        by then; nothing could answer it, and its reply goes as a message too.
+        """
+        if not origin.startswith(CALLBACK_ORIGIN):
+            return None
+        callback = origin[len(CALLBACK_ORIGIN) :]
+        if callback not in self._unanswered:
+            return None
+        del self._unanswered[callback]
+        return callback
+
+    async def _toast(self, callback: str, text: str) -> bool:
+        """Answer one press, and say whether the words were shown as the toast.
+
+        **A held press is answered exactly once, whatever the words are.** When
+        they fit a toast, they are the toast. When they do not, the callback is
+        answered with no text — that is what clears the loading indicator the
+        client draws on a pressed button — and the caller sends the words as a
+        message. A refusal either way is logged and nothing more: Telegram
+        treats a refused callback as answered, so the reply still goes as a
+        message and the user is never left with a spinning button.
+
+        Core answering a press with *no* words is not a case here by design:
+        the router fails closed and every inbound is answered
+        (`core/bridge.py::_inbound_text`), and the only text `_reply` skips is
+        empty, which no classification produces.
+        """
+        fits = len(text) <= TOAST_LIMIT_CHARACTERS
+        answer: dict[str, object] = {"callback_query_id": callback}
+        if fits:
+            answer["text"] = text
+        try:
+            await self._ask(
+                "answerCallbackQuery",
+                answer,
+                timeout_seconds=self._settings.request_timeout_seconds,
+            )
+        except TelegramError as refused:
+            _log.warning(
+                "answering a press was refused, so the reply goes as a message: %s",
+                refused.detail,
+            )
+            return False
+        return fits
 
     async def verify(self) -> VerifyResult:
         """Prove reachability positively, or name the layer that stopped it.
@@ -361,20 +542,65 @@ class TelegramCompanionChannel:
     def _heard(self, update: dict) -> None:
         """One update: move the cursor, then decide whether it is the user's."""
         self._advance(update)
+        pressed = update.get("callback_query")
+        if isinstance(pressed, dict):
+            self._pressed(pressed)
+            return
         message = update.get("message")
         if not isinstance(message, dict):
             return
+        if not self._in_the_configured_chat(message):
+            return
         text = message.get("text")
+        self._hand_up(
+            InboundText(
+                text=text if isinstance(text, str) else "",
+                origin=self._settings.chat_id,
+                in_reply_to=_replied_to(message),
+            )
+        )
+
+    def _pressed(self, query: dict) -> None:
+        """A button press becomes the numeral it stood for, in a reply to its message.
+
+        The origin carries the callback's id under a prefix only this adapter
+        reads, so Bridge Core's reply to it can be shown as a toast (`send`).
+        A press on a message this bot did not send has no `message` and is
+        nothing this channel can answer, so it is dropped like any stranger.
+        """
+        message = query.get("message")
+        if not isinstance(message, dict) or not self._in_the_configured_chat(message):
+            return
+        data, callback = query.get("data"), query.get("id")
+        if (
+            not isinstance(data, str)
+            or not isinstance(callback, str | int)
+            or isinstance(callback, bool)
+        ):
+            return
+        self._hand_up(
+            InboundText(
+                text=data,
+                origin=f"{CALLBACK_ORIGIN}{callback}",
+                in_reply_to=_message_id_of(message),
+            )
+        )
+
+    def _in_the_configured_chat(self, message: dict) -> bool:
+        """Whether this message sits in the configured chat — and log the ones that do not.
+
+        The chat is the test, not the sender: on the press path this is the
+        bot's own notice, and it is in the user's chat that makes it answerable.
+
+        Silence, deliberately: a refusal sent back would tell whoever is probing
+        that this bot is alive and attended.
+        """
         chat = message.get("chat")
         origin = str(chat.get("id", "")) if isinstance(chat, dict) else ""
-        if not isinstance(text, str) or not text:
-            return
-        if origin != self._settings.chat_id:
-            # Silence, deliberately: a refusal sent back would tell whoever is
-            # probing that this bot is alive and attended.
-            _log.warning("dropped inbound text from %s, which is not this channel's chat", origin)
-            return
-        self._hand_up(InboundText(text=text, origin=origin))
+        if origin == self._settings.chat_id:
+            return True
+        _log.warning("dropped an inbound message from %s, which is not this channel's chat", origin)
+        return False
 
     def _hand_up(self, event: InboundText) -> None:
         """The one thing that crosses from the reader to the engine, the one legal way.
@@ -402,7 +628,15 @@ class TelegramCompanionChannel:
         """
         if self._sink is None or self._stop.is_set():
             return
+        if event.origin.startswith(CALLBACK_ORIGIN):
+            self._remember_press(event.origin[len(CALLBACK_ORIGIN) :])
         self._sink.emit(event)
+
+    def _remember_press(self, callback: str) -> None:
+        """Hold a press until Bridge Core answers it, forgetting the oldest past the cap."""
+        self._unanswered[callback] = None
+        while len(self._unanswered) > UNANSWERED_PRESSES_KEPT:
+            del self._unanswered[next(iter(self._unanswered))]
 
     def _advance(self, update: dict) -> None:
         """Move the cursor past one update, whatever this adapter did with it."""
@@ -434,6 +668,25 @@ class TelegramCompanionChannel:
 
         threading.Thread(target=call, name=f"telegram-{method}", daemon=True).start()
         return await answer
+
+
+def _message_id_of(message: object) -> str:
+    """The provider's id of one message, as the opaque string the seam carries."""
+    if isinstance(message, dict):
+        message_id = message.get("message_id")
+        if message_id is not None and not isinstance(message_id, bool):
+            return str(message_id)
+    return ""
+
+
+def _replied_to(message: dict) -> str:
+    """The id of the message this one answered, empty when it answered nothing."""
+    return _message_id_of(message.get("reply_to_message"))
+
+
+def _message_id_on_the_wire(message_id: str) -> int | str:
+    """Give an id back to the API in the shape it came: its ids are integers."""
+    return int(message_id) if message_id.lstrip("-").isdigit() else message_id
 
 
 def _settle(answer: asyncio.Future[object], outcome: object) -> None:

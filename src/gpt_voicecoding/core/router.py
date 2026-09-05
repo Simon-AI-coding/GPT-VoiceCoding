@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from gpt_voicecoding.core.briefing import NON_TEXT_HINT
 from gpt_voicecoding.core.errors import AmbiguousNameError, NameMatchError
 from gpt_voicecoding.core.sessions import Session, SessionRegistry, spoken_name
 from gpt_voicecoding.seams.identity import SessionTarget
@@ -108,7 +109,9 @@ class InboundRouter:
         """Read one inbound line. Fails closed on anything it cannot place."""
         body = text.strip()
         if not body:
-            return self._refuse("that arrived empty — say what you'd like me to do")
+            # Empty is what a non-text message (voice note, photo, file) arrives
+            # as (ADR 0021 §4). The hint is Core's wording, held in the table.
+            return self._refuse(NON_TEXT_HINT)
 
         grammar = self._grammar
         if body.startswith(grammar.control_prefix):

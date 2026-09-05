@@ -913,7 +913,13 @@ class BridgeCore:
         # so that a verdict carried from any surface closes it — the dialog is
         # gone from the terminal too, and the buttons on the phone would invite
         # a press that earns only a refusal.
-        await self._close_open_notices(session.target)
+        #
+        # **Settled means the verdict arrived.** One that did not leaves the
+        # dialog open on screen — "the dialog on screen is still the thing that
+        # can resolve it", above — and taking its buttons away would close a
+        # decision the user can still make from here.
+        if receipt.is_delivered:
+            await self._close_open_notices(session.target)
         return outcome
 
     def _dialog_on_the_roster(self, approval_id: str) -> tuple[Session, ApprovalRequest] | None:

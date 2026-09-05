@@ -4077,6 +4077,18 @@ class TestAClosedNoticeIsEditedInPlace:
 
         assert hub.channel.revisions == [()]
 
+    def test_a_verdict_that_did_not_arrive_leaves_the_buttons_where_they_are(self) -> None:
+        """The dialog on screen is still the thing that can resolve it
+        (`answer_approval`), so the notice stays answerable from here too."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "the hook had gone"
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.channel.revisions == [(), ()]
+
     def test_a_permission_handed_back_to_the_terminal_closes_its_notice(self) -> None:
         """`ask`, or the hook ending without a verdict: the dialog is the keyboard's
         again, and the window shuts behind it (ADR 0021 §8)."""

@@ -1298,6 +1298,13 @@ class BridgeCore:
         message already sent and obeys Duty alone (§8), while the ended line is
         an unbidden push like every other and rides the Message Switch (§9).
         """
+        # **Whether this is the ending or a second sighting of it.** A discovery
+        # pass that misses a Session ends its row itself (#266's announcement is
+        # made there too), and the lane's own event can arrive after it —
+        # `mark_ended` is idempotent and hands back the same ended row, so the
+        # row alone cannot say which of the two this is. The roster before the
+        # mark can.
+        was_live = event.target in {session.target for session in self._state.sessions.live()}
         ended: Session | None = None
         try:
             ended = self._state.sessions.mark_ended(event.target)
@@ -1307,7 +1314,7 @@ class BridgeCore:
         for outcome in self.relays.session_ended(event.target):
             await self._settle(outcome)
         await self._close_open_notices(event.target)
-        await self._announce_ended(ended)
+        await self._announce_ended(ended if was_live else None)
         # Rows go with their Session (ADR 0021 §2), and last: the edits above
         # are addressed to the ids these rows carry.
         self.anchors.drop(event.target)

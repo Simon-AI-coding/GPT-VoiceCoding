@@ -3948,6 +3948,23 @@ class TestASessionsEndIsAnnouncedInOneLine:
 
         assert hub.channel.sent == ["⚫ ended · claude · GPT-VoiceCoding · build the shell"]
 
+    def test_one_ending_seen_twice_is_still_one_line(self) -> None:
+        """Discovery finds the Session gone, then its lane says so as well: the second
+        sighting is the same ending, and the user is told once (ADR 0021 §9)."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+        asyncio.run(hub.core.discover())
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == ["⚫ ended · claude · GPT-VoiceCoding · build the shell"]
+
     def test_a_child_process_that_ends_is_never_spoken_about(self) -> None:
         """Seen, never spoken to, and never spoken about (#79): it got no Stop Notice either."""
         hub = Hub(voice=False, sessions=self.TWO)

@@ -373,9 +373,16 @@ class TelegramCompanionChannel:
         A notice is laid out for an edit exactly as for a send, entities
         included, so a closed notice keeps its fold and its bold question and
         changes only the words Core changed. A notice is one part, so it can
-        revise exactly one message. The inline markup drawn from the labels is
-        #264's; the issue that edits a closed notice to `handled` (#266) is what
-        calls this with one.
+        revise exactly one message.
+
+        **An edit always says what its keyboard is**, where a fresh send only
+        says so when it has one. The Bot API reference is silent on what becomes
+        of an existing keyboard when an edit leaves `reply_markup` out (#247's
+        finding), so a closed notice that merely omitted it could not be relied
+        on to lose its buttons — and stale buttons are exactly what §8 exists to
+        take away. An empty keyboard is the instruction that removes one. This
+        is layout, and Core still says nothing but "no labels": the seam has no
+        word for a button, here or anywhere.
         """
         if len(parts) != len(revises):
             return ChannelReceipt(
@@ -394,6 +401,7 @@ class TelegramCompanionChannel:
                     {
                         "chat_id": self._settings.chat_id,
                         "message_id": _message_id_on_the_wire(message_id),
+                        "reply_markup": NO_KEYBOARD,
                         **part,
                     },
                     timeout_seconds=self._settings.request_timeout_seconds,
@@ -739,6 +747,11 @@ class TelegramCompanionChannel:
 
         threading.Thread(target=call, name=f"telegram-{method}", daemon=True).start()
         return await answer
+
+
+#: What an edit sends for a message that is to draw no buttons. An edit says
+#: what its keyboard is either way (`_revise`), and this is "none at all".
+NO_KEYBOARD: dict[str, object] = {"inline_keyboard": []}
 
 
 def _parts(text: str, notice: Notice | None, *, label_width: int) -> tuple[dict[str, object], ...]:

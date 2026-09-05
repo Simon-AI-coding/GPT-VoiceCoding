@@ -913,6 +913,40 @@ class TestPushingANotice:
         assert edit["text"] == lay_out(closed).text
         assert edit["entities"] == list(lay_out(closed).entities)
 
+    def test_an_edit_whose_notice_has_no_labels_takes_the_keyboard_away(self) -> None:
+        """ADR 0021 §8: the buttons go when the decision closes.
+
+        The Bot API reference is silent on what becomes of an existing keyboard
+        when an edit omits `reply_markup` (#247), so the edit says so rather
+        than relying on either reading: an empty keyboard is the instruction
+        that removes one, and Core still says nothing but "no labels".
+        """
+        api = FakeTelegram()
+        closed = notice(state_word="handled", options=())
+
+        asyncio.run(
+            channel(api).send("text", request_id=new_request_id(), revises=("17",), notice=closed)
+        )
+
+        (edit,) = api.method_calls("editMessageText")
+        assert edit["reply_markup"] == {"inline_keyboard": []}
+
+    def test_an_edit_whose_notice_has_labels_draws_them(self) -> None:
+        """The switches screen re-sent onto itself keeps a button per switch (#266)."""
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api).send(
+                "text",
+                request_id=new_request_id(),
+                revises=("17",),
+                notice=notice(options=("allow", "deny")),
+            )
+        )
+
+        (edit,) = api.method_calls("editMessageText")
+        assert edit["reply_markup"] == keyboard(("allow", "deny"))
+
     def test_a_notice_cannot_revise_more_than_one_message(self) -> None:
         """One notice is one message, so two ids is a notice that was never a notice."""
         api = FakeTelegram()

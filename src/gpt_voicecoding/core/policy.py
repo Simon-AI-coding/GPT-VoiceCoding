@@ -52,6 +52,12 @@ DEFAULT_SPEECH_SETTLE_SECONDS = 5.0
 #: read out in one breath.
 DEFAULT_HISTORY_PAGE_ENTRIES = 5
 
+#: How many Anchors the Anchor Table keeps per Session — its newest rows; the
+#: oldest goes when the next arrives (ADR 0021 §2, #263). A count and not an
+#: age: a day-old notice is a legitimate thing to reply to, so there is no
+#: timer. **New** — legacy has no reply anchoring at all (ADR 0021, Legacy).
+DEFAULT_ANCHOR_ROWS_PER_SESSION = 100
+
 
 @dataclass(frozen=True, slots=True)
 class CorePolicy:
@@ -76,6 +82,8 @@ class CorePolicy:
     #: entry *slots* is the Control Plane's capacity to answer, and composition
     #: refuses the pair (`engine/composition.py`).
     history_page_entries: int = DEFAULT_HISTORY_PAGE_ENTRIES
+    #: How many Anchors one Session keeps in the Anchor Table. Memory only.
+    anchor_rows_per_session: int = DEFAULT_ANCHOR_ROWS_PER_SESSION
 
     def __post_init__(self) -> None:
         for name, seconds in (
@@ -97,4 +105,13 @@ class CorePolicy:
             raise ValueError(
                 f"history_page_entries must hold at least one entry; "
                 f"{self.history_page_entries!r} would page through nothing forever"
+            )
+        if isinstance(self.anchor_rows_per_session, bool) or not isinstance(
+            self.anchor_rows_per_session, int
+        ):
+            raise ValueError("anchor_rows_per_session is a whole number of rows")
+        if self.anchor_rows_per_session <= 0:
+            raise ValueError(
+                f"anchor_rows_per_session must keep at least one row; "
+                f"{self.anchor_rows_per_session!r} would forget every notice as it was sent"
             )

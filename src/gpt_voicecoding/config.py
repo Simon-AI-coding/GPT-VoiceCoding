@@ -398,6 +398,12 @@ def _policy(section: dict[str, Any], where: str) -> CorePolicy:
         if isinstance(entries, bool) or not isinstance(entries, int):
             raise ConfigError(f"[policy] history_page_entries{where} must be a whole number")
         dials["history_page_entries"] = entries
+    rows = section.get("anchor_rows_per_session")
+    if rows is not None:
+        # A count of rows, read as one, for the same reason as the page size.
+        if isinstance(rows, bool) or not isinstance(rows, int):
+            raise ConfigError(f"[policy] anchor_rows_per_session{where} must be a whole number")
+        dials["anchor_rows_per_session"] = rows
     try:
         return CorePolicy(**dials)
     except ValueError as refusal:

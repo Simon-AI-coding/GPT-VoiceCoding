@@ -48,7 +48,8 @@ from dataclasses import dataclass, field, replace
 
 from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.adjudication import Outlet, SwitchAdjudicator
-from gpt_voicecoding.core.briefing import RosterBrief, SessionBrief
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable
+from gpt_voicecoding.core.briefing import PERMISSION_ALREADY_SETTLED_HINT, RosterBrief, SessionBrief
 from gpt_voicecoding.core.call_keeper import CallKeeper
 from gpt_voicecoding.core.clock import Clock, default_clock, wall_clock
 from gpt_voicecoding.core.errors import (
@@ -237,6 +238,41 @@ def _state_behind(window: ReplyWindow, held: SessionState) -> SessionState:
     return SessionState.IDLE if window is ReplyWindow.OPEN else SessionState.RUNNING
 
 
+#: The two verdicts a permission notice offers by number, in the order the
+#: notice lists them (ADR 0021 §6): `1. allow  2. deny`. `ask` gets no line — not
+#: answering hands the dialog back to the terminal, which is already the default.
+PERMISSION_LABELS: tuple[str, ...] = (str(ApprovalVerdict.ALLOW), str(ApprovalVerdict.DENY))
+
+
+def _notice_anchor(target: SessionTarget, waiting_for: WaitingFor) -> Anchor:
+    """The Anchor row a Stop Notice registers: what a numeral on it picks from.
+
+    A question's own option labels, in the order shown; the two verdicts, on the
+    dialog's handle, for a permission that has one to answer on; nothing for
+    anything else — a `finished` notice offers nothing to pick, and a numeral on
+    it is refused. `sent_at` is stamped by the send that registers the row.
+    """
+    if waiting_for.kind is WaitingKind.QUESTION:
+        return Anchor(
+            kind=AnchorKind.NOTICE,
+            target=target,
+            options=tuple(option.text for option in waiting_for.options),
+        )
+    if waiting_for.kind is WaitingKind.PERMISSION and waiting_for.approval_id:
+        return Anchor(
+            kind=AnchorKind.NOTICE,
+            target=target,
+            options=PERMISSION_LABELS,
+            approval_id=waiting_for.approval_id,
+        )
+    return Anchor(kind=AnchorKind.NOTICE, target=target)
+
+
+def _receipt_anchor(target: SessionTarget) -> Anchor:
+    """The Anchor row a relay's receipt registers: that Session, nothing to pick."""
+    return Anchor(kind=AnchorKind.RECEIPT, target=target)
+
+
 @dataclass(frozen=True, slots=True)
 class Status:
     """Everything the control plane can ask for. Answered with any switch off."""
@@ -423,7 +459,17 @@ class BridgeCore:
             policy=self._policy,
             clock=clock,
         )
-        self.router = InboundRouter(sessions=state.sessions, grammar=grammar)
+        #: The Anchor Table (ADR 0021 §2): memory only, never persisted, empty
+        #: after every restart. Held here beside the router that reads it and
+        #: the send path that fills it, and deliberately **not** on
+        #: `BridgeState`, whose one job is deciding what is durable.
+        self.anchors = AnchorTable(rows_per_target=self._policy.anchor_rows_per_session)
+        self.router = InboundRouter(
+            sessions=state.sessions,
+            grammar=grammar,
+            anchors=self.anchors,
+            answerable=self._question_answerable,
+        )
 
     @property
     def instructions(self) -> Instructions | None:
@@ -918,6 +964,13 @@ class BridgeCore:
             _log.info("Session %s is no longer running", target)
             for outcome in self.relays.session_ended(target):
                 await self._settle(outcome)
+            # Rows go with their Session (ADR 0021 §2): a reply to one of its
+            # notices from here on takes the unknown-Anchor path.
+            self.anchors.drop(target)
+        # And a row is keyed by the identity the roster holds *now*: a Codex row
+        # re-keyed on its first turn or on `/new` (#73, #77) is not among `gone`,
+        # so the table is trimmed to the live roster after every pass.
+        self.anchors.keep_sessions([session.target for session in self._state.sessions.live()])
         return tuple(gone)
 
     async def dispatch(self, event: Event) -> None:
@@ -1048,7 +1101,11 @@ class BridgeCore:
         # rather than from this reading (ADR 0017, #195). Which is why nothing
         # is returned — there is no route matrix left to report which door the
         # notice went through.
-        await self._push(briefing.text(brief))
+        # **Every Stop Notice is an Anchor** (ADR 0021 §2), whatever it stopped
+        # on: a reply to it is words for this Session, and a numeral picks from
+        # the labels registered with it — the question's options, or the two
+        # verdicts when it carried a permission (§6), on that dialog's handle.
+        await self._push(briefing.text(brief), anchor=_notice_anchor(target, waiting_for))
 
     async def _session_ended(self, event: SessionEnded) -> None:
         try:
@@ -1058,6 +1115,9 @@ class BridgeCore:
         self._state.persist()
         for outcome in self.relays.session_ended(event.target):
             await self._settle(outcome)
+        # Rows go with their Session (ADR 0021 §2). Editing its open notices to
+        # `handled` and pushing the ended line come before this, and are #266's.
+        self.anchors.drop(event.target)
 
     async def _reply_window_changed(self, event: ReplyWindowChanged) -> None:
         """An adapter saw the window move between two discoveries. Land it on the state.
@@ -1108,7 +1168,9 @@ class BridgeCore:
 
     async def _inbound_text(self, event: InboundText) -> None:
         """Classify one inbound line, act on it, and always answer the user."""
-        found = self.router.classify(event.text)
+        # Which of our own messages the user replied to is a fact the adapter
+        # saw; what it means is read here against the Anchor Table (ADR 0021 §2).
+        found = self.router.classify(event.text, in_reply_to=event.in_reply_to)
         # Every answer goes back the way the text came: the event's `origin` is
         # echoed onto the reply (ADR 0021 §4), which is what the field promised.
         match found.kind:
@@ -1118,16 +1180,21 @@ class BridgeCore:
                     origin=event.origin,
                 )
             case InboundClass.DELEGATION:
+                # Not an Anchor: a top-level `>` is a one-shot Delegated Turn with
+                # no Session context (ADR 0021 §3), so its answer names no target
+                # this hub can see. #265's Assistant Conversation answers do.
                 await self._reply(
                     await self._delegate(found) if self._delegate else NO_DELEGATE_HANDLER,
                     origin=event.origin,
                 )
             case InboundClass.ANSWER_RELAY:
                 await self._relay_inbound(found, origin=event.origin)
+            case InboundClass.APPROVAL_RELAY:
+                await self._approve_inbound(found, origin=event.origin)
             case InboundClass.UNKNOWN:
                 await self._reply(found.reply, origin=event.origin)
-        if found.kind is InboundClass.ANSWER_RELAY:
-            assert found.target is not None  # the router sets one for every ANSWER_RELAY
+        if found.kind in (InboundClass.ANSWER_RELAY, InboundClass.APPROVAL_RELAY):
+            assert found.target is not None  # the router sets one for every Relay
             _log.info(
                 "handled inbound Companion Channel message kind=%s target=%s",
                 found.kind,
@@ -1152,7 +1219,30 @@ class BridgeCore:
             await self._reply(str(refusal), origin=origin)
             return
         await self._settle(outcome)
-        await self._reply(outcome.line, origin=origin)
+        # A receipt names the Session the words went to, so it is an Anchor: a
+        # reply to it is more words for that Session (ADR 0021 §2). It offers
+        # nothing to pick, and a numeral on it is refused.
+        await self._reply(outcome.line, origin=origin, anchor=_receipt_anchor(found.target))
+
+    async def _approve_inbound(self, found: Classification, *, origin: str = "") -> None:
+        """A numeral on a permission notice: the user's verdict, on that dialog (ADR 0021 §6).
+
+        The Approval Relay carries and nothing more (#191): whether the dialog
+        is still open is `answer_approval`'s own answer, read off the roster. A
+        handle no live row carries is a dialog the keyboard already settled;
+        nothing is sent, the reply sends the user to the screen, and the numeral
+        is never re-read as words.
+        """
+        assert found.target is not None and found.verdict is not None
+        try:
+            outcome = await self.answer_approval(found.approval_id, found.verdict)
+        except BridgeCoreError as refusal:
+            await self._reply(str(refusal), origin=origin)
+            return
+        if outcome is None:
+            await self._reply(PERMISSION_ALREADY_SETTLED_HINT, origin=origin)
+            return
+        await self._reply(outcome.line, origin=origin, anchor=_receipt_anchor(found.target))
 
     async def _settle(self, outcome: RelayOutcome) -> None:
         """Land one Relay's standing on the Session's row, and wake if it is news.
@@ -1266,7 +1356,7 @@ class BridgeCore:
         self._state.sessions.set_undelivered(session.target, undelivered)
         return True
 
-    async def _push(self, text: str) -> None:
+    async def _push(self, text: str, *, anchor: Anchor | None = None) -> None:
         """One Companion Channel push, under the Message Switch. The only outlet left.
 
         What remains of the escalation pipeline (#195). The route matrix,
@@ -1285,7 +1375,7 @@ class BridgeCore:
         if not self.adjudicator.may_push():
             _log.info("the Message Switch is off; this notice reaches no outlet")
             return
-        receipt = await self._send(text)
+        receipt = await self._send(text, anchor=anchor)
         if receipt.is_delivered:
             return
         _log.info(
@@ -1294,7 +1384,7 @@ class BridgeCore:
             receipt.reason,
         )
 
-    async def _reply(self, text: str, *, origin: str = "") -> None:
+    async def _reply(self, text: str, *, origin: str = "", anchor: Anchor | None = None) -> None:
         """Answer text the user sent. **Never gated** — a reply is not a push.
 
         ADR 0002 is absolute, and the Companion Channel is one of the surfaces it
@@ -1321,7 +1411,7 @@ class BridgeCore:
         """
         if not text:
             return
-        receipt = await self._send(text, origin=origin)
+        receipt = await self._send(text, origin=origin, anchor=anchor)
         if receipt.is_delivered:
             return
         _log.warning(
@@ -1330,8 +1420,21 @@ class BridgeCore:
             receipt.reason,
         )
 
-    async def _send(self, text: str, *, origin: str = "") -> ChannelReceipt:
-        """One Companion Channel send, and the one record every send writes.
+    async def _send(
+        self, text: str, *, origin: str = "", anchor: Anchor | None = None
+    ) -> ChannelReceipt:
+        """One Companion Channel send, the one record every send writes — and its Anchor.
+
+        **Every send says what a reply to it means, or that it means nothing**
+        (ADR 0021 §2). `anchor` is the row this message registers under every
+        id it lands on, stamped here with the moment it was sent; `None` is a
+        message that names no target — a `/status` answer, a refusal, a `>`
+        answer — and registers nothing. Registering inside the one send site is
+        what stops a new outbound kind (#264's prompt and menus, #265's answers)
+        from being sent without its row and silently routing replies to the
+        newest Anchor instead. An UNKNOWN receipt from a split send that half
+        landed still names the parts that did, and those are Anchors too; a
+        send that landed nowhere registers nothing.
 
         **The only place `_channel.send` is called**, so that the record below
         is written for every send there is — a push and a reply alike — and
@@ -1357,6 +1460,8 @@ class BridgeCore:
             receipt.outcome,
             ",".join(receipt.message_ids),
         )
+        if anchor is not None:
+            self.anchors.register(receipt.message_ids, replace(anchor, sent_at=self._stamp()))
         return receipt
 
     def _spawned(self, target: SessionTarget) -> bool:

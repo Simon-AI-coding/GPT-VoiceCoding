@@ -560,6 +560,7 @@ relay_ceiling_seconds   = 600
 silence_end_seconds     = 60
 cool_down_seconds       = 30
 speech_settle_seconds   = 5
+anchor_rows_per_session = 100         # Anchors the Companion Channel keeps per Session (ADR 0021 §2)
 
 [log]                               # required: three numbers with no default
 max_bytes                     = 8388608

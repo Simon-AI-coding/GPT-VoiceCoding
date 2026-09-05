@@ -142,6 +142,34 @@ STATE_WORDING: Mapping[BriefState, str] = {
 #: nowhere else, so every surface that cannot read a message says so the same way.
 NON_TEXT_HINT = "I can only read text here — say it in words"
 
+#: The three fixed refusals of the reply grammar (ADR 0021 §2, §3; #263). Each
+#: is one hint, worded here and nowhere else, and never re-targets: a numeral
+#: that cannot be resolved is refused, not guessed onto another message.
+#:
+#: A numeral on a message Core no longer holds a row for — sent before a
+#: restart, fallen out of the Anchor Table, or the user's own message — and a
+#: numeral typed with no reply at all. Core does not know what that message's
+#: options were, and reading the number against the newest notice would pick a
+#: different message's option (review finding, 2026-09-06).
+NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT = (
+    "I no longer know which message that number answers — reply to the notice you mean, "
+    "or say it in words"
+)
+#: A numeral on a message that offers nothing to pick by number: a receipt, a
+#: prompt, an answer, or a number past the last option.
+NUMERAL_PICKS_NOTHING_HINT = "that number picks none of that message's options — say it in words"
+#: A numeral on a question that is no longer answerable from here: it was
+#: answered at the terminal, or the dialog closed. Nothing is relayed.
+QUESTION_ALREADY_ANSWERED_HINT = (
+    "that question was already answered on screen — if you want to add something, say it in words"
+)
+#: A verdict on a permission whose dialog no live row carries any more: it was
+#: answered at the terminal, or its hook ended. A dialog is not answered in
+#: words, so the hint sends the user to the screen rather than asking for any.
+PERMISSION_ALREADY_SETTLED_HINT = (
+    "that permission was already settled on screen — if it is still showing, answer it there"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Newest:

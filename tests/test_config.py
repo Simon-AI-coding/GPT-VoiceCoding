@@ -104,6 +104,26 @@ class TestACompleteConfiguration:
         with pytest.raises(ConfigError):
             load(written(tmp_path, COMPLETE + "\n[policy]\nhistory_page_entries = 0\n"))
 
+    def test_the_anchor_table_keeps_a_hundred_rows_per_session_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        """ADR 0021 §2: each Session's newest N, no timer. N is dialled, 100 by default."""
+        config = load(written(tmp_path, COMPLETE))
+
+        assert config.policy.anchor_rows_per_session == 100
+
+    def test_the_anchor_rows_may_be_dialled(self, tmp_path: Path) -> None:
+        config = load(written(tmp_path, COMPLETE + "\n[policy]\nanchor_rows_per_session = 7\n"))
+
+        assert config.policy.anchor_rows_per_session == 7
+
+    def test_anchor_rows_that_are_not_a_count_are_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError):
+            load(written(tmp_path, COMPLETE + "\n[policy]\nanchor_rows_per_session = 7.0\n"))
+
+        with pytest.raises(ConfigError):
+            load(written(tmp_path, COMPLETE + "\n[policy]\nanchor_rows_per_session = 0\n"))
+
     def test_a_duration_that_would_expire_everything_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
             load(written(tmp_path, COMPLETE + "\n[policy]\nrelay_ceiling_seconds = 0\n"))

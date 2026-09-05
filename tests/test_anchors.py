@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable, Screen
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 
 CODEX = SessionTarget(agent=AgentKind.CODEX, session_id="abc")
@@ -150,7 +150,7 @@ class TestTheRowShape:
     def test_a_row_holds_neither_text_nor_name(self) -> None:
         """The name is re-read from the roster; the words are never read (ADR 0021 §2)."""
         fields = set(Anchor.__dataclass_fields__)
-        assert fields == {"kind", "target", "options", "approval_id", "sent_at"}
+        assert fields == {"kind", "target", "options", "picks", "approval_id", "sent_at"}
 
     def test_a_permission_row_carries_its_approval_id(self) -> None:
         row = Anchor(
@@ -172,3 +172,45 @@ class TestTheRowShape:
         assert table.lookup("7") is row
         table.drop("thread-9")
         assert table.lookup("7") is None
+
+    def test_a_menu_row_may_stand_for_something_other_than_its_labels(self) -> None:
+        """#264: a roster screen's labels are names, and a press resolves to a Session.
+
+        The label is what the user saw; `picks` is what position N *means* —
+        resolved by position and never by the label's text (ADR 0021 §6), so
+        two Sessions sharing a name are still two rows the row tells apart.
+        """
+        row = Anchor(
+            kind=AnchorKind.MENU,
+            target=Screen.ROSTER,
+            options=("gpt-voicecoding · a task", "gpt-voicecoding · a task (claude:def:100)"),
+            picks=(CODEX, CLAUDE),
+            sent_at=1.0,
+        )
+        assert row.picks[1] == CLAUDE
+
+    def test_a_row_with_picks_has_one_per_label(self) -> None:
+        with pytest.raises(ValueError, match="one pick per label"):
+            Anchor(kind=AnchorKind.MENU, target=Screen.CONFIG, options=("a", "b"), picks=("a",))
+
+    def test_a_screen_row_is_nobodys_and_survives_trimming_to_the_roster(self) -> None:
+        """A menu screen about the whole engine is not a Session's row (#264)."""
+        table = AnchorTable(rows_per_target=100)
+        table.register(("7",), Anchor(kind=AnchorKind.MENU, target=Screen.ROSTER, sent_at=1.0))
+        table.register(("8",), notice(CODEX, at=2.0))
+
+        table.keep_sessions([])
+
+        assert table.lookup("7") is not None
+        assert table.lookup("8") is None
+
+    def test_each_screen_keeps_its_own_newest_n(self) -> None:
+        """The cap is per target, and a screen is a target: an old roster falls out."""
+        table = AnchorTable(rows_per_target=1)
+        table.register(("1",), Anchor(kind=AnchorKind.MENU, target=Screen.ROSTER, sent_at=1.0))
+        table.register(("2",), Anchor(kind=AnchorKind.MENU, target=Screen.CONFIG, sent_at=2.0))
+        table.register(("3",), Anchor(kind=AnchorKind.MENU, target=Screen.ROSTER, sent_at=3.0))
+
+        assert table.lookup("1") is None
+        assert table.lookup("2") is not None
+        assert table.lookup("3") is not None

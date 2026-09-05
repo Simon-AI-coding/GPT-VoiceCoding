@@ -7,7 +7,7 @@ public let maxRequestBytes = 65536
 
 /// The control-plane protocol this shell can interpret. Held to the engine's
 /// declaration by the cross-language agreement test in `tests/test_app_bundle.py`.
-public let controlPlaneProtocolVersion = 8
+public let controlPlaneProtocolVersion = 9
 
 /// Whether an Agent's authoritative progress source was read and answered.
 public enum ProgressAvailability: String, Sendable, CaseIterable {
@@ -59,6 +59,13 @@ public enum Action: String, Sendable, CaseIterable {
     case relay
     case approve
     case verify
+    /// The three menu screens of protocol 9 (ADR 0021 §6): the Session list with
+    /// one label per live Session, the configuration screen, and the assistant.
+    /// This shell offers none of them — the Control Panel shows the roster and
+    /// the switches itself — and names them so the closed set stays one set.
+    case sessions
+    case config
+    case assistant
 }
 
 public struct Request: Sendable {

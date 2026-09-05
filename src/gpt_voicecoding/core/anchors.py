@@ -19,8 +19,10 @@ Three rules, all structural:
   engine has not yet re-recognised would be half-reliable; an empty table after a
   restart is one plain rule instead.
 - **Rows go with their target**, and each target keeps only its newest N rows —
-  a Session's, or an Assistant Conversation's (#265). No time-based expiry and no
-  timer: a day-old notice is a legitimate thing to reply to.
+  a Session's, a menu screen's (#264), or an Assistant Conversation's (#265). No
+  time-based expiry and no timer: a day-old notice is a legitimate thing to
+  reply to, and a screen that fell out past the cap is an unknown Anchor whose
+  numeral gets the one fixed hint.
 - **Newest means last registered.** `sent_at` is carried as a fact about the
   message; the order this table answers "the newest Anchor" from is the order
   rows were registered in, which is the order they were sent. A row that is
@@ -38,10 +40,32 @@ from enum import StrEnum
 
 from gpt_voicecoding.seams.identity import SessionTarget
 
-#: What a row points at: a Session, or — for an Assistant Conversation (ADR 0021
-#: §7, #265) — the coding model's own thread id, which Bridge Core names but
-#: never stores anywhere else.
-AnchorTarget = SessionTarget | str
+
+class Screen(StrEnum):
+    """A menu screen that is nobody's: about the engine, not about one Session (#264).
+
+    The roster, the config screen and the switch screen offer choices about
+    the whole engine, so their rows point at the screen itself. Each screen is
+    its own target: it keeps its own newest N rows, it is never trimmed to the
+    roster, and words replying to one are words that replied to nothing —
+    there is no Session for them to be for. A greeting or a prompt about one
+    Session is that Session's row, and is not here.
+    """
+
+    ROSTER = "roster"
+    CONFIG = "config"
+    SWITCHES = "switches"
+
+
+#: What a row points at: a Session; a menu screen that is nobody's (#264); or —
+#: for an Assistant Conversation (ADR 0021 §7, #265) — the coding model's own
+#: thread id, which Bridge Core names but never stores anywhere else.
+AnchorTarget = SessionTarget | Screen | str
+
+#: What one position on a menu screen stands for, when the label is not itself
+#: the meaning: the Session a roster label names, the switch a switch label
+#: names, or the menu word behind a greeting's or the config screen's label.
+AnchorPick = SessionTarget | str
 
 
 class AnchorKind(StrEnum):
@@ -59,6 +83,8 @@ class AnchorKind(StrEnum):
     #: A menu screen — roster, greeting, config, switches (#264). Options are the
     #: screen's labels, resolved by position and never by text.
     MENU = "menu"
+    #: One History page (#264). No options.
+    HISTORY = "history"
     #: The opening line of an Assistant Conversation (#265).
     ASSISTANT = "assistant"
 
@@ -72,11 +98,23 @@ class Anchor:
     #: The labels a numeral picks from, in the order they were shown. Empty when
     #: the message offered nothing to pick.
     options: tuple[str, ...] = ()
+    #: What each label stands for, by position, on a menu screen whose labels
+    #: are not their own meaning (#264): a roster's Sessions, a switch screen's
+    #: switch names, a greeting's menu words. One per label, or none at all —
+    #: a notice's labels mean themselves. Never read against the label's text.
+    picks: tuple[AnchorPick, ...] = ()
     #: The pending permission's handle when this row is a permission notice, so
     #: a numeral resolves to a verdict on the right dialog. Empty otherwise.
     approval_id: str = ""
     #: When the message was sent. A fact carried, not the ordering key.
     sent_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.picks and len(self.picks) != len(self.options):
+            raise ValueError(
+                f"a menu row carries one pick per label; {len(self.picks)} pick(s) cannot "
+                f"stand for {len(self.options)} label(s)"
+            )
 
 
 @dataclass(slots=True)

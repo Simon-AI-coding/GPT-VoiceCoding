@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable, Screen
 from gpt_voicecoding.core.briefing import (
     NON_TEXT_HINT,
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
@@ -667,3 +667,132 @@ class TestARouterWithoutATable:
         found = router((CODEX, "port the log")).classify("1", in_reply_to="40")
 
         assert found.reply == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+
+
+def roster(*targets: SessionTarget, at: float = 1.0) -> Anchor:
+    return Anchor(
+        kind=AnchorKind.MENU,
+        target=Screen.ROSTER,
+        options=tuple(f"name {index}" for index in range(len(targets))),
+        picks=targets,
+        sent_at=at,
+    )
+
+
+def greeting(target: SessionTarget, at: float = 1.0) -> Anchor:
+    return Anchor(
+        kind=AnchorKind.MENU,
+        target=target,
+        options=("brief", "history", "send message"),
+        picks=("brief", "history", "send_message"),
+        sent_at=at,
+    )
+
+
+class TestANumeralOnAMenuScreenIsAPick:
+    """ADR 0021 §6 (#264): every menu screen is an Anchor whose labels resolve by
+    position. The router names the pick — the row and the position — and
+    Bridge Core decides what the press does."""
+
+    def test_a_numeral_on_the_roster_picks_that_position(self) -> None:
+        router, _ = anchored(*TWO, rows=((("50",), roster(CODEX, CLAUDE)),))
+
+        found = router.classify("2", in_reply_to="50")
+
+        assert found.kind is InboundClass.MENU_PICK
+        assert found.position == 2
+        assert found.anchor is not None and found.anchor.target is Screen.ROSTER
+        assert found.text == "name 1"
+
+    def test_the_pick_is_by_position_never_by_the_labels_text(self) -> None:
+        """Two rows sharing a label are two picks; the label decides nothing."""
+        row = Anchor(
+            kind=AnchorKind.MENU,
+            target=Screen.ROSTER,
+            options=("same", "same"),
+            picks=(CODEX, CLAUDE),
+            sent_at=1.0,
+        )
+        router, _ = anchored(*TWO, rows=((("50",), row),))
+
+        assert router.classify("2", in_reply_to="50").anchor.picks[1] == CLAUDE  # type: ignore[union-attr]
+
+    def test_a_numeral_past_the_last_label_is_refused(self) -> None:
+        router, _ = anchored(*TWO, rows=((("50",), roster(CODEX, CLAUDE)),))
+
+        assert router.classify("3", in_reply_to="50").reply == NUMERAL_PICKS_NOTHING_HINT
+        assert router.classify("0", in_reply_to="50").reply == NUMERAL_PICKS_NOTHING_HINT
+
+    def test_words_replying_to_a_screen_are_words_that_replied_to_nothing(self) -> None:
+        """A screen is nobody's: there is no Session for the words to be for."""
+        router, _ = anchored((CODEX, "port the log"), rows=((("50",), roster(CODEX)),))
+
+        found = router.classify("carry on", in_reply_to="50")
+
+        assert found.kind is InboundClass.ANSWER_RELAY
+        assert found.target == CODEX
+
+    def test_a_command_replying_to_a_screen_is_still_a_command(self) -> None:
+        router, _ = anchored((CODEX, "port the log"), rows=((("50",), roster(CODEX)),))
+
+        assert router.classify("/status", in_reply_to="50").kind is InboundClass.CONTROL
+
+    def test_a_numeral_on_a_greeting_picks_that_sessions_choice(self) -> None:
+        router, _ = anchored(*TWO, rows=((("51",), greeting(CLAUDE)),))
+
+        found = router.classify("3", in_reply_to="51")
+
+        assert found.kind is InboundClass.MENU_PICK
+        assert found.target == CLAUDE
+        assert found.position == 3
+        assert found.text == "send message"
+
+    def test_words_replying_to_a_greeting_are_words_for_that_session(self) -> None:
+        router, _ = anchored(*TWO, rows=((("51",), greeting(CLAUDE)),))
+
+        found = router.classify("ship it", in_reply_to="51")
+
+        assert found.kind is InboundClass.ANSWER_RELAY
+        assert found.target == CLAUDE
+
+    def test_a_numeral_on_a_greeting_whose_session_ended_is_refused(self) -> None:
+        registry = registry_of(*TWO)
+        registry.mark_ended(CLAUDE)
+        table = AnchorTable(rows_per_target=100)
+        table.register(("51",), greeting(CLAUDE))
+        router = InboundRouter(
+            sessions=registry, grammar=TextGrammar(control_commands=COMMANDS), anchors=table
+        )
+
+        assert router.classify("1", in_reply_to="51").reply == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+
+    def test_a_numeral_on_an_expired_screen_gets_the_one_fixed_hint(self) -> None:
+        """The roster fell out of the table: the press is refused, never re-targeted."""
+        older, newer = (("49",), roster(CODEX, CLAUDE)), (("50",), roster(CODEX, CLAUDE, at=2.0))
+        router, table = anchored(*TWO, rows=(older, newer), cap=1)
+        assert table.lookup("49") is None  # evicted by the newer roster
+
+        assert router.classify("1", in_reply_to="49").reply == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert router.classify("1", in_reply_to="50").kind is InboundClass.MENU_PICK
+
+    def test_a_numeral_on_the_prompt_picks_nothing(self) -> None:
+        prompt = Anchor(kind=AnchorKind.PROMPT, target=CLAUDE, sent_at=1.0)
+        router, _ = anchored(*TWO, rows=((("52",), prompt),))
+
+        assert router.classify("1", in_reply_to="52").reply == NUMERAL_PICKS_NOTHING_HINT
+
+    def test_words_replying_to_the_prompt_are_words_for_that_session(self) -> None:
+        prompt = Anchor(kind=AnchorKind.PROMPT, target=CLAUDE, sent_at=1.0)
+        router, _ = anchored(*TWO, rows=((("52",), prompt),))
+
+        found = router.classify("ship it", in_reply_to="52")
+
+        assert found.kind is InboundClass.ANSWER_RELAY
+        assert found.target == CLAUDE
+
+    def test_a_numeral_on_a_history_page_picks_nothing(self) -> None:
+        page = Anchor(kind=AnchorKind.HISTORY, target=CLAUDE, sent_at=1.0)
+        router, _ = anchored(*TWO, rows=((("53",), page),))
+
+        assert router.classify("1", in_reply_to="53").reply == NUMERAL_PICKS_NOTHING_HINT
+        assert router.classify("more", in_reply_to="53").target == CLAUDE

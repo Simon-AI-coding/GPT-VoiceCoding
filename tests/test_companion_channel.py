@@ -45,6 +45,8 @@ from gpt_voicecoding.adapters.companion_channel.telegram import (
     telegram_channel,
     utf16_length,
 )
+from gpt_voicecoding.adapters.companion_channel.telegram.adapter import COMMAND_MENU
+from gpt_voicecoding.adapters.companion_channel.telegram.layout import keyboard
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
 from gpt_voicecoding.engine.composition import import_factory
 from gpt_voicecoding.seams.companion_channel import (
@@ -52,11 +54,13 @@ from gpt_voicecoding.seams.companion_channel import (
     ChannelReceipt,
     CompanionChannel,
     InboundText,
+    MenuNotice,
     RosterNotice,
     RosterRowNotice,
     SessionNotice,
 )
 from gpt_voicecoding.seams.connection import Connectable
+from gpt_voicecoding.seams.control_plane import MENU, Action
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import new_request_id
 from gpt_voicecoding.seams.verify import VerifyOutcome
@@ -167,6 +171,8 @@ class FakeTelegram:
         if method == "editMessageText":
             return {"message_id": payload["message_id"], "text": payload["text"]}
         if method == "answerCallbackQuery":
+            return True
+        if method == "setMyCommands":
             return True
         raise AssertionError(f"the adapter called a method this fake does not know: {method}")
 
@@ -1650,3 +1656,268 @@ class TestACallInFlightDoesNotHoldTheProcessOpen:
             assert asyncio.run(scenario()) is None
         finally:
             release.set()
+
+
+class TestDrawingButtonsFromLabels:
+    """One inline button per option label, in order, `callback_data` the position (ADR 0021 §6).
+
+    The adapter draws and never chooses: the labels are Core's, the position
+    is what a press sends back, and the label's words are never read. Width
+    is layout — `button_label_width` — and cuts the button alone.
+    """
+
+    def test_a_question_notice_gets_one_button_per_label_with_its_position(self) -> None:
+        laid_out = lay_out(notice(options=("main", "develop", "release")))
+
+        assert laid_out.reply_markup == {
+            "inline_keyboard": [
+                [
+                    {"text": "main", "callback_data": "1"},
+                    {"text": "develop", "callback_data": "2"},
+                    {"text": "release", "callback_data": "3"},
+                ]
+            ]
+        }
+        assert "1. main\n2. develop\n3. release" in laid_out.text
+
+    def test_the_keyboard_goes_on_the_wire_with_the_message(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).send("text", request_id=new_request_id(), notice=notice()))
+
+        (call,) = api.method_calls("sendMessage")
+        assert call["reply_markup"] == keyboard(("main", "develop"))
+
+    def test_a_permission_notice_gets_two_buttons_and_two_numbered_lines(self) -> None:
+        laid_out = lay_out(
+            notice(
+                state=BriefState.PERMISSION,
+                state_word="requesting permission",
+                question="permission: Bash — push the branch",
+                options=("allow", "deny"),
+                recommendation="",
+            )
+        )
+
+        assert laid_out.reply_markup == {
+            "inline_keyboard": [
+                [{"text": "allow", "callback_data": "1"}, {"text": "deny", "callback_data": "2"}]
+            ]
+        }
+        assert "1. allow\n2. deny" in laid_out.text
+
+    def test_a_notice_with_no_labels_draws_nothing(self) -> None:
+        laid_out = lay_out(notice(question="", options=(), recommendation=""))
+
+        assert laid_out.reply_markup is None
+        assert "reply_markup" not in laid_out.payload()
+
+    def test_more_labels_than_one_row_holds_wrap_in_order(self) -> None:
+        markup = keyboard(("alpha", "beta", "gamma", "delta"), label_width=11)
+
+        assert markup == {
+            "inline_keyboard": [
+                [{"text": "alpha", "callback_data": "1"}, {"text": "beta", "callback_data": "2"}],
+                [{"text": "gamma", "callback_data": "3"}, {"text": "delta", "callback_data": "4"}],
+            ]
+        }
+
+    def test_a_long_label_is_cut_on_the_button_only(self) -> None:
+        label = "rebuild the index from scratch and re-run every migration"
+        laid_out = lay_out(notice(options=(label, "no")), label_width=16)
+
+        (row_one, row_two) = laid_out.reply_markup["inline_keyboard"]  # type: ignore[index]
+        assert row_one == [{"text": "rebuild the ind…", "callback_data": "1"}]
+        assert utf16_length(row_one[0]["text"]) == 16
+        assert row_two == [{"text": "no", "callback_data": "2"}]
+        assert f"1. {label}" in laid_out.text
+
+    def test_the_cut_never_splits_a_surrogate_pair(self) -> None:
+        (button,) = keyboard(("🙂🙂🙂🙂",), label_width=4)["inline_keyboard"][0]  # type: ignore[index]
+
+        assert button["text"] == "🙂…"
+
+    def test_the_width_is_configured_on_the_adapter(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api, button_label_width=3).send(
+                "text", request_id=new_request_id(), notice=notice(options=("main", "no"))
+            )
+        )
+
+        (call,) = api.method_calls("sendMessage")
+        assert call["reply_markup"] == {
+            "inline_keyboard": [
+                [{"text": "ma…", "callback_data": "1"}],
+                [{"text": "no", "callback_data": "2"}],
+            ]
+        }
+
+    def test_a_width_below_one_is_refused(self) -> None:
+        with pytest.raises(SettingsError, match="button_label_width"):
+            settings(button_label_width=0)
+
+    def test_a_width_that_is_not_a_whole_number_is_refused(self) -> None:
+        with pytest.raises(SettingsError, match="button_label_width"):
+            settings(button_label_width=2.5)
+        with pytest.raises(SettingsError, match="button_label_width"):
+            settings(button_label_width=True)
+
+    def test_the_roster_draws_one_button_per_row(self) -> None:
+        roster = RosterNotice(
+            rows=(
+                RosterRowNotice(BriefState.RUNNING, "running", "codex", "a · b"),
+                RosterRowNotice(
+                    BriefState.DECISION, "waiting for your decision", "claude", "c · d"
+                ),
+            ),
+            counts="sessions: 1 running, 1 waiting for your decision",
+            options=("a · b", "c · d"),
+        )
+
+        laid_out = lay_out(roster)
+
+        assert laid_out.reply_markup == {
+            "inline_keyboard": [
+                [{"text": "a · b", "callback_data": "1"}, {"text": "c · d", "callback_data": "2"}]
+            ]
+        }
+        assert laid_out.text == (
+            "🔵 a · b · codex · running\n"
+            "🟡 c · d · claude · waiting for your decision\n"
+            "sessions: 1 running, 1 waiting for your decision"
+        )
+
+    def test_a_roster_with_no_labels_draws_nothing(self) -> None:
+        roster = RosterNotice(rows=(), counts="sessions: none")
+
+        assert lay_out(roster).reply_markup is None
+
+
+class TestLayingOutAMenuScreen:
+    """A menu screen is a heading in bold and the labels numbered, with buttons (ADR 0021 §6)."""
+
+    def test_a_screen_is_the_heading_then_the_numbered_labels_and_their_buttons(self) -> None:
+        laid_out = lay_out(MenuNotice(heading="config", options=("switch", "verify", "live")))
+
+        assert laid_out.text == "config\n1. switch\n2. verify\n3. live"
+        assert entity(laid_out, "bold") == "config"
+        assert laid_out.reply_markup == {
+            "inline_keyboard": [
+                [
+                    {"text": "switch", "callback_data": "1"},
+                    {"text": "verify", "callback_data": "2"},
+                    {"text": "live", "callback_data": "3"},
+                ]
+            ]
+        }
+
+    def test_the_prompt_asks_for_words_with_a_force_reply_and_no_buttons(self) -> None:
+        laid_out = lay_out(MenuNotice(heading="Say to a · b:", expects_words=True))
+
+        assert laid_out.text == "Say to a · b:"
+        assert laid_out.reply_markup == {"force_reply": True}
+
+    def test_a_screen_is_sent_as_one_message_with_its_markup(self) -> None:
+        api = FakeTelegram()
+
+        receipt = asyncio.run(
+            channel(api).send(
+                "config\n1. switch\n2. verify\n3. live",
+                request_id=new_request_id(),
+                notice=MenuNotice(heading="config", options=("switch", "verify", "live")),
+            )
+        )
+
+        assert receipt.message_ids == ("1",)
+        (call,) = api.method_calls("sendMessage")
+        assert call["text"] == "config\n1. switch\n2. verify\n3. live"
+        assert call["reply_markup"]["inline_keyboard"][0][2] == {  # type: ignore[index]
+            "text": "live",
+            "callback_data": "3",
+        }
+
+    def test_a_screen_answering_a_press_clears_the_button_and_goes_as_a_message(self) -> None:
+        """A screen is not a toast: the press is answered with no text, then the screen is sent."""
+        api, sink = FakeTelegram(), Sink()
+
+        async def pressed_then_answered() -> ChannelReceipt:
+            listener = channel(api, sink=sink)
+            await listener.connect()
+            await until(lambda: api.method_calls("getUpdates"), what="the first contact")
+            api.deliver(press("1", pressed=5))
+            await until(lambda: sink.events, what="the press surfaced")
+            receipt = await listener.send(
+                "config\n1. switch",
+                request_id=new_request_id(),
+                origin=sink.events[0].origin,
+                notice=MenuNotice(heading="config", options=("switch",)),
+            )
+            await listener.aclose()
+            return receipt
+
+        receipt = asyncio.run(pressed_then_answered())
+
+        assert api.toasts() == [(CALLBACK_ID, "")]
+        assert receipt.message_ids == ("1",)
+
+
+class TestAdvertisingTheCommandMenu:
+    """`setMyCommands` carries exactly the shared set's menu entries (ADR 0021 §6)."""
+
+    def test_the_menu_is_set_at_first_contact_with_exactly_the_four_entries(self) -> None:
+        api = FakeTelegram()
+
+        async def listening() -> None:
+            listener = channel(api)
+            await listener.connect()
+            await until(lambda: api.method_calls("setMyCommands"), what="the menu was set")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        (call,) = api.method_calls("setMyCommands")
+        assert call == {
+            "commands": [
+                {"command": "assistant", "description": MENU[Action.ASSISTANT]},
+                {"command": "sessions", "description": MENU[Action.SESSIONS]},
+                {"command": "status", "description": MENU[Action.STATUS]},
+                {"command": "config", "description": MENU[Action.CONFIG]},
+            ]
+        }
+        assert [entry["command"] for entry in call["commands"]] == [str(a) for a in MENU]
+
+    def test_the_menu_is_set_once_per_process(self) -> None:
+        api = FakeTelegram()
+
+        async def listening() -> None:
+            listener = channel(api)
+            await listener.connect()
+            await until(lambda: len(api.method_calls("getUpdates")) >= 3, what="three polls")
+            await listener.aclose()
+
+        asyncio.run(listening())
+
+        assert len(api.method_calls("setMyCommands")) == 1
+
+    def test_a_refused_menu_is_logged_and_tried_again_at_the_next_contact(self, caplog) -> None:
+        api = FakeTelegram()
+        api.refuse("setMyCommands", TelegramError(FailureLayer.API, "setMyCommands was refused"))
+
+        async def listening() -> None:
+            listener = channel(api)
+            await listener.connect()
+            await until(lambda: len(api.method_calls("setMyCommands")) >= 2, what="a retry")
+            await listener.aclose()
+
+        with caplog.at_level("WARNING"):
+            asyncio.run(listening())
+
+        assert "command menu could not be set" in caplog.text
+        assert len(api.method_calls("getUpdates")) >= 1
+
+    def test_every_advertised_entry_is_a_verb_the_shared_parser_accepts(self) -> None:
+        for entry in COMMAND_MENU:
+            assert Action(entry["command"]) in MENU
+            assert entry["description"].strip()

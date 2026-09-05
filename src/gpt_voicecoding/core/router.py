@@ -43,6 +43,13 @@ were, and reading "2" against the newest Anchor would pick a different message's
 second option. A numeral on a message that offers nothing to pick is refused the
 same way. Free text is never subject to any of this.
 
+**A numeral on a menu screen is a pick** (ADR 0021 §6, #264). The roster, a
+greeting, the config screen and the switch screen are Anchors whose labels
+resolve by position; the router names the row and the position
+(`MENU_PICK`) and Bridge Core reads what that position stands for off the
+row. A screen that is nobody's — the roster, config, switches — has no Session
+for words to be for, so words replying to it are words that replied to nothing.
+
 Bare text resolving to the newest Anchor's target, or to the single live Session,
 is not a guess in the forbidden sense: it classifies into the least dangerous
 class, and with exactly one candidate nothing is being picked *between*. Zero or
@@ -65,7 +72,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable
+from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorTable, Screen
 from gpt_voicecoding.core.briefing import (
     NON_TEXT_HINT,
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
@@ -96,6 +103,9 @@ class InboundClass(StrEnum):
     APPROVAL_RELAY = "approval_relay"
     #: Work handed to a coding model on the user's behalf.
     DELEGATION = "delegation"
+    #: A numeral on a menu screen (ADR 0021 §6, #264): the row and the position.
+    #: What the press does is Bridge Core's to decide from the row's `picks`.
+    MENU_PICK = "menu_pick"
     #: Nothing could be said about it honestly. Carries the reply to send back.
     UNKNOWN = "unknown"
 
@@ -141,6 +151,11 @@ class Classification:
     approval_id: str = ""
     #: Set for APPROVAL_RELAY only. What the numeral resolved to.
     verdict: ApprovalVerdict | None = None
+    #: Set for MENU_PICK only. The screen's row, and the 1-based position picked;
+    #: `text` is the label at that position and `target` the Session when the
+    #: screen is one Session's.
+    anchor: Anchor | None = None
+    position: int = 0
     #: Set for UNKNOWN only. What to say back — honest, and never a guess.
     reply: str = ""
 
@@ -186,9 +201,17 @@ class InboundRouter:
 
         anchor = self._anchors.lookup(in_reply_to) if self._anchors is not None else None
         if anchor is not None:
-            session = self._live_session_of(anchor)
-            if session is not None:
-                return self._as_reply(body, anchor, session)
+            if isinstance(anchor.target, Screen):
+                # A menu screen that is nobody's (ADR 0021 §6, #264): a numeral
+                # picks by position, and words are words that replied to
+                # nothing — there is no Session for them to be for.
+                position = _numeral(body)
+                if position is not None:
+                    return self._as_menu_pick(anchor, position)
+            else:
+                session = self._live_session_of(anchor)
+                if session is not None:
+                    return self._as_reply(body, anchor, session)
             # A row whose Session the roster no longer holds is an unknown
             # Anchor: words fall through to the grammar below, a numeral is
             # refused there. A reply to an Anchor that is not a Session's — an
@@ -240,9 +263,12 @@ class InboundRouter:
 
     def _as_pick(self, anchor: Anchor, session: Session, position: int) -> Classification:
         """A numeral on a known Anchor: the Nth label, resolved by the row's kind."""
+        if anchor.kind is AnchorKind.MENU:
+            # A greeting: one Session's screen, its choices by position (#264).
+            return self._as_menu_pick(anchor, position)
         if anchor.kind is not AnchorKind.NOTICE or not 1 <= position <= len(anchor.options):
-            # A receipt, a prompt, an answer, or a number past the last option.
-            # Menu screens resolve by position too and are #264's branch here.
+            # A receipt, a prompt, a page, an answer, or a number past the last
+            # option: nothing to pick by number.
             return self._refuse(NUMERAL_PICKS_NOTHING_HINT)
         label = anchor.options[position - 1]
         if anchor.approval_id:
@@ -263,6 +289,23 @@ class InboundRouter:
             # answer to one it was never offered for.
             return self._refuse(QUESTION_ALREADY_ANSWERED_HINT)
         return Classification(kind=InboundClass.ANSWER_RELAY, text=label, target=session.target)
+
+    def _as_menu_pick(self, anchor: Anchor, position: int) -> Classification:
+        """A numeral on a menu screen: the row and the position, for the hub to act on.
+
+        The label at that position rides along as `text` for the log; what the
+        position *means* is the row's `picks`, read by Bridge Core — never the
+        label's words (ADR 0021 §6).
+        """
+        if not 1 <= position <= len(anchor.options):
+            return self._refuse(NUMERAL_PICKS_NOTHING_HINT)
+        return Classification(
+            kind=InboundClass.MENU_PICK,
+            text=anchor.options[position - 1],
+            target=anchor.target if isinstance(anchor.target, SessionTarget) else None,
+            anchor=anchor,
+            position=position,
+        )
 
     @staticmethod
     def _still_asking(session: Session, anchor: Anchor) -> bool:

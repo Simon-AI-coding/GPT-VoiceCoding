@@ -26,6 +26,7 @@ from typing import Any
 from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.bridge import Status
 from gpt_voicecoding.core.briefing import Decision, RosterBrief, SessionBrief
+from gpt_voicecoding.core.menu import MenuScreen
 from gpt_voicecoding.core.relay_queue import PendingRelay
 from gpt_voicecoding.core.relays import RelayOutcome
 from gpt_voicecoding.core.sessions import Session
@@ -383,6 +384,16 @@ def approval_document(
     carry — which dialog, and which way the user decided.
     """
     return {"approval_id": approval_id, "verdict": str(verdict)} | relay_document(outcome)
+
+
+def screen_document(screen: MenuScreen) -> dict[str, Any]:
+    """One menu screen on the wire: its text, and the labels in order (ADR 0021 §6).
+
+    The text is the screen for a surface that draws nothing; `options` are
+    for one that draws choices, and resolve by position — a surface that
+    hands one back sends the numeral, never the label's words.
+    """
+    return {"text": screen.text, "options": list(screen.options)}
 
 
 def verification_document(reports: tuple[SeamVerification, ...]) -> dict[str, Any]:

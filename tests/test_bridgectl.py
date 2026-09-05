@@ -24,7 +24,7 @@ from fakes import FakeCall
 from gpt_voicecoding.cli import main
 from gpt_voicecoding.config import load
 from gpt_voicecoding.control_plane.client import DEFAULT_TIMEOUT_SECONDS, EngineUnreachable
-from gpt_voicecoding.control_plane.commands import render
+from gpt_voicecoding.control_plane.commands import build_request, render
 from gpt_voicecoding.engine.composition import Engine
 from gpt_voicecoding.seams.call import CallSnapshot
 from gpt_voicecoding.seams.control_plane import Action, Reply
@@ -608,3 +608,37 @@ class TestTheHistoryPageOnOneLine:
 
         assert "2 assistant: (too large to carry)" in rendered
         assert "1 user: do the thing" in rendered
+
+
+class TestRenderingAScreen:
+    """A surface that draws no buttons prints the text and ignores the labels (ADR 0021 §6)."""
+
+    def test_sessions_prints_the_roster_text_alone(self) -> None:
+        rendered = render(
+            Reply.answered(
+                Action.SESSIONS,
+                {
+                    "text": "sessions: 1 running\n  a · b — codex:abc — running",
+                    "options": ["a · b"],
+                },
+            )
+        )
+
+        assert rendered == "sessions: 1 running\n  a · b — codex:abc — running"
+
+    def test_config_prints_the_numbered_screen(self) -> None:
+        rendered = render(
+            Reply.answered(
+                Action.CONFIG,
+                {
+                    "text": "config\n1. switch\n2. verify\n3. live",
+                    "options": ["switch", "verify", "live"],
+                },
+            )
+        )
+
+        assert rendered == "config\n1. switch\n2. verify\n3. live"
+
+    def test_the_three_menu_verbs_parse_with_no_arguments(self) -> None:
+        for command in ("sessions", "config", "assistant"):
+            assert build_request(command, []).payload == {}

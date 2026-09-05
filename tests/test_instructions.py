@@ -740,10 +740,19 @@ class TestTheAgentSetIsTheActingHalf:
         assert re.search(r"\bbrief \[.+\]", brief), brief
 
     def test_the_rendered_set_names_no_action_it_may_not_run(self, instructions) -> None:
-        """The voice call neither queries nor flips switches (#173)."""
+        """The voice call neither queries nor flips switches, nor opens a screen (#173, #264).
+
+        Read off the rendered action lines — the indented `<usage> — <gist>`
+        rows — rather than off every word of the prose: `sessions` is an
+        ordinary word in the gist that explains `brief`, and a withheld verb
+        is withheld as a *form the agent may run*, not as a word.
+        """
+        listed = [
+            line.strip() for line in instructions.agent.text.splitlines() if line.startswith("    ")
+        ]
         for action in WITHHELD_ACTIONS:
-            found = re.search(rf"\b{action}\b", instructions.agent.text)
-            assert found is None, f"the agent set names {action}: {found}"
+            named = [line for line in listed if line.startswith(USAGE[action])]
+            assert named == [], f"the agent set names {action}: {named}"
 
     def test_it_names_the_cli_the_context_gave_it(self, instructions) -> None:
         assert str(CLI.command) in instructions.agent.text

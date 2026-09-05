@@ -90,7 +90,7 @@ the user is told.
 
 ## The actions
 
-Eight, and the set is closed. Adding one is a contract change. Protocol 6
+Eleven, and the set is closed. Adding one is a contract change. Protocol 6
 retired `sessions` and added `brief`, the one verb Session state is fetched
 through. Protocol 7 retired `progress` and added `history`: the Session Brief
 carries the newest message whole and the History page carries that message and
@@ -106,6 +106,17 @@ pending permission is one of the three Session states, so the roster row in
 count an absent list as zero — "0 pending approvals" over a dialog that is on
 screen is a silent wrong number, which is what the version gate exists to
 prevent.
+
+Protocol 9 adds `sessions`, `config` and `assistant` — the three verbs the
+Companion Channel's command menu opens screens with (ADR 0021 §6, #264). The
+menu is four entries, `/assistant`, `/sessions`, `/status`, `/config`, and it
+advertises only what the shared parser accepts: the entries and the one
+sentence shown beside each live in `seams/control_plane.py::MENU`, and the
+Telegram adapter sets them on the bot at first contact and keeps no list of its
+own. A protocol-8 surface would send `sessions` to an engine that answers it
+and be unable to tell that from one that refuses it. The `sessions` here is
+not protocol 6's: that one was a second rendering of the roster, and this one
+answers with Briefing's own text and adds only labels.
 
 `launch` and `close` were the eighth and ninth until protocol 4. They are parked
 with the code behind them ([#72](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/72)):
@@ -508,10 +519,46 @@ every correctly wired machine. So `fail` means one of three things — the adapt
 itself reported a failure, configuration names an adapter and the engine loaded
 nothing (or the null one), or something is loaded that nothing configured.
 
+### `sessions`, `config` — the menu screens
+
+Payload: none. Data: `{"text": "…", "options": ["…", …]}`.
+
+A **screen** (ADR 0021 §6): `text` is the screen for a surface that draws
+nothing — `bridgectl` prints it, and a Companion Channel with no buttons sends
+it — and `options` are the labels, in order, for a surface that draws choices.
+A label is picked **by position**: a surface that hands one back sends the
+numeral, and the label's words are never read. On the Companion Channel every
+screen is an Anchor, so a numeral replying to it picks, and a button is that
+numeral (`core/anchors.py`, `core/menu.py`).
+
+`sessions` is the roster: `text` is exactly what `brief` with no target
+renders, and `options` carry one label per live Session in the roster's own
+order — the Session Name, with the address after it where two rows share a
+name. With no live Session the text ends with the nothing-running hint and
+`options` is empty: a screen with nothing to pick is not an Anchor. On the
+channel, picking a Session opens its greeting (`brief` / `history` / `send
+message`); `send message` opens the `Say to <name>:` prompt, an Anchor whose
+replies are Answer Relays to that Session.
+
+`config` offers `switch`, `verify` and `live`. On the channel, `switch` opens
+the switch screen — one label per switch carrying its state, a press meaning
+flip, read against the board as it stands when the press arrives — and
+`verify` and `live` run at once and answer in text. `status` stays plain text
+and is not a screen.
+
+### `assistant`
+
+Payload: none. Opens an Assistant Conversation (ADR 0021 §7). Until #265 builds
+it the hub refuses, `refused`, in its own words; the verb is in the set now so
+the command menu can name it and one parser accepts it.
+
 ## The command line
 
 `bridgectl` and the Companion Channel's `/` grammar are one command set, parsed
-by one parser, so neither can grow a command the other lacks.
+by one parser, so neither can grow a command the other lacks. On the Companion
+Channel `relay` and `approve` are folded away — a reply *is* the relay and a
+numeral *is* the approval (ADR 0021 §6) — but they stay typeable, as does every
+verb below.
 
 ```
 status
@@ -522,6 +569,9 @@ live
 relay <agent>:<session id>[:<pid>] [--supplement] <words>
 approve <approval id> allow|deny|ask
 verify
+sessions
+config
+assistant
 ```
 
 `<agent>:<session id>[:<pid>]` is how a `SessionTarget` is written on one line. A

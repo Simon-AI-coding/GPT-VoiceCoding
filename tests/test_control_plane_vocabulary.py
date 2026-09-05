@@ -14,7 +14,9 @@ import pytest
 
 from gpt_voicecoding.seams.control_plane import (
     MAX_REQUEST_BYTES,
+    MENU,
     PROTOCOL_VERSION,
+    USAGE,
     Action,
     ErrorCode,
     MalformedRequest,
@@ -34,28 +36,49 @@ class TestTheActionSet:
             "relay",
             "approve",
             "verify",
+            "sessions",
+            "config",
+            "assistant",
         }
 
-    def test_retiring_pending_approvals_from_status_moves_the_protocol_to_eight(
-        self,
-    ) -> None:
-        """A v7 surface would count an absent list as zero pending approvals.
+    def test_the_three_menu_verbs_move_the_protocol_to_nine(self) -> None:
+        """A v8 surface would send `sessions` and be answered `unknown_action`.
 
-        The Swift shell compares this number and nothing else, so a `status`
-        shape that changed under an unchanged number is a gate that lies — and
-        the silent zero over a dialog that is on screen is exactly the failure
-        the gate exists to prevent (#191). Protocol 7 was the History page
-        replacing exact progress (#171).
+        The Swift shell compares this number and nothing else, so an action set
+        that grew under an unchanged number is a gate that lies (#264, ADR 0021
+        §6). Protocol 8 retired `pending_approvals` from `status` (#191).
         """
-        assert PROTOCOL_VERSION == 8
+        assert PROTOCOL_VERSION == 9
 
     def test_the_retired_exact_progress_verb_is_not_an_action_this_engine_has(self) -> None:
         """Retired with the History page, and its absence asserted, not assumed."""
         assert "progress" not in {str(action) for action in Action}
 
-    def test_the_retired_roster_verb_is_not_an_action_this_engine_has(self) -> None:
-        """Retired with the Briefing verb, and its absence asserted, not assumed."""
-        assert "sessions" not in {str(action) for action in Action}
+    def test_the_sessions_verb_is_the_menu_screen_and_not_the_retired_roster(self) -> None:
+        """`sessions` came back in protocol 9 as a screen, not as the rendered-row roster.
+
+        Protocol 6 retired a `sessions` that was a second vocabulary for what
+        Briefing says once. The one here answers with Briefing's own roster text
+        and the option labels a menu draws (ADR 0021 §6); its usage line takes
+        no argument, because a screen is opened and never addressed.
+        """
+        assert USAGE[Action.SESSIONS] == "sessions"
+        assert USAGE[Action.CONFIG] == "config"
+        assert USAGE[Action.ASSISTANT] == "assistant"
+
+    def test_every_action_has_one_usage_line(self) -> None:
+        assert set(USAGE) == set(Action)
+
+    def test_the_command_menu_is_exactly_these_four_in_this_order(self) -> None:
+        """What a surface with a command menu advertises: four, and nothing it cannot parse.
+
+        The menu is vocabulary the surface shares with the engine, not a
+        Telegram-private list (ADR 0021 §6): every entry is an action the shared
+        parser accepts, and its description is a sentence Core chose.
+        """
+        assert tuple(MENU) == (Action.ASSISTANT, Action.SESSIONS, Action.STATUS, Action.CONFIG)
+        assert set(MENU) <= set(Action)
+        assert all(description.strip() for description in MENU.values())
 
     def test_launching_and_closing_are_not_actions_this_engine_has(self) -> None:
         """Parked with the launcher (#72), and their absence is asserted, not assumed.

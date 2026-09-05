@@ -162,15 +162,21 @@ class _Row:
 class AnchorTable:
     """The Anchors still worth replying to. Memory only; see the module docstring."""
 
-    def __init__(self, *, rows_per_target: int) -> None:
-        # The dial's spelling is `CorePolicy`'s to check; this guards the one
-        # value that would make the table forget each row as it was entered.
+    def __init__(self, *, rows_per_target: int, conversations: int) -> None:
+        # The dials' spelling is `CorePolicy`'s to check; these guard the two
+        # values that would make the table forget each row as it was entered.
         if rows_per_target < 1:
             raise ValueError(
                 f"rows_per_target must keep at least one row; {rows_per_target!r} would forget "
                 "every notice as it was sent"
             )
+        if conversations < 1:
+            raise ValueError(
+                f"conversations must keep at least one conversation; {conversations!r} would "
+                "forget an Assistant Conversation the moment it was opened"
+            )
         self._cap = rows_per_target
+        self._conversation_cap = conversations
         #: Oldest first. The last is the newest Anchor.
         self._rows: list[_Row] = []
         self._by_id: dict[str, _Row] = {}
@@ -190,6 +196,7 @@ class AnchorTable:
         for message_id in ids:
             self._by_id[message_id] = row
         self._evict_past_cap(anchor.target)
+        self._evict_past_conversation_cap()
 
     def lookup(self, message_id: str) -> Anchor | None:
         """The row that message id belongs to, or None when Core no longer holds one."""
@@ -270,6 +277,30 @@ class AnchorTable:
     def __len__(self) -> int:
         return len(self._rows)
 
+    def _evict_past_conversation_cap(self) -> None:
+        """Keep the newest N Assistant Conversations and drop the rest whole (ADR 0021 §7).
+
+        The row cap above bounds the messages of one conversation; this bounds
+        how many conversations are held at all. It is the chat's cap, not a
+        Session's — assistant rows belong to no Session and so are never
+        trimmed to the roster — and this engine serves one configured chat, so
+        per chat and per engine are the same count.
+
+        A conversation is as new as its newest row, which is the order the rows
+        stand in: the oldest conversation is the one whose newest message is
+        older than every other's. Evicted whole, so a reply to any of its
+        messages is an unknown Anchor and takes that path (#265).
+        """
+        newest_of: dict[str, int] = {}
+        for position, row in enumerate(self._rows):
+            thread_id = conversation_of(row.anchor)
+            if thread_id is not None:
+                newest_of[thread_id] = position
+        for thread_id, _ in sorted(newest_of.items(), key=lambda held: held[1])[
+            : max(0, len(newest_of) - self._conversation_cap)
+        ]:
+            self.drop(thread_id)
+
     def _evict_past_cap(self, target: AnchorTarget) -> None:
         held = [row for row in self._rows if row.anchor.target == target]
         for row in held[: max(0, len(held) - self._cap)]:
@@ -280,3 +311,19 @@ class AnchorTable:
         for message_id in row.ids:
             if self._by_id.get(message_id) is row:
                 del self._by_id[message_id]
+
+
+def conversation_of(anchor: Anchor) -> str | None:
+    """The thread an Assistant Conversation's row names, or None for any other row.
+
+    The one test of "is this row a conversation's", so the router and the table
+    agree on what a conversation is without either re-deriving it.
+
+    A `Screen` is a `StrEnum` and so is a `str`; it is tested for first, because
+    a screen is the engine's own and not a conversation. A Session's target is
+    not a string at all.
+    """
+    target = anchor.target
+    if isinstance(target, Screen) or not isinstance(target, str):
+        return None
+    return target

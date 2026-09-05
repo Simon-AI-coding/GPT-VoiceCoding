@@ -51,7 +51,8 @@ from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.commands import CommandError, build_request, render
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.control_plane.server import ControlPlaneServer
-from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer
+from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer, DelegatedAnswer
+from gpt_voicecoding.core.errors import BridgeCoreError
 from gpt_voicecoding.core.events import EventQueue
 from gpt_voicecoding.core.instructions import ControlPlaneCli, InstructionContext
 from gpt_voicecoding.core.persistence import StateStore
@@ -62,7 +63,7 @@ from gpt_voicecoding.core.state import BridgeState
 from gpt_voicecoding.core.switches import Switchboard
 from gpt_voicecoding.core.verification import SeamLoad
 from gpt_voicecoding.seams.agent import AgentAdapter, ProgressCapture
-from gpt_voicecoding.seams.call import CallAdapter
+from gpt_voicecoding.seams.call import CallAdapter, DelegatedTurnError, ThreadGoneError
 from gpt_voicecoding.seams.companion_channel import CompanionChannel
 from gpt_voicecoding.seams.connection import Connectable
 from gpt_voicecoding.seams.control_plane import Action
@@ -203,17 +204,43 @@ class Engine:
         async def control(found: Classification) -> ControlAnswer:
             return await _answer_text(held["plane"], found)
 
-        async def delegate(found: Classification) -> str:
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            """One Delegated Turn, and its failure said in the failure's own words.
+
+            **A failure is an answer here, not an exception** (ADR 0021 §7). The
+            hub's job is to tell the user what happened, and the words a refused
+            or lost turn carries are exactly that; letting the error out instead
+            would reach the drain loop, be logged, and leave the user with
+            silence where they asked a question. The one failure that is not
+            words is a thread that cannot be resumed — Core answers that with
+            its own fixed hint, so it travels as a fact and not as prose.
+            """
             instructions = hub["core"].instructions
             if instructions is None:  # unreachable from here: this root always generates them
-                return NO_DELEGATED_INSTRUCTIONS
-            reply = await adapters.call.delegate(
-                found.text,
+                return DelegatedAnswer(text=NO_DELEGATED_INSTRUCTIONS)
+            try:
+                reply = await adapters.call.delegate(
+                    found.text,
+                    model=config.delegated_turn_model,
+                    instructions=instructions.delegated.text,
+                    request_id=new_request_id(),
+                    resume=found.thread_id,
+                )
+            except ThreadGoneError:
+                return DelegatedAnswer(thread_gone=True)
+            except DelegatedTurnError as refusal:
+                return DelegatedAnswer(text=str(refusal))
+            return DelegatedAnswer(text=reply.text)
+
+        async def open_conversation() -> str:
+            """Start one Assistant Conversation's thread, on the same seam and model."""
+            instructions = hub["core"].instructions
+            if instructions is None:  # unreachable from here, as above
+                raise BridgeCoreError(NO_DELEGATED_INSTRUCTIONS)
+            return await adapters.call.open_conversation(
                 model=config.delegated_turn_model,
                 instructions=instructions.delegated.text,
-                request_id=new_request_id(),
             )
-            return reply.text
 
         core = BridgeCore(
             state=state,
@@ -228,6 +255,7 @@ class Engine:
             grammar=TextGrammar(control_commands=frozenset(str(name) for name in Action)),
             control=control,
             delegate=delegate,
+            open_conversation=open_conversation,
             inventory=_inventory(config),
             instruction_context=_instruction_context(config),
         )

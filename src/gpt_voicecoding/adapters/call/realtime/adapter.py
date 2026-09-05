@@ -32,10 +32,17 @@ connect that no narrower sandbox permits. The user's own coding Sessions are
 untouched by any of this — they keep their approval rules, and this adapter
 never goes near them.
 
-**A Delegated Turn's thread does not outlive it.** Fresh thread, one turn, then
-gone, on every path including the failing ones. Keeping one alive per model
-would be a second ledger of which thread is the real one, and nothing in the
-locked decisions asks for continuity between delegated turns.
+**A one-shot Delegated Turn's thread does not outlive it; an Assistant
+Conversation's does** (ADR 0021 §7). The top-level `>` is unchanged — fresh
+thread, one turn, then gone, on every path including the failing ones, because
+keeping one alive per model would be a second ledger of which thread is the real
+one. An Assistant Conversation is the case the locked decisions now do ask
+continuity for: `open_conversation` starts a thread and runs no turn, and
+`delegate(resume=...)` runs each later turn on that same thread. Its turns still
+unsubscribe when they end and are still interrupted when they fail; what they no
+longer do is take the thread with them. The thread id is Bridge Core's, carried
+on the Anchor row and nowhere else — this adapter keeps no ledger of open
+conversations, so there is nothing here for a restart to disagree with.
 
 **The cue player is this adapter's, not a call's.** The user hears the call
 connect and hears it end (#186), and the second of those has to play when the
@@ -73,7 +80,12 @@ from gpt_voicecoding.adapters.call.realtime.transport import (
     TransportFactory,
 )
 from gpt_voicecoding.adapters.codex_app_server.process import AppServerError, OwnedAppServer
-from gpt_voicecoding.adapters.codex_app_server.wire import Message, RemoteError, WireError
+from gpt_voicecoding.adapters.codex_app_server.wire import (
+    NO_ROLLOUT_YET,
+    Message,
+    RemoteError,
+    WireError,
+)
 from gpt_voicecoding.seams.call import (
     CallDropped,
     CallEnded,
@@ -82,11 +94,13 @@ from gpt_voicecoding.seams.call import (
     CallState,
     Cue,
     DelegatedReply,
+    DelegatedTurnError,
     Dial,
     DialReason,
     HandoverItem,
     SpokenBrief,
     SpokenRosterBrief,
+    ThreadGoneError,
     UserSpeaking,
     UserSpeech,
     VoiceSpeech,
@@ -178,10 +192,6 @@ USER_QUIET_POLL_FRACTION = 0.25
 
 class _Abandoned(Exception):
     """This call attempt was hung up or dropped while the handshake was running."""
-
-
-class DelegatedTurnError(Exception):
-    """One Delegated Turn could not be completed. Carries why, in the model's words."""
 
 
 @dataclass
@@ -444,10 +454,42 @@ class RealtimeCallAdapter:
             )
         return DeliveryReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
 
+    async def open_conversation(self, *, model: str, instructions: str) -> str:
+        """Start a thread for an Assistant Conversation and name it. No turn is run.
+
+        ADR 0021 §7: what the user sees when a conversation opens is Bridge
+        Core's own fixed line, so there is nothing here for a model to produce —
+        asking for one would spend a turn to obtain an id. The thread is left
+        subscribed to nothing and idle; the first `delegate(resume=...)` is what
+        gives it work. The id is the caller's to keep, and this adapter keeps no
+        list of the threads it has opened.
+        """
+        started = await self._request(
+            "thread/start",
+            self._thread_parameters(model=model, developer_instructions=instructions),
+            timeout=self._settings.request_timeout_seconds,
+        )
+        return _thread_id_in(started)
+
     async def delegate(
-        self, text: str, *, model: str, instructions: str, request_id: RequestId
+        self,
+        text: str,
+        *,
+        model: str,
+        instructions: str,
+        request_id: RequestId,
+        resume: str = "",
     ) -> DelegatedReply:
-        """Hand work to a coding model on the user's behalf — the Delegated Turn."""
+        """Hand work to a coding model on the user's behalf — the Delegated Turn.
+
+        `resume` empty is the one-shot turn the top-level `>` has always been: a
+        fresh thread, retired whatever happens. Naming a thread continues an
+        Assistant Conversation on it (ADR 0021 §7): the turn runs there, and at
+        its end the thread is unsubscribed but neither interrupted nor forgotten,
+        so the next reply can resume it again.
+        """
+        if resume:
+            return await self._resumed(resume, text, request_id, model)
         started = await self._request(
             "thread/start",
             self._thread_parameters(model=model, developer_instructions=instructions),
@@ -465,6 +507,71 @@ class RealtimeCallAdapter:
         finally:
             # Every path, including the failing ones. A thread left behind is a
             # thread nothing will ever close.
+            await self._retire(thread_id)
+
+    async def _resumed(
+        self, thread_id: str, text: str, request_id: RequestId, model: str
+    ) -> DelegatedReply:
+        """One turn of an Assistant Conversation, on the thread it already has.
+
+        `thread/resume` is what re-subscribes this engine to a thread the last
+        turn unsubscribed from — the same call the Codex Session adapter makes
+        for the same reason. A thread the server no longer has is the one
+        failure with a name of its own: the conversation has ended, and the
+        caller says so rather than showing the user a wire error. A thread with
+        no rollout **yet** is the opposite fact and is read as one, below.
+
+        **A second reply cannot meet a busy thread from the Companion Channel.**
+        The hub handles one message at a time (`engine/composition.py`), so a
+        reply typed while a turn is running is answered after that turn ends
+        rather than refused by codex. A caller that does reach this
+        concurrently — two surfaces at once — gets codex's own refusal of
+        `turn/start` as the answer, which is what `_delegated` already returns.
+        """
+        try:
+            resumed = await self._request(
+                "thread/resume",
+                {"threadId": thread_id},
+                timeout=self._settings.request_timeout_seconds,
+            )
+        except RemoteError as refused:
+            if NO_ROLLOUT_YET not in refused.remote_message:
+                raise ThreadGoneError(
+                    f"codex could not resume that conversation: {refused.remote_message}"
+                ) from None
+            # **The first turn of every conversation lands here.** Opening one
+            # runs no turn (ADR 0021 §7), so its thread has done nothing and has
+            # no rollout to resume — the same *not yet* the Codex Session
+            # adapter records when a TUI the user just started refuses to be
+            # subscribed to. It is not an ending, and reporting one would tell
+            # the user their brand-new conversation was over. `thread/start`
+            # already subscribed this connection and has not been unsubscribed
+            # yet, so the turn runs on the thread as it stands; from the second
+            # turn on there is a rollout and the resume above succeeds.
+            resumed = {}
+        except (WireError, AppServerError) as lost:
+            raise DelegatedTurnError(f"codex never answered the resume: {lost}") from None
+        else:
+            # **The thread that came back is the thread that was asked for.**
+            # The Codex Session adapter makes the same check for the same
+            # reason: a resume that quietly named another thread would run the
+            # user's words on somebody else's conversation.
+            thread = resumed.get("thread")
+            if not isinstance(thread, dict) or thread.get("id") != thread_id:
+                raise DelegatedTurnError("codex resumed a different thread than the one asked for")
+
+        produced = resumed.get("model")
+        turn = _DelegatedTurn(thread_id=thread_id)
+        turn.done = asyncio.get_running_loop().create_future()
+        self._delegating[thread_id] = turn
+        try:
+            return await self._delegated(turn, text, request_id, produced or model)
+        finally:
+            # The same retirement the one-shot turn gets: the turn is stopped
+            # if it is still running, and the thread is unsubscribed. What is
+            # different is only that nothing here was the thread's owner —
+            # `_retire` never deleted one — so the next reply can resume it
+            # (ADR 0021 §7).
             await self._retire(thread_id)
 
     async def play_cue(self, cue: Cue) -> None:
@@ -744,6 +851,11 @@ class RealtimeCallAdapter:
 
     async def _retire(self, thread_id: str) -> None:
         """Stop one delegated turn and let its thread go. Never raises.
+
+        **The same call for both kinds of turn** (ADR 0021 §7). What this does
+        is interrupt and unsubscribe; it has never deleted a thread, so a
+        conversation's thread survives it with no flag to say so. Which turns
+        get a thread back is decided by who calls `thread/resume`, not here.
 
         **Interrupted before unsubscribed, and in that order.** Unsubscribing
         only stops this engine hearing about the turn; the turn itself keeps

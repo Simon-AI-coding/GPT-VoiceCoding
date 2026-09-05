@@ -289,6 +289,46 @@ PERMISSION_ALREADY_SETTLED_HINT = (
 )
 
 
+#: The Assistant Conversation's own fixed words (ADR 0021 §7, #265). Core's,
+#: like every other sentence the user reads: the conversation's *answers* are
+#: the coding model's words, and these three are not — they are what the surface
+#: says around them, and a model never writes them.
+#:
+#: The line one conversation opens with. Sent as the first message of the
+#: conversation and registered as its Anchor, so a reply to it is the first
+#: turn. It says how the conversation is continued, because replying is the
+#: whole mechanism and nothing else on this surface teaches it.
+ASSISTANT_OPENING_LINE = (
+    "the assistant is listening — reply to this message, or to any answer, and it remembers "
+    "the conversation"
+)
+#: What the reply bar shows while it waits, on a surface that has one. A
+#: courtesy and never the routing (ADR 0021 §7), and inside the seam's own
+#: `PLACEHOLDER_LIMIT`.
+ASSISTANT_REPLY_PLACEHOLDER = "your words for the assistant"
+
+#: The same, for the `Say to <name>:` prompt (#264). The heading already names
+#: the Session, so the bar says only what it is waiting for.
+SAY_TO_PLACEHOLDER = "your words for that session"
+#: A reply to a conversation the coding model no longer has the thread for.
+#: There is nothing to continue, so the hint sends the user back to the one
+#: place a conversation is opened.
+#:
+#: **Not the expired-Anchor case**, which is the other way a conversation can
+#: go out of reach and is deliberately answered differently (#265, #263): a
+#: reply to an Anchor that fell out past the cap is words with an *unknown*
+#: Anchor, and words with an unknown Anchor go to the newest Anchor, whatever
+#: it is. Core no longer holds the row, so it cannot know the message was ever
+#: a conversation's to say this about it.
+ASSISTANT_CONVERSATION_GONE_HINT = (
+    "that conversation has ended — open a new one from the menu and it starts fresh"
+)
+#: Answers a menu press when this engine has no assistant to open a conversation
+#: with: the Call seam behind it could not start a thread. Its own words rather
+#: than the wire's, because what the user needs is the fact, not the failure.
+ASSISTANT_UNAVAILABLE_HINT = "I could not open a conversation with the assistant just now"
+
+
 @dataclass(frozen=True, slots=True)
 class Newest:
     """The newest assistant message, whole — or the named reason it is not here."""

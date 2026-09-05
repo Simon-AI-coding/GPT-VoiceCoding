@@ -29,14 +29,18 @@ from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, Se
 from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.anchors import Anchor, AnchorKind, Screen
 from gpt_voicecoding.core.bridge import (
-    ASSISTANT_NOT_BUILT,
     NO_CONTROL_SURFACE,
     NO_DELEGATE_HANDLER,
     VOICE_QUIET_LINE,
     VOICE_SPEAKING_LINE,
     ControlAnswer,
+    DelegatedAnswer,
 )
 from gpt_voicecoding.core.briefing import (
+    ASSISTANT_CONVERSATION_GONE_HINT,
+    ASSISTANT_OPENING_LINE,
+    ASSISTANT_REPLY_PLACEHOLDER,
+    ASSISTANT_UNAVAILABLE_HINT,
     NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT,
     NUMERAL_PICKS_NOTHING_HINT,
     PERMISSION_ALREADY_SETTLED_HINT,
@@ -44,7 +48,11 @@ from gpt_voicecoding.core.briefing import (
     BriefState,
 )
 from gpt_voicecoding.core.call_keeper import USER_OPENED
-from gpt_voicecoding.core.errors import CallInstructionsMissing, ChildSessionError
+from gpt_voicecoding.core.errors import (
+    BridgeCoreError,
+    CallInstructionsMissing,
+    ChildSessionError,
+)
 from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.relays import RelayReason
 from gpt_voicecoding.core.router import Classification
@@ -1615,8 +1623,8 @@ class TestEverySendWritesOneRecord:
         assert hub.channel.sent == [NO_CONTROL_SURFACE]
 
     def test_a_delegation_reaches_the_wired_handler(self) -> None:
-        async def delegate(found: Classification) -> str:
-            return f"about {found.text}: it says so"
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(text=f"about {found.text}: it says so")
 
         hub = Hub(delegate=delegate)
 
@@ -3710,7 +3718,7 @@ class TestEveryMenuScreenIsAnAnchor:
 
         assert hub.channel.sent[-1] == "Say to GPT-VoiceCoding · build the shell:"
         assert hub.channel.notices[-1] == MenuNotice(
-            heading="Say to GPT-VoiceCoding · build the shell:", expects_words=True
+            heading="Say to GPT-VoiceCoding · build the shell:"
         )
         row = self.anchor(hub, "3")
         assert row.kind is AnchorKind.PROMPT
@@ -3819,17 +3827,18 @@ class TestEveryMenuScreenIsAnAnchor:
         assert hub.channel.notices[-1] is None
         assert hub.core.anchors.lookup("1") is None
 
-    def test_assistant_goes_to_the_control_surface_like_any_typed_verb(self) -> None:
+    def test_assistant_is_answered_by_the_hub_and_not_by_the_control_surface(self) -> None:
+        """It opens a screen, and a screen is an Anchor the send site registers (#265)."""
         hub, asked = self.hub()
 
         hub.emit(InboundText(text="/assistant"))
 
-        assert [found.command for found in asked] == ["assistant"]
+        assert [found.command for found in asked] == []
 
-    def test_the_hub_refuses_to_open_an_assistant_until_265(self) -> None:
+    def test_an_engine_with_no_assistant_wired_refuses_in_cores_own_words(self) -> None:
         hub, _ = self.hub()
 
-        with pytest.raises(Exception, match=ASSISTANT_NOT_BUILT):
+        with pytest.raises(BridgeCoreError, match=ASSISTANT_UNAVAILABLE_HINT):
             asyncio.run(hub.core.open_assistant())
 
     def test_a_press_on_an_expired_screen_gets_the_one_fixed_hint(self) -> None:
@@ -4354,3 +4363,320 @@ class TestTheSwitchesScreenIsEditedAfterItsOwnFlip:
         hub.emit(InboundText(text="1", in_reply_to="1"))
 
         assert hub.channel.revisions == [(), ()]
+#: The one verb this class's hub answers to, beside the harness's own two.
+ASSISTANT_COMMANDS = frozenset({"status", "stop", "assistant"})
+
+
+class TestTheAssistantConversation:
+    """ADR 0021 §7, #265: a menu-opened Delegated Turn, continued by replying.
+
+    Bridge Core keeps the thread id on the Anchor row and nothing else — no
+    transcript, no list of open threads. What continues which conversation is
+    read off the row a message replied to, and nothing else.
+    """
+
+    def hub(self, **fields: object) -> Hub:
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(text=f"answering {found.text!r} on {found.thread_id}")
+
+        async def open_conversation() -> str:
+            return await hub.call.open_conversation(model="a-model", instructions="the rules")
+
+        hub = Hub(
+            delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+            **fields,  # type: ignore[arg-type]
+        )
+        return hub
+
+    def test_the_menu_verb_starts_a_thread_and_anchors_the_opening_line(self) -> None:
+        hub = self.hub()
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.channel.sent == [ASSISTANT_OPENING_LINE]
+        assert hub.call.conversations == ["the rules"]
+        # No turn is run to open one: the opening line is Core's own words.
+        assert hub.call.delegated == []
+        row = hub.core.anchors.newest()
+        assert row is not None
+        assert row.kind is AnchorKind.ASSISTANT
+        assert row.target == "thread-1"
+
+    def test_the_opening_line_opens_a_reply_bar_and_carries_no_brief(self) -> None:
+        """Prose, not a laid-out notice: what it wants from the surface is the bar."""
+        hub = self.hub()
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.channel.notices == [None]
+        assert hub.channel.reply_bars == [ASSISTANT_REPLY_PLACEHOLDER]
+
+    def test_every_answer_opens_the_reply_bar_too(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+
+        assert hub.channel.reply_bars[-1] == ASSISTANT_REPLY_PLACEHOLDER
+        assert hub.channel.notices[-1] is None
+
+    def test_a_reply_to_the_opening_line_runs_a_turn_on_that_thread(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+
+        assert hub.channel.sent[-1] == "answering 'what changed?' on thread-1"
+
+    def test_every_answer_is_an_anchor_of_the_same_conversation(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+
+        answer = hub.channel.receipts[-1].message_ids[0]
+        row = hub.core.anchors.lookup(answer)
+
+        assert row is not None
+        assert row.kind is AnchorKind.ANSWER
+        assert row.target == "thread-1"
+
+    def test_a_split_answer_anchors_every_part_of_itself(self) -> None:
+        """ADR 0021 §7: a reply to any part of one answer continues the conversation."""
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+        # The answer lands in three parts, as a long one does.
+        hub.channel.message_ids = ("70", "71", "72")
+
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+
+        rows = [hub.core.anchors.lookup(part) for part in ("70", "71", "72")]
+        assert all(row is not None for row in rows)
+        assert [row.target for row in rows if row is not None] == ["thread-1"] * 3
+        assert {row.kind for row in rows if row is not None} == {AnchorKind.ANSWER}
+        # And replying to the middle part continues the same conversation.
+        hub.emit(InboundText(text="and then?", in_reply_to="71"))
+        assert hub.channel.sent[-1] == "answering 'and then?' on thread-1"
+
+    def test_a_reply_to_an_answer_continues_the_conversation(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+        answer = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="and then?", in_reply_to=answer))
+
+        assert hub.channel.sent[-1] == "answering 'and then?' on thread-1"
+
+    def test_two_conversations_coexist_and_a_reply_says_which(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        first = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="/assistant"))
+        second = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="hello", in_reply_to=first))
+        hub.emit(InboundText(text="hello", in_reply_to=second))
+
+        assert hub.channel.sent[-2] == "answering 'hello' on thread-1"
+        assert hub.channel.sent[-1] == "answering 'hello' on thread-2"
+
+    def test_plain_typing_goes_to_the_newest_anchor_of_either_kind(self) -> None:
+        """§7 generalises the newest-Anchor rule: an answer holds the chat until a notice lands."""
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+
+        hub.emit(InboundText(text="one more thing"))
+
+        assert hub.channel.sent[-1] == "answering 'one more thing' on thread-1"
+
+    def test_a_newer_stop_notice_takes_plain_typing_back_to_its_session(self) -> None:
+        hub = self.hub()
+        hub.emit(InboundText(text="/assistant"))
+        hub.emit(SessionStopped(target=CODEX))
+
+        hub.emit(InboundText(text="carry on"))
+
+        relays = [call for call in hub.agent.calls if call.verb == "answer_relay"]
+        assert relays and relays[-1].text == "carry on"
+
+    def test_the_n_plus_first_conversation_evicts_the_oldest(self) -> None:
+        """The cap is conversations, not rows: the oldest goes whole (ADR 0021 §7)."""
+        hub = self.hub(assistant_conversations=1)
+        hub.emit(InboundText(text="/assistant"))
+        first = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.core.anchors.lookup(first) is None
+
+    def test_a_reply_to_an_evicted_conversation_takes_the_unknown_anchor_path(self) -> None:
+        hub = self.hub(assistant_conversations=1)
+        hub.emit(InboundText(text="/assistant"))
+        first = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="/assistant"))
+
+        hub.emit(InboundText(text="are you there?", in_reply_to=first))
+
+        # Words with an unknown Anchor go to the newest Anchor, which is the
+        # second conversation — #263's path, not a refusal.
+        assert hub.channel.sent[-1] == "answering 'are you there?' on thread-2"
+
+    def test_a_thread_that_cannot_be_resumed_gets_one_fixed_hint(self) -> None:
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(thread_gone=True)
+
+        async def open_conversation() -> str:
+            return "thread-1"
+
+        hub = Hub(
+            delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="still there?", in_reply_to=opening))
+
+        assert hub.channel.sent[-1] == ASSISTANT_CONVERSATION_GONE_HINT
+
+    def test_a_conversation_that_ended_stops_holding_the_chat(self) -> None:
+        """Its rows go with it, or plain text meant for a Session keeps reaching it (#265)."""
+
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(thread_gone=True)
+
+        async def open_conversation() -> str:
+            return "thread-1"
+
+        hub = Hub(
+            delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="still there?", in_reply_to=opening))
+
+        assert hub.core.anchors.lookup(opening) is None
+        assert hub.core.anchors.newest() is None
+
+        # And the next thing typed is for the Session, not for the dead thread:
+        # it becomes a Relay, queued behind a Reply Window that is not open yet.
+        hub.emit(InboundText(text="carry on"))
+
+        assert [relay.text for relay in hub.state.relays.pending()] == ["carry on"]
+        assert hub.channel.sent[-1] != ASSISTANT_CONVERSATION_GONE_HINT
+
+    def test_the_start_again_hint_is_not_an_anchor(self) -> None:
+        """A conversation that has ended anchors nothing: replying to the hint is not a turn."""
+
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(thread_gone=True)
+
+        async def open_conversation() -> str:
+            return "thread-1"
+
+        hub = Hub(
+            delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+        hub.emit(InboundText(text="still there?", in_reply_to=opening))
+
+        assert hub.core.anchors.lookup(hub.channel.receipts[-1].message_ids[0]) is None
+
+    def test_a_busy_thread_answers_with_the_engines_own_refusal(self) -> None:
+        """§7: Codex's refusal of a second turn is the answer, and nothing is queued."""
+
+        async def delegate(found: Classification) -> DelegatedAnswer:
+            return DelegatedAnswer(text="a turn is already running on that thread")
+
+        async def open_conversation() -> str:
+            return "thread-1"
+
+        hub = Hub(
+            delegate=delegate,  # type: ignore[arg-type]
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="and again", in_reply_to=opening))
+
+        assert hub.channel.sent[-1] == "a turn is already running on that thread"
+
+    def test_an_assistant_this_engine_cannot_open_says_so_and_anchors_nothing(self) -> None:
+        hub = Hub(commands=ASSISTANT_COMMANDS)  # nothing wired to open a conversation
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.channel.sent == [ASSISTANT_UNAVAILABLE_HINT]
+        assert hub.core.anchors.newest() is None
+
+    def test_a_seam_that_names_no_thread_is_an_assistant_that_did_not_open(self) -> None:
+        """An empty id is not a conversation: anchoring on it would route replies nowhere."""
+
+        async def open_conversation() -> str:
+            return ""
+
+        hub = Hub(
+            delegate=None,
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.channel.sent == [ASSISTANT_UNAVAILABLE_HINT]
+        assert hub.core.anchors.newest() is None
+
+    def test_a_seam_that_raises_while_opening_says_the_same_thing(self) -> None:
+        async def open_conversation() -> str:
+            raise RuntimeError("the app-server is not answering")
+
+        hub = Hub(
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+
+        hub.emit(InboundText(text="/assistant"))
+
+        assert hub.channel.sent == [ASSISTANT_UNAVAILABLE_HINT]
+        assert hub.core.anchors.newest() is None
+
+    def test_a_conversation_with_no_turn_handler_wired_says_so(self) -> None:
+        """The thread opened; nothing is wired to run a turn on it."""
+
+        async def open_conversation() -> str:
+            return "thread-1"
+
+        hub = Hub(
+            open_conversation=open_conversation,  # type: ignore[arg-type]
+            commands=ASSISTANT_COMMANDS,
+        )
+        hub.emit(InboundText(text="/assistant"))
+        opening = hub.channel.receipts[-1].message_ids[0]
+
+        hub.emit(InboundText(text="what changed?", in_reply_to=opening))
+
+        assert hub.channel.sent[-1] == NO_DELEGATE_HANDLER
+
+    def test_a_top_level_delegation_is_still_one_shot_and_still_no_anchor(self) -> None:
+        """The `>` form is untouched by §7: no thread to resume, and no row (ADR 0021 §3)."""
+        hub = self.hub()
+
+        hub.emit(InboundText(text=">summarise the diff"))
+
+        assert hub.channel.sent == ["answering 'summarise the diff' on "]
+        assert hub.core.anchors.newest() is None

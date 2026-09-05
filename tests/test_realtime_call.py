@@ -45,6 +45,7 @@ from gpt_voicecoding.adapters.call.realtime import (
     RealtimeCallAdapter,
     RealtimeCallSettings,
     SettingsError,
+    ThreadGoneError,
     cues,
     realtime_call,
     webrtc,
@@ -1562,6 +1563,196 @@ class TestTheDelegatedTurn:
                 await adapter.aclose()
 
         asyncio.run(scenario())
+
+    def test_opening_a_conversation_starts_a_thread_and_runs_no_turn(
+        self, socket_path: Path
+    ) -> None:
+        """ADR 0021 §7: the opening line is Core's own words, so nothing is asked of the model."""
+
+        async def scenario() -> str:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1")
+                adapter, _ = await riding(server, Sink())
+
+                thread_id = await adapter.open_conversation(
+                    model="gpt-5", instructions=DELEGATED_RULES
+                )
+
+                assert server.calls_to("turn/start") == []
+                await adapter.aclose()
+                return thread_id
+
+        assert asyncio.run(scenario()) == "assistant-1"
+
+    def test_a_resumed_turn_runs_on_the_thread_it_was_given_and_starts_no_other(
+        self, socket_path: Path
+    ) -> None:
+        """A reply to any message of a conversation continues that same thread (ADR 0021 §7)."""
+
+        async def scenario() -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1", says="two")
+                adapter, _ = await riding(server, Sink())
+
+                reply = await adapter.delegate(
+                    "and the second one?",
+                    model="gpt-5",
+                    instructions=DELEGATED_RULES,
+                    request_id=rid(),
+                    resume="assistant-1",
+                )
+
+                answer = reply.text
+                resumed = server.calls_to("thread/resume")
+                started = server.calls_to("thread/start")
+                await adapter.aclose()
+                return answer, resumed, started
+
+        answer, resumed, started = asyncio.run(scenario())
+
+        assert answer == "two"
+        assert resumed == [{"threadId": "assistant-1"}]
+        assert started == []
+
+    def test_a_resumed_turn_leaves_its_thread_alive_for_the_next_reply(
+        self, socket_path: Path
+    ) -> None:
+        """ADR 0021 §7 amends the one-turn rule: the turn unsubscribes, the thread stays."""
+
+        async def scenario() -> list[dict[str, Any]]:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1")
+                adapter, _ = await riding(server, Sink())
+
+                await adapter.delegate(
+                    "again",
+                    model="gpt-5",
+                    instructions=DELEGATED_RULES,
+                    request_id=rid(),
+                    resume="assistant-1",
+                )
+
+                interrupts = server.calls_to("turn/interrupt")
+                assert server.calls_to("thread/unsubscribe") == [{"threadId": "assistant-1"}]
+                await adapter.aclose()
+                return interrupts
+
+        assert asyncio.run(scenario()) == []
+
+    def test_the_first_turn_runs_on_a_thread_that_has_no_rollout_to_resume(
+        self, socket_path: Path
+    ) -> None:
+        """A conversation opens without a turn, so its thread has done nothing yet (#265).
+
+        Codex refuses `thread/resume` on a thread with no rollout — the fact the
+        Codex Session adapter already reads as a *not yet* — and the first reply
+        of every conversation meets exactly that. It must run the turn, not
+        report the conversation ended.
+        """
+
+        async def scenario() -> str:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1", says="the first answer")
+
+                def no_rollout(_params: dict) -> dict:
+                    raise FakeRemoteError("no rollout found")
+
+                server.answers("thread/resume", no_rollout)
+                adapter, _ = await riding(server, Sink())
+
+                reply = await adapter.delegate(
+                    "what changed?",
+                    model="gpt-5",
+                    instructions=DELEGATED_RULES,
+                    request_id=rid(),
+                    resume="assistant-1",
+                )
+
+                answer = reply.text
+                assert server.calls_to("turn/start")
+                await adapter.aclose()
+                return answer
+
+        assert asyncio.run(scenario()) == "the first answer"
+
+    def test_a_resume_that_names_a_different_thread_is_refused(self, socket_path: Path) -> None:
+        """The Codex Session adapter makes the same check for the same reason."""
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1")
+                server.answers("thread/resume", {"thread": {"id": "somebody-elses"}})
+                adapter, _ = await riding(server, Sink())
+
+                with pytest.raises(DelegatedTurnError, match="different thread"):
+                    await adapter.delegate(
+                        "what changed?",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                        resume="assistant-1",
+                    )
+
+                assert server.calls_to("turn/start") == []
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_thread_that_cannot_be_resumed_is_its_own_failure(self, socket_path: Path) -> None:
+        """Distinguishable from a model answer, so Core can send the start-again hint (#265)."""
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1")
+
+                def gone(_params: dict) -> dict:
+                    raise FakeRemoteError("no thread with that id")
+
+                server.answers("thread/resume", gone)
+                adapter, _ = await riding(server, Sink())
+
+                with pytest.raises(ThreadGoneError):
+                    await adapter.delegate(
+                        "still there?",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                        resume="assistant-1",
+                    )
+
+                assert server.calls_to("turn/start") == []
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_busy_thread_comes_back_as_codexs_own_refusal(self, socket_path: Path) -> None:
+        """A second reply while a turn runs meets Codex's refusal, which is the answer (§7)."""
+
+        async def scenario() -> str:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server, thread_id="assistant-1")
+
+                def busy(_params: dict) -> dict:
+                    raise FakeRemoteError("a turn is already running on that thread")
+
+                server.answers("turn/start", busy)
+                adapter, _ = await riding(server, Sink())
+
+                with pytest.raises(DelegatedTurnError) as refusal:
+                    await adapter.delegate(
+                        "and again",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                        resume="assistant-1",
+                    )
+
+                await adapter.aclose()
+                return str(refusal.value)
+
+        said = asyncio.run(scenario())
+
+        assert "a turn is already running on that thread" in said
 
     def test_a_turn_that_never_answers_is_a_classified_failure_and_leaks_nothing(
         self, socket_path: Path

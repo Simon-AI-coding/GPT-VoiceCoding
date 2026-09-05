@@ -61,11 +61,13 @@ class NullCompanionChannel:
         origin: str = "",
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
+        reply_bar: str = "",
     ) -> ChannelReceipt:
         """Report the truth: there was nowhere to send it, so it landed under no id.
 
         A structured brief changes nothing here: there is no surface to lay it
-        out on, and the text beside it is the same words (ADR 0021 §5).
+        out on, and the text beside it is the same words (ADR 0021 §5). Nor does
+        a reply bar: there is no bar to open and nobody to type into it.
         """
         return ChannelReceipt(request_id=request_id, outcome=Delivery.FAILED, reason=NOT_CONFIGURED)
 

@@ -23,7 +23,8 @@ import pytest
 from fakes import FakeAgent, FakeCall, FakeCompanionChannel, instruction_context
 from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
-from gpt_voicecoding.core.bridge import ASSISTANT_NOT_BUILT, BridgeCore
+from gpt_voicecoding.core.bridge import BridgeCore
+from gpt_voicecoding.core.briefing import ASSISTANT_OPENING_LINE, ASSISTANT_UNAVAILABLE_HINT
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import RelayQueue
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
@@ -82,6 +83,7 @@ class Surface:
         duty: bool = True,
         max_bytes: int = 65_536,
         page_entries: int = CorePolicy().history_page_entries,
+        assistant: bool = False,
     ) -> None:
         self.agent = FakeAgent()
         self.call = FakeCall()
@@ -100,11 +102,16 @@ class Surface:
             inventory=(SeamLoad(seam="call", configured="a.call"),),
             instruction_context=instruction_context(),
             policy=CorePolicy(history_page_entries=page_entries),
+            open_conversation=self._open_conversation if assistant else None,
         )
         self.plane = ControlPlane(
             self.core,
             progress_publication=ProgressPublication(max_bytes=max_bytes),
         )
+
+    async def _open_conversation(self) -> str:
+        """What the composition root's own closure does, over the fake Call seam."""
+        return await self.call.open_conversation(model="a-model", instructions="the rules")
 
     def ask(self, action: Action, **payload: object) -> Reply:
         return asyncio.run(self.plane.handle(Request(action=action, payload=payload)))
@@ -1177,10 +1184,22 @@ class TestTheMenuScreens:
             "options": ["switch", "verify", "live"],
         }
 
-    def test_assistant_is_refused_in_the_hubs_words_until_it_is_built(self) -> None:
+    def test_assistant_answers_with_the_opening_line_and_no_options(self) -> None:
+        """ADR 0021 §7: the screen `bridgectl` prints is the one the menu opens."""
+        surface = Surface(assistant=True)
+
+        reply = surface.ask(Action.ASSISTANT)
+
+        assert reply.ok
+        assert dict(reply.data) == {"text": ASSISTANT_OPENING_LINE, "options": []}
+        # A thread is started; no turn is run to produce a fixed line.
+        assert surface.call.conversations == ["the rules"]
+        assert surface.call.delegated == []
+
+    def test_an_engine_with_no_assistant_refuses_in_the_hubs_own_words(self) -> None:
         reply = Surface().ask(Action.ASSISTANT)
 
         assert not reply.ok
         assert reply.error is not None
         assert reply.error.code is ErrorCode.REFUSED
-        assert reply.error.message == ASSISTANT_NOT_BUILT
+        assert reply.error.message == ASSISTANT_UNAVAILABLE_HINT

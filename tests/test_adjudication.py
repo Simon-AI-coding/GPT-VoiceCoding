@@ -135,13 +135,16 @@ class TestAdr0002:
 
         The pin forbids control-plane verbs, not reach verbs: `may_auto_hangup`
         is one of the latter — the system acting on the call unbidden — so it
-        belongs here beside `may_touch_call`.
+        belongs here beside `may_touch_call`. `may_correct` is one too: editing
+        a notice the user already has is unbidden, and it answers with Duty
+        alone (ADR 0021 §8, #266).
         """
         verbs = {name for name in dir(SwitchAdjudicator) if not name.startswith("_")}
 
         assert verbs == {
             "may_touch_call",
             "may_push",
+            "may_correct",
             "may_use",
             "may_auto_hangup",
             "outlets",

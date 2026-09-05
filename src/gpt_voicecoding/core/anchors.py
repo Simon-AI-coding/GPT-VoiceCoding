@@ -8,8 +8,11 @@ keyed by the provider's message id — every part of a split send against one ro
 What a row holds is exactly what a reply needs and nothing a reply could be
 misread from: the anchor's kind, its target, its option labels in order, the
 pending approval id when it carried a permission, and when it was sent. It holds
-neither the message text nor the Session Name — the name is re-read from the
-roster, and the words Telegram echoes back are never read (ADR 0021 §2). The
+neither Telegram's echo of our words nor the Session Name — the name is
+re-read from the roster, and the words Telegram echoes back are never read (ADR
+0021 §2). The brief Core itself composed for that message *is* held, because the
+edit that closes a notice re-fills the brief as sent (ADR 0021 §8, #266) and
+Core's own record of what it composed is the only place that survives. The
 message id is the only key.
 
 Three rules, all structural:
@@ -39,6 +42,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from gpt_voicecoding.core.briefing import MenuWord
+from gpt_voicecoding.seams.companion_channel import Notice
 from gpt_voicecoding.seams.identity import SessionTarget
 
 
@@ -112,6 +116,14 @@ class Anchor:
     approval_id: str = ""
     #: When the message was sent. A fact carried, not the ordering key.
     sent_at: float = 0.0
+    #: The structured brief this message was sent as, when it was sent as one
+    #: (ADR 0021 §8, #266). Not for a reply: it is what the notice must be
+    #: re-filled from when its decision closes, because the edit keeps the
+    #: question, the numbered lines and the fold **as sent** — a brief taken
+    #: fresh at that moment would describe a different Session state and
+    #: rewrite the record rather than close it. The seam's own carrier,
+    #: unchanged, and never re-rendered here.
+    notice: Notice | None = None
 
     def __post_init__(self) -> None:
         if self.picks and len(self.picks) != len(self.options):
@@ -121,12 +133,30 @@ class Anchor:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class SentNotice:
+    """One notice still on screen with its decision open: the row, and where it landed.
+
+    What the closing edit is addressed to (ADR 0021 §8, #266). The ids are the
+    edit's target and the row carries the brief to re-fill, so the caller needs
+    both and the table hands them over together rather than by two lookups.
+    """
+
+    ids: tuple[str, ...]
+    anchor: Anchor
+
+
 @dataclass(slots=True)
 class _Row:
     """A row and every id it landed under. Private: callers see `Anchor`."""
 
     anchor: Anchor
     ids: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether this notice has already been edited closed (#266). A row is
+    #: closed once: two facts can close one notice — a permission settling and
+    #: the Session ending a moment later — and the second edit would rewrite a
+    #: message that already says what it has to say.
+    handled: bool = False
 
 
 class AnchorTable:
@@ -167,6 +197,34 @@ class AnchorTable:
             return None
         row = self._by_id.get(message_id)
         return None if row is None else row.anchor
+
+    def open_notices(self, target: AnchorTarget) -> tuple[SentNotice, ...]:
+        """Every notice of one target still on screen with its decision open, oldest first.
+
+        Notices only: a receipt, a prompt and a menu screen carry no decision to
+        close. Whether a given row's brief *had* a decision is the caller's
+        reading of the brief it carries — this table holds no opinion about what
+        is inside a notice. Order is the order they were sent, so the ids the
+        caller edits go in the order the user saw them.
+        """
+        return tuple(
+            SentNotice(ids=row.ids, anchor=row.anchor)
+            for row in self._rows
+            if row.anchor.target == target and row.anchor.kind is AnchorKind.NOTICE
+            if not row.handled
+        )
+
+    def mark_handled(self, ids: tuple[str, ...]) -> None:
+        """Record that the notice landing under those ids has been edited closed.
+
+        Said once, whatever the edit's outcome: a failure is logged and dropped
+        with no retry (ADR 0021 §8), so a row that was attempted is done either
+        way, and a second fact about the same Session leaves it alone.
+        """
+        for message_id in ids:
+            row = self._by_id.get(message_id)
+            if row is not None:
+                row.handled = True
 
     def newest(self) -> Anchor | None:
         """The last Anchor sent — what a message that replies to nothing is for."""

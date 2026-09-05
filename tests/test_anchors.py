@@ -147,10 +147,20 @@ class TestEachSessionKeepsItsNewestN:
 
 
 class TestTheRowShape:
-    def test_a_row_holds_neither_text_nor_name(self) -> None:
-        """The name is re-read from the roster; the words are never read (ADR 0021 §2)."""
+    def test_a_row_holds_neither_telegrams_echo_nor_the_name(self) -> None:
+        """The name is re-read from the roster; the words Telegram echoes back are
+        never read (ADR 0021 §2). The brief Core itself composed is held, and only
+        because the edit that closes a notice re-fills it as sent (§8, #266)."""
         fields = set(Anchor.__dataclass_fields__)
-        assert fields == {"kind", "target", "options", "picks", "approval_id", "sent_at"}
+        assert fields == {
+            "kind",
+            "target",
+            "options",
+            "picks",
+            "approval_id",
+            "sent_at",
+            "notice",
+        }
 
     def test_a_permission_row_carries_its_approval_id(self) -> None:
         row = Anchor(

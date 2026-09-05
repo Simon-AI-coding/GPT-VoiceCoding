@@ -72,6 +72,19 @@ class SwitchAdjudicator:
         """Whether the system may push text through the Companion Channel."""
         return self._switches.is_effective(SwitchName.MESSAGE)
 
+    def may_correct(self) -> bool:
+        """Whether the system may rewrite a message it already sent (ADR 0021 §8).
+
+        **Duty alone, and deliberately not the Message Switch.** Editing a
+        notice whose decision has closed is not a push: it notifies nobody and
+        only settles a message the user already has. So it obeys the master
+        switch, as every unbidden act toward the user does, and outlives the
+        Message Switch going off — a notice that is already out still has to
+        close on screen, or its stale buttons invite a press that earns only a
+        refusal.
+        """
+        return self._switches.is_effective(SwitchName.DUTY)
+
     def may_auto_hangup(self) -> bool:
         """Whether the Silence Ceiling may end the call it is measuring.
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -537,6 +538,15 @@ class TestTheStopNoticePipelineEndToEnd:
 
         hub.emit(SessionStopped(target=CODEX))
         hub.channel.outcome = Delivery.DELIVERED
+        # The Session is still running: a pass that saw nothing would read it as
+        # gone and announce that instead, which is a different fact (#266).
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
         hub.flip(SwitchName.DUTY, False)
         hub.flip(SwitchName.DUTY, True)
         asyncio.run(hub.core.discover())
@@ -1960,6 +1970,13 @@ class TestTheOneCallInvariantEndToEnd:
         dial (#195, `CONTEXT.md` *Cool-down*).
         """
         hub = Hub(voice=False)
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
         hub.emit(CallStarted(call_id="call-the-user-started"))
 
         hub.emit(CallDropped(call_id="call-the-user-started", detail="the network went away"))
@@ -3377,7 +3394,7 @@ class TestTheAnchorTableEndToEnd:
         hub.emit(InboundText(text="1", in_reply_to="2"))
 
         assert [call.text for call in hub.agent.calls] == ["main"]
-        assert hub.channel.sent[-2] == NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT
+        assert NUMERAL_NEEDS_A_KNOWN_ANCHOR_HINT in hub.channel.sent
 
     def test_a_notice_the_message_switch_kept_in_is_no_anchor(self) -> None:
         """Nothing went out, so there is nothing to reply to and no newest Anchor."""
@@ -3501,12 +3518,14 @@ class TestEveryMenuScreenIsAnAnchor:
         assert hub.core.anchors.lookup("1") is None
 
     def test_sessions_lists_live_sessions_only(self) -> None:
+        """The screen is `2`: the ended line took `1` and registered nothing (#266)."""
         hub, _ = self.hub()
         hub.emit(SessionEnded(target=CLAUDE))
 
         hub.emit(InboundText(text="/sessions"))
 
-        assert self.anchor(hub, "1").picks == (CODEX,)
+        assert hub.core.anchors.lookup("1") is None
+        assert self.anchor(hub, "2").picks == (CODEX,)
 
     def test_a_press_on_the_roster_greets_that_session(self) -> None:
         hub, _ = self.hub()
@@ -3765,8 +3784,11 @@ class TestEveryMenuScreenIsAnAnchor:
         hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
 
         assert [(found.command, found.text) for found in asked] == [("switch", "duty off")]
-        assert hub.channel.sent[-1] == "ran switch duty off"
-        assert hub.channel.origins[-1] == "callback:9"
+        # The flip answers first, as the toast on the press; the screen is then
+        # re-sent onto itself so its labels show the state now (#266).
+        assert hub.channel.sent[-2] == "ran switch duty off"
+        assert hub.channel.origins[-2] == "callback:9"
+        assert hub.channel.revisions[-1] == ("2",)
 
     def test_a_stale_switch_label_still_means_flip_from_the_state_now(self) -> None:
         """Duty was flipped off elsewhere after the screen went out: the press turns it on."""
@@ -3856,6 +3878,508 @@ class TestEveryMenuScreenIsAnAnchor:
             "The attempt did not arrive; your words wait for the Session's next turn."
         )
         assert hub.channel.origins[-1] == "callback:9"
+
+
+class TestASessionsEndIsAnnouncedInOneLine:
+    """ADR 0021 §9 (#266): on `SessionEnded` from any cause the user is told, in one
+    line, that the Session is gone — no question, no fold, no buttons, and not an
+    Anchor, because a reply to it names a Session that has left the roster.
+
+    Voice is off throughout, so every send is on the one surface.
+    """
+
+    TWO = ((CODEX, "port the log"), (CLAUDE, "build the shell"))
+
+    def test_a_session_that_ends_is_announced_in_one_line(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent[-1] == "⚫ ended · claude · GPT-VoiceCoding · build the shell"
+
+    def test_the_ended_line_is_text_and_never_an_anchor(self) -> None:
+        """It names a Session that is gone: a reply to it takes the unknown-Anchor path."""
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.notices[-1] is None
+        assert len(hub.core.anchors) == 0
+
+    def test_the_ended_line_rides_the_message_switch_alone(self) -> None:
+        """An unbidden push like every other (ADR 0021 §9): no new Feature Switch."""
+        hub = Hub(voice=False, message=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == []
+
+    def test_a_session_that_never_stopped_is_still_announced_as_ended(self) -> None:
+        """Away from the Mac, "it is gone" is the fact the user most needs."""
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CODEX))
+
+        assert hub.channel.sent == ["⚫ ended · codex · GPT-VoiceCoding · port the log"]
+
+    def test_many_sessions_ending_together_are_one_line_each(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO)
+
+        hub.emit(SessionEnded(target=CLAUDE), SessionEnded(target=CODEX))
+
+        assert hub.channel.sent == [
+            "⚫ ended · claude · GPT-VoiceCoding · build the shell",
+            "⚫ ended · codex · GPT-VoiceCoding · port the log",
+        ]
+
+    def test_a_session_discovery_finds_gone_is_announced_too(self) -> None:
+        """A closed terminal is an ending like any other (ADR 0021 §9): Core does not
+        distinguish exit, crash or a Session that simply left the roster."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+
+        asyncio.run(hub.core.discover())
+
+        assert hub.channel.sent == ["⚫ ended · claude · GPT-VoiceCoding · build the shell"]
+
+    def test_one_ending_seen_twice_is_still_one_line(self) -> None:
+        """Discovery finds the Session gone, then its lane says so as well: the second
+        sighting is the same ending, and the user is told once (ADR 0021 §9)."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+        asyncio.run(hub.core.discover())
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == ["⚫ ended · claude · GPT-VoiceCoding · build the shell"]
+
+    def test_a_child_process_that_ends_is_never_spoken_about(self) -> None:
+        """Seen, never spoken to, and never spoken about (#79): it got no Stop Notice either."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        child = SessionTarget(agent=AgentKind.CODEX, session_id="a891a18f447827175")
+        hub.state.sessions.register(
+            Session(
+                target=child,
+                workspace=Path("/tmp/workspace"),
+                first_seen=0.0,
+                state=SessionState.RUNNING,
+                child=ChildClassification(kind=ChildKind.CHILD, parent=CODEX),
+            )
+        )
+
+        hub.emit(SessionEnded(target=child))
+
+        assert hub.channel.sent == []
+
+    def test_a_session_the_roster_never_held_is_not_announced_as_ended(self) -> None:
+        """There is no row to name it from, and nobody was told it started."""
+        hub = Hub(voice=False, sessions=((CODEX, "port the log"),))
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.sent == []
+
+
+class TestAClosedNoticeIsEditedInPlace:
+    """ADR 0021 §8 (#266): when an Anchor's question or permission stops being
+    answerable from here, the notice is edited where it was sent — the state line
+    becomes the one fixed closed word and the buttons go, and everything else
+    stays as sent, so the chat still reads as a record.
+
+    Voice is off throughout, so every send is on the one surface and its id is
+    the fake channel's count: the Stop Notice is `1`.
+    """
+
+    TWO = ((CODEX, "port the log"), (CLAUDE, "build the shell"))
+
+    @staticmethod
+    def question(*labels: str) -> WaitingFor:
+        return WaitingFor(
+            kind=WaitingKind.QUESTION,
+            prompt="Which base?",
+            options=tuple(Option(text=label) for label in labels),
+        )
+
+    @staticmethod
+    def revised(hub: Hub) -> SessionNotice:
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, SessionNotice)
+        return notice
+
+    def test_a_question_answered_at_the_terminal_edits_its_notice_to_handled(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-1] == ("1",)
+        assert self.revised(hub).state_word == "handled"
+
+    def test_the_edit_draws_no_buttons_because_its_labels_are_empty(self) -> None:
+        """Empty labels are what draws no keyboard; no "remove buttons" instruction exists."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
+        assert self.revised(hub).options == ("main", "dev")
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert self.revised(hub).options == ()
+
+    def test_the_edit_adds_nothing_and_keeps_the_notice_as_sent(self) -> None:
+        """The question, the numbered lines and the fold stay as sent (ADR 0021 §8)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
+        sent = self.revised(hub)
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert self.revised(hub) == replace(sent, state_word="handled", options=())
+
+    @staticmethod
+    def permission(approval_id: str = "a1") -> WaitingFor:
+        return WaitingFor(
+            kind=WaitingKind.PERMISSION,
+            tool_name="Bash",
+            detail="push the branch",
+            approval_id=approval_id,
+        )
+
+    def test_a_permission_answered_from_telegram_is_toasted_and_edited(self) -> None:
+        """The press earns its receipt, and the notice it was pressed on closes.
+
+        The edit is sent from `answer_approval`, so a verdict carried from any
+        surface closes the notice — the dialog is gone from the terminal too.
+        The receipt follows it, and goes back to the press as its toast.
+        """
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+
+        hub.emit(InboundText(text="1", in_reply_to="1", origin="callback:9"))
+
+        assert hub.channel.revisions[-2] == ("1",)
+        notice = hub.channel.notices[-2]
+        assert isinstance(notice, SessionNotice)
+        assert notice.state_word == "handled"
+        assert notice.options == ()
+        assert hub.channel.origins[-1] == "callback:9"
+
+    def test_two_open_notices_for_one_session_both_close_on_the_same_fact(self) -> None:
+        """Every open notice of the Session, not just the newest (ADR 0021 §8)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-2:] == [("1",), ("2",)]
+
+    def test_another_sessions_notice_is_left_alone(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CODEX, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-1] == ("2",)
+
+    def test_a_notice_that_carried_no_decision_is_never_edited(self) -> None:
+        """A `finished` notice records a turn that ended; there is nothing on it to close."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=WaitingFor()))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions == [()]
+
+    def test_a_notice_closes_once_however_many_facts_close_it(self) -> None:
+        """A permission settles, then the Session ends: the second edit would rewrite
+        a message that already says what it has to say."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.revisions.count(("1",)) == 1
+
+    def test_the_edit_still_happens_with_the_message_switch_off(self) -> None:
+        """Stale buttons would invite a press that earns only a refusal (ADR 0021 §8)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.flip("message", False)
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-1] == ("1",)
+        assert self.revised(hub).state_word == "handled"
+
+    def test_the_duty_switch_off_leaves_the_notice_as_it_was_sent(self) -> None:
+        """An edit is an unbidden act toward the user, and Duty answers for those."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.flip("duty", False)
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions == [()]
+
+    def test_a_question_answered_from_telegram_closes_its_notices_at_once(self) -> None:
+        """§8's first named cause. The words arrived, so the question is answered —
+        the notice does not wait for a Reply Window event to say so, and both of
+        this Session's open notices close on the one fact."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+        hub.agent.answerable_questions.add(CLAUDE)
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert [revised for revised in hub.channel.revisions if revised] == [("1",), ("2",)]
+
+    def test_words_that_only_queued_close_nothing(self) -> None:
+        """Nothing was answered: the words are waiting for a turn the Session has
+        not taken, and the question is still the user's to answer."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        assert [revised for revised in hub.channel.revisions if revised] == []
+
+    def test_a_verdict_that_did_not_arrive_leaves_the_buttons_where_they_are(self) -> None:
+        """The dialog on screen is still the thing that can resolve it
+        (`answer_approval`), so the notice stays answerable from here too."""
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "the hook had gone"
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.channel.revisions == [(), ()]
+
+    def test_a_permission_handed_back_to_the_terminal_closes_its_notice(self) -> None:
+        """`ask`, or the hook ending without a verdict: the dialog is the keyboard's
+        again, and the window shuts behind it (ADR 0021 §8)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.channel.revisions[-1] == ("1",)
+        assert self.revised(hub).state_word == "handled"
+        assert self.revised(hub).options == ()
+
+    def test_the_edit_leaves_the_row_itself_exactly_as_it_was(self) -> None:
+        """The message changes; the row behind it does not (ADR 0021 §8). What a
+        numeral on it then means is the roster's answer, unchanged by the edit."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        before = hub.core.anchors.lookup("1")
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert hub.core.anchors.lookup("1") == before
+
+    def test_duty_off_leaves_the_row_open_for_the_next_fact_to_close(self) -> None:
+        """A refusal is not a failed attempt: nothing was spent, so nothing is used up."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.flip("duty", False)
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+        hub.flip("duty", True)
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.revisions.count(("1",)) == 1
+        # The ended line follows the edit, and carries no brief of its own.
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
+    def test_a_session_that_left_the_roster_has_its_notices_closed(self) -> None:
+        """One of §8's five causes: discovery no longer holds the Session."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+
+        asyncio.run(hub.core.discover())
+
+        assert [revised for revised in hub.channel.revisions if revised] == [("1",)]
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
+    def test_the_order_on_session_ended_is_edit_then_line_then_the_rows_go(self) -> None:
+        """Fixed by the ids (ADR 0021 §9): the edits name rows the table still holds."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert hub.channel.revisions[-2:] == [("1",), ()]
+        assert hub.channel.sent[-1] == "⚫ ended · claude · GPT-VoiceCoding · build the shell"
+        assert hub.core.anchors.lookup("1") is None
+
+    def test_the_edit_does_not_make_an_old_notice_the_newest_anchor(self) -> None:
+        """A revised row is not re-registered (ADR 0021 §8): `sent_at` is not refreshed."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CODEX, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+        newest = hub.core.anchors.newest()
+
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.CLOSED))
+
+        assert hub.core.anchors.newest() == newest
+
+    def test_the_row_is_untouched_and_words_still_reach_the_session(self) -> None:
+        """A reply in words still reaches the Session it was sent about (ADR 0021 §8).
+
+        The notice is closed and its buttons are gone, and the row behind it is
+        exactly as it was: the words go to that Session and wait for its next
+        turn, which is the ordinary rule for a Session mid-turn.
+        """
+        hub = Hub(voice=False, sessions=self.TWO)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        hub.emit(InboundText(text="1", in_reply_to="1", origin="callback:9"))
+        assert hub.channel.revisions[-2] == ("1",)
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        assert [waiting.target for waiting in hub.state.relays.pending()] == [CLAUDE]
+
+    def test_an_edit_telegram_rejects_is_logged_and_dropped(self, caplog) -> None:
+        """No retry and no fresh message: a second copy is worse than a stale one."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.channel.outcome = Delivery.FAILED
+        hub.channel.reason = "message to edit not found"
+
+        with caplog.at_level("INFO"):
+            hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert "message to edit not found" in caplog.text
+        assert hub.channel.revisions.count(("1",)) == 1
+
+
+class TestTheSwitchesScreenIsEditedAfterItsOwnFlip:
+    """ADR 0021 §8 (#266): after a flip made *through* the switches screen, Core
+    re-sends the switches brief onto the same Anchor so each label shows the new
+    state. The roster and greeting screens are never edited, and a flip made
+    anywhere else edits nothing — that label goes stale, and a later press on it
+    still means "flip" (§6).
+
+    The edit is the answer to a control-plane action the user just took, so it
+    passes every switch, Duty included (ADR 0002): otherwise the user who flips
+    Duty off from the phone would never see the flip land.
+    """
+
+    COMMANDS = frozenset({"status", "sessions", "config", "switch"})
+
+    def hub(self, **overrides: object) -> Hub:
+        """A hub whose control surface really flips the board, as the real one does."""
+        hub: Hub | None = None
+
+        async def control(found: Classification) -> ControlAnswer:
+            assert hub is not None
+            name, _, state = found.text.partition(" ")
+            await hub.core.flip_switch(name, state == "on")
+            return ControlAnswer(f"ran {found.command} {found.text}".strip(), ok=True)
+
+        overrides.setdefault("sessions", ((CODEX, "port the log"),))
+        hub = Hub(voice=False, control=control, **overrides)  # type: ignore[arg-type]
+        hub.core.router._grammar = hub.core.router._grammar.__class__(  # noqa: SLF001
+            control_commands=self.COMMANDS
+        )
+        return hub
+
+    @staticmethod
+    def screen(hub: Hub) -> MenuNotice:
+        notice = hub.channel.notices[-1]
+        assert isinstance(notice, MenuNotice)
+        return notice
+
+    def switches(self, hub: Hub) -> None:
+        """Open the switch screen through the config screen, as the menu does."""
+        hub.emit(InboundText(text="/config"))
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+    def test_a_flip_through_the_screen_re_sends_it_onto_the_same_anchor(self) -> None:
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2", origin="callback:9"))
+
+        assert hub.channel.revisions[-1] == ("2",)
+        assert "duty: off" in self.screen(hub).options
+
+    def test_the_re_sent_screen_passes_every_switch_duty_included(self) -> None:
+        """Or the user who flips Duty off from the phone never sees the flip land."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert hub.state.switches.is_set("duty") is False
+        assert hub.channel.revisions[-1] == ("2",)
+        assert "duty: off" in self.screen(hub).options
+
+    def test_the_screen_is_not_registered_again_and_stays_where_it_was(self) -> None:
+        """A revised row is not re-registered (ADR 0021 §8), so a later press still lands."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert hub.state.switches.is_set("duty") is True
+        assert len([row for row in hub.channel.revisions if row]) == 2
+
+    def test_a_flip_the_control_plane_refused_edits_nothing(self) -> None:
+        """No flip happened, so there is no new state for the labels to show."""
+        hub = self.hub()
+
+        async def refuse(found: Classification) -> ControlAnswer:
+            return ControlAnswer("no switch is called that", ok=False)
+
+        self.switches(hub)
+        hub.core._control = refuse  # noqa: SLF001
+
+        hub.emit(InboundText(text="1", in_reply_to="2"))
+
+        assert hub.channel.revisions[-1] == ()
+
+    def test_a_flip_made_anywhere_else_edits_nothing(self) -> None:
+        """The label goes stale, and a later press on it still means flip (ADR 0021 §6)."""
+        self.switches(hub := self.hub())
+
+        hub.emit(InboundText(text="/switch duty off"))
+
+        assert hub.channel.revisions[-1] == ()
+
+    def test_a_press_on_the_config_screen_edits_nothing(self) -> None:
+        """Only the switches screen is edited: the config screen offers no state to go stale."""
+        hub = self.hub()
+        hub.emit(InboundText(text="/config"))
+
+        hub.emit(InboundText(text="1", in_reply_to="1"))
+
+        assert hub.channel.revisions == [(), ()]
 
 
 #: The one verb this class's hub answers to, beside the harness's own two.

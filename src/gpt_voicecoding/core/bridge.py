@@ -132,6 +132,7 @@ from gpt_voicecoding.seams.companion_channel import (
     CompanionChannel,
     InboundText,
     Notice,
+    SessionNotice,
 )
 from gpt_voicecoding.seams.control_plane import Action
 from gpt_voicecoding.seams.events import Event
@@ -324,6 +325,22 @@ def _notice_anchor(target: SessionTarget, waiting_for: WaitingFor) -> Anchor:
             approval_id=waiting_for.approval_id,
         )
     return Anchor(kind=AnchorKind.NOTICE, target=target)
+
+
+def _handled(notice: SessionNotice) -> SessionNotice:
+    """The same brief, closed: the fixed closed word, and no labels (ADR 0021 §8).
+
+    Two fields and nothing else. **Nothing is added** — no mark on the option
+    the user chose, no line saying where it was answered; their own reply and
+    its receipt already sit below it. And the word is fixed rather than the
+    Session's state now, because a notice is the record of one stop and not a
+    live roster row: tracking later states would mean re-editing it on every
+    transition. **Empty labels are what draws no buttons** (§6), which is why
+    no "remove the buttons" instruction exists anywhere on this seam.
+    """
+    return replace(
+        notice, state_word=briefing.NOTICE_WORDING[briefing.NoticeWord.HANDLED], options=()
+    )
 
 
 def _receipt_anchor(target: SessionTarget) -> Anchor:
@@ -915,6 +932,18 @@ class BridgeCore:
         # the focus from it for that reason), so a verdict that lands clears
         # whatever the last Relay that did not land left on the row.
         await self._settle(outcome)
+        # **A settled approval is one of the three facts that close a notice**
+        # (ADR 0021 §8), and it is closed here rather than on the Telegram path
+        # so that a verdict carried from any surface closes it — the dialog is
+        # gone from the terminal too, and the buttons on the phone would invite
+        # a press that earns only a refusal.
+        #
+        # **Settled means the verdict arrived.** One that did not leaves the
+        # dialog open on screen — "the dialog on screen is still the thing that
+        # can resolve it", above — and taking its buttons away would close a
+        # decision the user can still make from here.
+        if receipt.is_delivered:
+            await self._close_open_notices(session.target)
         return outcome
 
     def _dialog_on_the_roster(self, approval_id: str) -> tuple[Session, ApprovalRequest] | None:
@@ -1081,6 +1110,10 @@ class BridgeCore:
         that is sitting there waiting for them, so the question is asked of the
         one component that can tell a re-keying from a death.
         """
+        # Read before the pass, because a Session it finds gone is marked ended
+        # by it: the row is still the only place its name and its classification
+        # are, and the line that announces it is written from that row.
+        before = {session.target: session for session in self._state.sessions.live()}
         gone: list[SessionTarget] = []
         for kind, adapter in self._agents.items():
             try:
@@ -1094,6 +1127,14 @@ class BridgeCore:
             _log.info("Session %s is no longer running", target)
             for outcome in self.relays.session_ended(target):
                 await self._settle(outcome)
+            # **A Session that left the roster closes its notices too** (ADR
+            # 0021 §8's fifth cause), and before the rows go, because the edits
+            # are addressed to the ids those rows carry.
+            await self._close_open_notices(target)
+            # **And a Session found gone is announced like any other ending**
+            # (ADR 0021 §9): a closed terminal is exactly the case the line
+            # exists for, and Core does not distinguish it from a crash.
+            await self._announce_ended(before.get(target))
             # Rows go with their Session (ADR 0021 §2): a reply to one of its
             # notices from here on takes the unknown-Anchor path.
             self.anchors.drop(target)
@@ -1244,16 +1285,57 @@ class BridgeCore:
         )
 
     async def _session_ended(self, event: SessionEnded) -> None:
+        """A Session is gone: close what it left open, say so once, forget its rows.
+
+        **The order is fixed by the ids** (ADR 0021 §9). The edits name the
+        message ids of this Session's own rows, so they go while the table still
+        holds them; the ended line follows, so the chat reads in the order the
+        facts happened; the rows go last, and a reply to any of them from then
+        on takes the unknown-Anchor path.
+
+        Which of the three the user actually sees is the switches' answer and
+        differs between them on purpose: closing a notice is a correction to a
+        message already sent and obeys Duty alone (§8), while the ended line is
+        an unbidden push like every other and rides the Message Switch (§9).
+        """
+        # **Whether this is the ending or a second sighting of it.** A discovery
+        # pass that misses a Session ends its row itself (#266's announcement is
+        # made there too), and the lane's own event can arrive after it —
+        # `mark_ended` is idempotent and hands back the same ended row, so the
+        # row alone cannot say which of the two this is. The roster before the
+        # mark can.
+        was_live = event.target in {session.target for session in self._state.sessions.live()}
+        ended: Session | None = None
         try:
-            self._state.sessions.mark_ended(event.target)
+            ended = self._state.sessions.mark_ended(event.target)
         except BridgeCoreError:
             _log.info("a Session ended that was never registered: %s", event.target)
         self._state.persist()
         for outcome in self.relays.session_ended(event.target):
             await self._settle(outcome)
-        # Rows go with their Session (ADR 0021 §2). Editing its open notices to
-        # `handled` and pushing the ended line come before this, and are #266's.
+        await self._close_open_notices(event.target)
+        await self._announce_ended(ended if was_live else None)
+        # Rows go with their Session (ADR 0021 §2), and last: the edits above
+        # are addressed to the ids these rows carry.
         self.anchors.drop(event.target)
+
+    async def _announce_ended(self, ended: Session | None) -> None:
+        """Say once that a Session is gone — wherever the end was seen (ADR 0021 §9).
+
+        Both paths come here: the lane's own `SessionEnded`, and the discovery
+        pass that finds a Session no longer on the roster. Core does not
+        distinguish exit, crash or closed terminal, so neither does this.
+
+        **A Session nobody was told about is not announced as gone.** An
+        unregistered target has no row to name it from, and a Child Process is
+        seen and never spoken *about* (#79) — it got no Stop Notice either, so
+        an ended line would be the first and last the user ever heard of it. The
+        row's own classification answers that, because `resolve` refuses an
+        ended Session before it reaches the question of whether it was a child.
+        """
+        if ended is None or not ended.child.is_main:
+            return
+        await self._push(briefing.ended_line(ended))
 
     async def _reply_window_changed(self, event: ReplyWindowChanged) -> None:
         """An adapter saw the window move between two discoveries. Land it on the state.
@@ -1283,6 +1365,12 @@ class BridgeCore:
         if event.window is ReplyWindow.OPEN:
             for outcome in await self.relays.reply_window_opened(event.target):
                 await self._settle(outcome)
+            return
+        # **The window closing is one of the three facts that close a notice**
+        # (ADR 0021 §8): whatever moved it — the question answered at the
+        # terminal, a permission handed back to the keyboard — the decision the
+        # notice carried can no longer be answered from this surface.
+        await self._close_open_notices(event.target)
 
     def _relay_receipt(self, event: RelayReceipt) -> None:
         """A receipt that arrived after the call returned. The ledger records it.
@@ -1317,7 +1405,7 @@ class BridgeCore:
             case InboundClass.CONTROL:
                 await self._reply((await self._answer_command(found)).text, origin=event.origin)
             case InboundClass.MENU_PICK:
-                await self._menu_pick(found, origin=event.origin)
+                await self._menu_pick(found, origin=event.origin, pressed_on=event.in_reply_to)
             case InboundClass.DELEGATION:
                 await self._delegated_turn(found, origin=event.origin)
             case InboundClass.ANSWER_RELAY:
@@ -1417,16 +1505,23 @@ class BridgeCore:
             return ControlAnswer(NO_CONTROL_SURFACE, ok=False)
         return await self._control(found)
 
-    async def _run(self, action: Action, arguments: str = "", *, origin: str) -> None:
+    async def _run(self, action: Action, arguments: str = "", *, origin: str) -> bool:
         """A press that means a control-plane verb: run it at once and answer with its words.
 
         `verify`, `live` and the switch flip are the same actions typed as
         `/verify` and the rest would be, so they go through the same surface
         and come back in the same words — as a toast, when the press is still
         waiting for one (ADR 0021 §4). Neither answer is an Anchor.
+
+        Reports whether the action ran, because a caller may owe the user
+        something more when it did — and nothing at all when it did not
+        (`_flip_pick`, #266). The words are the same either way, and the answer
+        the surface gave is the one thing that tells them apart.
         """
         found = Classification(kind=InboundClass.CONTROL, command=str(action), text=arguments)
-        await self._reply((await self._answer_command(found)).text, origin=origin)
+        answer = await self._answer_command(found)
+        await self._reply(answer.text, origin=origin)
+        return answer.ok
 
     async def _reply_screen(self, screen: MenuScreen, origin: str) -> None:
         """Send one menu screen as the answer to what opened it, registering its row."""
@@ -1438,7 +1533,9 @@ class BridgeCore:
             reply_bar=screen.reply_bar,
         )
 
-    async def _menu_pick(self, found: Classification, *, origin: str = "") -> None:
+    async def _menu_pick(
+        self, found: Classification, *, origin: str = "", pressed_on: str = ""
+    ) -> None:
         """A numeral on a menu screen: what the row says that position stands for (#264).
 
         Read off the row's `picks`, never the label's text (ADR 0021 §6). Which
@@ -1457,7 +1554,7 @@ class BridgeCore:
             case Screen.CONFIG:
                 await self._config_pick(pick, origin=origin)
             case Screen.SWITCHES:
-                await self._flip_pick(str(pick), origin=origin)
+                await self._flip_pick(str(pick), origin=origin, pressed_on=pressed_on)
             case SessionTarget() as target:
                 await self._session_pick(target, pick, origin=origin)
             case _:  # a target with no screen behind it: nothing to pick by number
@@ -1543,7 +1640,7 @@ class BridgeCore:
             case _:
                 await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
 
-    async def _flip_pick(self, name: str, *, origin: str) -> None:
+    async def _flip_pick(self, name: str, *, origin: str, pressed_on: str = "") -> None:
         """A press on a switch label means flip — against the board as it stands now.
 
         The label may be stale: flipped elsewhere since the screen was sent,
@@ -1556,7 +1653,34 @@ class BridgeCore:
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
-        await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
+        flipped = await self._run(Action.SWITCH, f"{name} {'off' if on else 'on'}", origin=origin)
+        # **And the screen is re-sent onto itself** (ADR 0021 §8), so every
+        # label shows the state it holds now. Only this screen, only after a
+        # flip made through it, and only when the flip actually happened: a flip
+        # made anywhere else leaves the label stale, a press on a stale label
+        # still means "flip" (§6), and a refused action changed no state for the
+        # labels to show.
+        if flipped:
+            await self._redraw_switches(self.anchors.sent_under(pressed_on))
+
+    async def _redraw_switches(self, ids: tuple[str, ...]) -> None:
+        """Re-send the switches brief onto the screen the press was made on.
+
+        **Past every switch, Duty included** (ADR 0002, ADR 0021 §8). This is
+        not a correction the system decided to make: it is the answer to a
+        control-plane action the user took a moment ago, and the control plane
+        is never gated. Gating it on Duty would produce the indefensible case —
+        the user flips Duty off from the phone, and the screen they flipped it
+        on never shows that it landed.
+
+        A row this table no longer holds is nothing to edit, and the send is
+        skipped rather than addressed to nobody.
+        """
+        if not ids:
+            return
+        screen = self.switches_screen()
+        if screen.notice is not None:
+            await self._correct(ids, screen.notice)
 
     async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
         """Carry a typed relay in, and answer it with the receipt as one sentence.
@@ -1579,6 +1703,13 @@ class BridgeCore:
             await self._reply(str(refusal), origin=origin)
             return
         await self._settle(outcome)
+        # **Words that arrived are the answer, and they close the notice that
+        # asked** (ADR 0021 §8's first cause: answered from Telegram). Words
+        # that only queued answered nothing — the Session has not taken the turn
+        # they are waiting for, and the question is still the user's to answer
+        # from here.
+        if outcome.state is Lifecycle.DELIVERED:
+            await self._close_open_notices(found.target)
         # A receipt names the Session the words went to, so it is an Anchor: a
         # reply to it is more words for that Session (ADR 0021 §2). It offers
         # nothing to pick, and a numeral on it is refused.
@@ -1750,6 +1881,72 @@ class BridgeCore:
             receipt.reason,
         )
 
+    async def _close_open_notices(self, target: SessionTarget) -> None:
+        """Edit every notice this Session left open to the one closed word (ADR 0021 §8).
+
+        **One fact closes them, and Core does not distinguish which.** Answered
+        from Telegram, answered at the terminal, a permission handed back, the
+        Session ended or gone from the roster — each reaches here, and the edit
+        shows none of them, because what it says is that the decision is no
+        longer answerable from this surface and not how that came about.
+
+        Every open notice of the Session, not just the newest: two questions can
+        be on screen at once and a fact that closes one closes both. A row whose
+        brief carried no decision is left alone — a `finished` notice records a
+        turn that ended, and there is nothing on it to close.
+
+        **Duty, and not the Message Switch.** An edit is not a push: it notifies
+        nobody and only settles a message the user already has, so it obeys the
+        master switch like every unbidden act toward the user, and outlives the
+        Message Switch going off — a notice already out still has to close, or
+        its stale buttons invite a press that earns only a refusal.
+
+        **Duty off leaves the row open**, where a failure closes it. Nothing was
+        attempted, so nothing was spent: the next fact about this Session — it
+        ends, it leaves the roster — closes the notice then, with the switch back
+        on. A refusal is not a failed attempt, and only an attempt is spent once.
+        """
+        if not self.adjudicator.may_correct():
+            _log.info("the Duty Switch is off; a closed notice is left as it was sent")
+            return
+        for sent in self.anchors.open_notices(target):
+            notice = sent.anchor.notice
+            if not isinstance(notice, SessionNotice) or not notice.question:
+                continue
+            # Said before the attempt, not after: an edit is never retried, so a
+            # row that has been attempted is done whichever way it went.
+            self.anchors.mark_handled(sent.ids)
+            await self._correct(sent.ids, _handled(notice))
+
+    async def _correct(self, ids: tuple[str, ...], notice: Notice) -> None:
+        """Rewrite messages already sent (ADR 0021 §8). One attempt, never repeated.
+
+        **Ungated here, deliberately**, because the two callers answer to
+        different switches and neither answer belongs to the mechanism: closing
+        a notice obeys Duty (`_close_open_notices`), while the switches screen
+        re-sent onto itself passes every switch, being the answer to a
+        control-plane action (`_redraw_switches`, ADR 0002). A gate written here
+        would have to be right for both, and there is no such gate.
+
+        **Failure is logged and dropped**: an edit Telegram rejects, or a row
+        that a restart left behind, gets no retry and no fresh message — a
+        second copy of a notice whose decision has closed is worse than a stale
+        one. "Message is not modified" is the adapter's success, not a failure.
+
+        No text goes beside the brief. A surface that cannot lay a notice out
+        ignores `revises` and edits nothing (the null channel), so the words a
+        text would carry reach nobody by construction; the brief is the message
+        here.
+        """
+        receipt = await self._send("", revises=ids, notice=notice)
+        if receipt.is_delivered:
+            return
+        _log.info(
+            "a closed notice was not edited; it is left as it was sent (%s: %s)",
+            receipt.outcome,
+            receipt.reason,
+        )
+
     async def _reply(
         self,
         text: str,
@@ -1801,6 +1998,7 @@ class BridgeCore:
         text: str,
         *,
         origin: str = "",
+        revises: tuple[str, ...] = (),
         notice: Notice | None = None,
         anchor: Anchor | None = None,
         reply_bar: str = "",
@@ -1837,11 +2035,25 @@ class BridgeCore:
         none. `reply_bar` is Core's placeholder words for a message that asks
         for words back — the `Say to <name>:` prompt, an Assistant
         Conversation's messages — and a courtesy, never the routing (§7).
-        Nothing here revises: editing a notice in place (ADR 0021 §8) is #266's.
+
+        `revises` names the messages this send replaces rather than adds to (ADR
+        0021 §8): a send that revises registers nothing, because the row it edits
+        is already in the table and re-registering it would make an old notice
+        the newest Anchor again.
+
+        **The row keeps the brief it was sent as** (§8, #266). It is the only
+        record of what that message says, and the edit that closes it re-fills
+        that brief rather than composing a new one — so it is stamped onto the
+        row here, at the one site that holds both.
         """
         request_id = new_request_id()
         receipt = await self._channel.send(
-            text, request_id=request_id, origin=origin, notice=notice, reply_bar=reply_bar
+            text,
+            request_id=request_id,
+            origin=origin,
+            revises=revises,
+            notice=notice,
+            reply_bar=reply_bar,
         )
         _log.info(
             "sent Companion Channel message request=%s outcome=%s message_ids=%s",
@@ -1849,8 +2061,10 @@ class BridgeCore:
             receipt.outcome,
             ",".join(receipt.message_ids),
         )
-        if anchor is not None:
-            self.anchors.register(receipt.message_ids, replace(anchor, sent_at=self._stamp()))
+        if anchor is not None and not revises:
+            self.anchors.register(
+                receipt.message_ids, replace(anchor, sent_at=self._stamp(), notice=notice)
+            )
         return receipt
 
     def _spawned(self, target: SessionTarget) -> bool:

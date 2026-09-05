@@ -63,7 +63,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-from gpt_voicecoding.core.sessions import Session, UndeliveredRelay
+from gpt_voicecoding.core.sessions import Session, UndeliveredRelay, spoken_name
 from gpt_voicecoding.seams.agent import (
     ProgressAvailability,
     ProgressObservation,
@@ -163,6 +163,29 @@ SAY_TO_TEMPLATE = "Say to {name}:"
 def say_to(name: str) -> str:
     """The `Say to <name>:` prompt, in this module's words."""
     return SAY_TO_TEMPLATE.format(name=name)
+
+
+#: The one line a Session's end is announced with (ADR 0021 §9, #266). A
+#: template rather than a `BriefState`: `ended` is a wording entry beside the
+#: state words, because a brief describes a Session on the roster and this one
+#: has left it. The symbol is in the words here rather than lit by a surface,
+#: for the same reason: this line is text and never a notice, so no adapter has
+#: a layout to light it from.
+ENDED_LINE_TEMPLATE = "⚫ {ended} · {agent} · {name}"
+
+
+def ended_line(session: Session) -> str:
+    """`⚫ ended · <agent> · <name>` — what the user is told when a Session is gone.
+
+    The name is `spoken_name`'s, so the Session is called here what every other
+    surface calls it, and the agent stands before it because away from the Mac
+    "which one of them" is the question this line answers.
+    """
+    return ENDED_LINE_TEMPLATE.format(
+        ended=NOTICE_WORDING[NoticeWord.ENDED],
+        agent=session.target.agent,
+        name=spoken_name(session),
+    )
 
 
 class MenuWord(StrEnum):

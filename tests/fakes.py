@@ -50,7 +50,7 @@ from gpt_voicecoding.seams.call import (
     UserSpeaking,
     VoiceSpeech,
 )
-from gpt_voicecoding.seams.companion_channel import ChannelReceipt
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt, Notice
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.events import Event, EventSink
 from gpt_voicecoding.seams.identity import RequestId, SessionTarget
@@ -457,6 +457,7 @@ class FakeCompanionChannel:
         self.requests: list[str] = []
         self.origins: list[str] = []
         self.revisions: list[tuple[str, ...]] = []
+        self.notices: list[Notice | None] = []
 
     async def send(
         self,
@@ -465,11 +466,13 @@ class FakeCompanionChannel:
         request_id: RequestId,
         origin: str = "",
         revises: tuple[str, ...] = (),
+        notice: Notice | None = None,
     ) -> ChannelReceipt:
         self.sent.append(text)
         self.requests.append(str(request_id))
         self.origins.append(origin)
         self.revisions.append(revises)
+        self.notices.append(notice)
         if self.message_ids is not None:
             landed = self.message_ids
         else:

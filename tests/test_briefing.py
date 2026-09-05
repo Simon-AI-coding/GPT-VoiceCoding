@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from gpt_voicecoding.core import briefing
-from gpt_voicecoding.core.briefing import BriefState, Newest, NewestState
+from gpt_voicecoding.core.briefing import BriefState, Newest, NewestState, NoticeWord
 from gpt_voicecoding.core.lifecycle import RelayReason
 from gpt_voicecoding.core.sessions import Session, UndeliveredRelay
 from gpt_voicecoding.seams.agent import (
@@ -914,3 +914,112 @@ def _only_brief(items: tuple[object, ...]) -> SpokenBrief:
 
 def _fits(items: tuple[object, ...]) -> bool:
     return sum(item.size_in_bytes for item in items) <= HANDOVER_BUDGET_BYTES  # type: ignore[attr-defined]
+
+
+class TestTheChannelNotice:
+    """One Session Brief as the Companion Channel seam carries it (ADR 0021 §5).
+
+    The same rule as the spoken brief, on the other surface: what crosses is
+    the seam's own carrier, filled from the wording tables here, and the adapter
+    that lays it out chooses no words. What it adds over `SpokenBrief` is a state
+    the adapter can key a light on and the option labels as a tuple, in order,
+    because a numeral picks one by position (ADR 0021 §3, §6).
+    """
+
+    def test_a_question_notice_carries_the_words_the_layout_prints(self) -> None:
+        brief = briefing.session(
+            row(state=SessionState.WAITING, waiting_for=QUESTION, progress=said("I got this far")),
+            question_answerable=True,
+        )
+
+        notice = briefing.notice(brief)
+
+        assert notice.state is BriefState.DECISION
+        assert notice.state_word == "waiting for your decision"
+        assert notice.agent == "claude"
+        assert notice.name == "gpt-voicecoding · a task"
+        assert notice.question == "Which base?"
+        assert notice.options == ("main", "develop")
+        assert notice.recommendation == "recommends: main"
+        assert notice.newest == "I got this far"
+        assert notice.cut_marker == "… cut here; the rest is on the terminal"
+        assert notice.answerable_here is True
+        assert notice.answer_wording == "answer from here"
+        assert notice.undelivered == ""
+
+    def test_a_permission_notice_offers_allow_and_deny_from_the_wording_table(self) -> None:
+        """ADR 0021 §6: `allow` / `deny` are Core's labels, so a numeral 1 is `allow`."""
+        brief = briefing.session(row(state=SessionState.WAITING, waiting_for=PERMISSION))
+
+        notice = briefing.notice(brief)
+
+        assert notice.state is BriefState.PERMISSION
+        assert notice.question == "permission: Bash — rm -rf build"
+        assert notice.options == ("allow", "deny")
+        assert notice.recommendation == ""
+
+    def test_a_finished_notice_has_an_empty_question_slot(self) -> None:
+        notice = briefing.notice(briefing.session(row(progress=said("All green."))))
+
+        assert notice.state is BriefState.FINISHED
+        assert notice.state_word == "finished"
+        assert notice.question == ""
+        assert notice.options == ()
+        assert notice.newest == "All green."
+
+    def test_a_session_with_no_name_is_carried_by_its_address(self) -> None:
+        notice = briefing.notice(briefing.session(replace(row(), name=None)))
+
+        assert notice.name == str(CLAUDE)
+
+    def test_an_absent_newest_carries_the_omission_words(self) -> None:
+        brief = briefing.omitting_newest(briefing.session(row(progress=said("a long answer"))))
+
+        assert briefing.notice(brief).newest == "the newest entry is too large to carry"
+
+    def test_an_undelivered_reply_travels_as_the_same_sentence_the_voice_hears(self) -> None:
+        brief = briefing.session(row(undelivered=UndeliveredRelay(reason="ceiling_passed")))
+
+        assert briefing.notice(brief).undelivered == briefing.spoken(brief).undelivered
+
+    def test_a_terminal_only_question_says_so(self) -> None:
+        brief = briefing.session(row(state=SessionState.WAITING, waiting_for=QUESTION))
+
+        notice = briefing.notice(brief)
+
+        assert notice.answerable_here is False
+        assert notice.answer_wording == "answer at the terminal"
+
+    def test_a_roster_notice_carries_one_row_per_session_focus_first(self) -> None:
+        summary = briefing.roster(
+            [
+                replace(row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION), name=None),
+                row(CLAUDE, state=SessionState.RUNNING),
+            ],
+            CLAUDE,
+        )
+
+        notice = briefing.roster_notice(summary)
+
+        assert [(r.state, r.name, r.agent, r.state_word) for r in notice.rows] == [
+            (BriefState.RUNNING, "gpt-voicecoding · a task", "claude", "running"),
+            (BriefState.DECISION, str(CODEX), "codex", "waiting for your decision"),
+        ]
+        assert notice.counts == "the others: 1 waiting for your decision"
+
+    def test_a_roster_notice_without_a_focus_counts_every_session(self) -> None:
+        summary = briefing.roster([row(CLAUDE, state=SessionState.RUNNING)], None)
+
+        assert briefing.roster_notice(summary).counts == "sessions: 1 running"
+
+
+class TestTheWordingTable:
+    """The words every surface prints, held once and in English (ADR 0021, Words)."""
+
+    def test_the_closed_words_and_labels_are_english_entries_of_one_table(self) -> None:
+        assert briefing.NOTICE_WORDING[NoticeWord.HANDLED] == "handled"
+        assert briefing.NOTICE_WORDING[NoticeWord.ENDED] == "ended"
+        assert briefing.NOTICE_WORDING[NoticeWord.ALLOW] == "allow"
+        assert briefing.NOTICE_WORDING[NoticeWord.DENY] == "deny"
+        assert briefing.NOTICE_WORDING[NoticeWord.TRUNCATED]
+        assert briefing.say_to("gpt-voicecoding · a task") == "Say to gpt-voicecoding · a task:"

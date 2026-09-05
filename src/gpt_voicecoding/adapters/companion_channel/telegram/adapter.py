@@ -91,11 +91,16 @@ from gpt_voicecoding.adapters.companion_channel.telegram.api import (
     TelegramError,
     Transport,
 )
+from gpt_voicecoding.adapters.companion_channel.telegram.layout import (
+    lay_out,
+    prefix_within,
+    utf16_length,
+)
 from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     MESSAGE_LIMIT_UTF16_UNITS,
     TelegramSettings,
 )
-from gpt_voicecoding.seams.companion_channel import ChannelReceipt, InboundText
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt, InboundText, Notice
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId
@@ -138,23 +143,19 @@ LAST_UPDATE = -1
 JOIN_SECONDS = 0.2
 
 
-def utf16_length(text: str) -> int:
-    """How long Telegram thinks this string is. `len()` is the wrong ruler.
-
-    The API's 4096 cap counts UTF-16 code units, so an emoji costs two and a
-    message of 3000 emoji is over the limit while `len()` says it is not.
-    """
-    return len(text.encode("utf-16-le")) // 2
-
-
 def split_message(text: str, *, limit: int = MESSAGE_LIMIT_UTF16_UNITS) -> tuple[str, ...]:
     """Cut one message into parts the API will accept, losing not one character.
 
-    Truncation was considered and rejected: silently amputating the tail of a
-    notice the user is meant to act on is a worse failure than sending two
-    messages. The cut prefers the last line break, then the last space, then
-    falls where it must — and it walks code points, so a surrogate pair is never
-    split down the middle.
+    Truncation was considered and rejected for the messages that come this way:
+    silently amputating the tail of a reply the user is meant to read is a worse
+    failure than sending two messages. The cut prefers the last line break, then
+    the last space, then falls where it must — and it walks code points, so a
+    surrogate pair is never split down the middle.
+
+    **A notice never comes this way** (ADR 0021 §5). A structured brief is laid
+    out as one message by `layout.lay_out`, which cuts the folded original with
+    a marker rather than splitting; this function is for everything else — a
+    receipt, a control-plane answer, a delegated reply.
     """
     if utf16_length(text) <= limit:
         return (text,) if text else ()
@@ -165,24 +166,13 @@ def split_message(text: str, *, limit: int = MESSAGE_LIMIT_UTF16_UNITS) -> tuple
         if utf16_length(rest) <= limit:
             parts.append(rest)
             break
-        hard = _prefix_within(rest, limit)
+        hard = prefix_within(rest, limit)
         window = rest[:hard]
         boundary = max(window.rfind("\n"), window.rfind(" "))
         cut = boundary + 1 if boundary > 0 else hard
         parts.append(rest[:cut])
         rest = rest[cut:]
     return tuple(parts)
-
-
-def _prefix_within(text: str, limit: int) -> int:
-    """How many characters fit, counted the way the API counts them."""
-    units = 0
-    for index, character in enumerate(text):
-        width = 2 if ord(character) > 0xFFFF else 1
-        if units + width > limit:
-            return index
-        units += width
-    return len(text)
 
 
 class TelegramCompanionChannel:
@@ -251,6 +241,7 @@ class TelegramCompanionChannel:
         request_id: RequestId,
         origin: str = "",
         revises: tuple[str, ...] = (),
+        notice: Notice | None = None,
     ) -> ChannelReceipt:
         """Push one message, in as many parts as the API's cap requires.
 
@@ -271,20 +262,28 @@ class TelegramCompanionChannel:
         one is a message with a hole in the middle, which reads as a different
         message rather than as a broken one.
 
-        Two variations, both decided by the caller's arguments and neither by
+        **A notice is one part, always** (ADR 0021 §5). When `notice` is given
+        the structured brief is laid out here — plain text plus `entities`, the
+        original cut with Core's marker where the cap demands — and `text` is
+        not sent: it is the same words in the shape a surface with no layout
+        prints. `split_message` is never reached by a notice.
+
+        Three variations, all decided by the caller's arguments and none by
         anything this adapter infers: `revises` names messages to edit in place
         rather than send (`_revise`); an `origin` naming an unanswered press
-        makes a short reply a toast (`_toast`). Everything else — a chat's
-        origin, an empty one — is an ordinary message to the one chat.
+        makes a short reply a toast (`_toast`) — never a notice, which clears
+        the press and goes as a message; `notice` chooses the layout. Everything
+        else — a chat's origin, an empty one — is an ordinary message to the one
+        chat.
 
         Nothing is queued here. An unreachable network is a classified failure
         returned at once — the engine's loop is never held. Bridge Core decides
         whether a later outlet transition should reconcile the current Session
         state; this adapter never replays the notice object.
         """
+        parts = _parts(text, notice)
         if revises:
-            return await self._revise(text, request_id=request_id, revises=revises)
-        parts = split_message(text)
+            return await self._revise(parts, request_id=request_id, revises=revises)
         if not parts:
             return ChannelReceipt(
                 request_id=request_id,
@@ -292,7 +291,7 @@ class TelegramCompanionChannel:
                 reason="there were no words to send",
             )
         callback = self._press_to_answer(origin)
-        if callback is not None and await self._toast(callback, text):
+        if callback is not None and await self._toast(callback, text if notice is None else None):
             return ChannelReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
 
         landed: list[str] = []
@@ -300,7 +299,7 @@ class TelegramCompanionChannel:
             try:
                 result = await self._ask(
                     "sendMessage",
-                    {"chat_id": self._settings.chat_id, "text": part},
+                    {"chat_id": self._settings.chat_id, **part},
                     timeout_seconds=self._settings.request_timeout_seconds,
                 )
             except TelegramError as refused:
@@ -323,26 +322,28 @@ class TelegramCompanionChannel:
         )
 
     async def _revise(
-        self, text: str, *, request_id: RequestId, revises: tuple[str, ...]
+        self,
+        parts: tuple[dict[str, object], ...],
+        *,
+        request_id: RequestId,
+        revises: tuple[str, ...],
     ) -> ChannelReceipt:
         """Replace the content of messages sent earlier, one part per id (ADR 0021 §8).
 
-        Pairwise and whole: the text is cut exactly as a fresh send would cut
+        Pairwise and whole: the message is cut exactly as a fresh send would cut
         it, and it must fall into as many parts as there are messages to
         revise. A mismatch edits nothing and says so — a notice half-rewritten
         is a message with a hole in it. `editMessageText` keeps whatever the
         message already had that this call does not name, and a refusal that
         says the content is unchanged is the outcome that was wanted.
 
-        **Text only, for now — by design, not by omission.** ADR 0021 §8 has an
-        edit carry the same `entities` and an inline markup drawn from the
-        brief's labels (empty labels draw no buttons). Neither exists yet:
-        entities arrive with the structured brief (#262) and labels with the
-        inline keyboard (#264). The issue that edits a closed notice to
-        `handled` (#266) grows this call to carry both; a `send` that revises
-        must then edit with the same layout a fresh send would have used.
+        A notice is laid out for an edit exactly as for a send, entities
+        included, so a closed notice keeps its fold and its bold question and
+        changes only the words Core changed. A notice is one part, so it can
+        revise exactly one message. The inline markup drawn from the labels is
+        #264's; the issue that edits a closed notice to `handled` (#266) is what
+        calls this with one.
         """
-        parts = split_message(text)
         if len(parts) != len(revises):
             return ChannelReceipt(
                 request_id=request_id,
@@ -360,7 +361,7 @@ class TelegramCompanionChannel:
                     {
                         "chat_id": self._settings.chat_id,
                         "message_id": _message_id_on_the_wire(message_id),
-                        "text": part,
+                        **part,
                     },
                     timeout_seconds=self._settings.request_timeout_seconds,
                 )
@@ -401,23 +402,24 @@ class TelegramCompanionChannel:
         del self._unanswered[callback]
         return callback
 
-    async def _toast(self, callback: str, text: str) -> bool:
+    async def _toast(self, callback: str, text: str | None) -> bool:
         """Answer one press, and say whether the words were shown as the toast.
 
         **A held press is answered exactly once, whatever the words are.** When
-        they fit a toast, they are the toast. When they do not, the callback is
-        answered with no text — that is what clears the loading indicator the
-        client draws on a pressed button — and the caller sends the words as a
-        message. A refusal either way is logged and nothing more: Telegram
-        treats a refused callback as answered, so the reply still goes as a
-        message and the user is never left with a spinning button.
+        they fit a toast, they are the toast. When they do not — or when there
+        are none to show, because the reply is a notice with a layout of its
+        own — the callback is answered with no text — that is what clears the
+        loading indicator the client draws on a pressed button — and the caller
+        sends the reply as a message. A refusal either way is logged and nothing
+        more: Telegram treats a refused callback as answered, so the reply still
+        goes as a message and the user is never left with a spinning button.
 
         Core answering a press with *no* words is not a case here by design:
         the router fails closed and every inbound is answered
         (`core/bridge.py::_inbound_text`), and the only text `_reply` skips is
         empty, which no classification produces.
         """
-        fits = len(text) <= TOAST_LIMIT_CHARACTERS
+        fits = text is not None and len(text) <= TOAST_LIMIT_CHARACTERS
         answer: dict[str, object] = {"callback_query_id": callback}
         if fits:
             answer["text"] = text
@@ -668,6 +670,17 @@ class TelegramCompanionChannel:
 
         threading.Thread(target=call, name=f"telegram-{method}", daemon=True).start()
         return await answer
+
+
+def _parts(text: str, notice: Notice | None) -> tuple[dict[str, object], ...]:
+    """What goes on the wire, as `sendMessage` bodies without the chat: one per part.
+
+    A notice is laid out and is one part; anything else is the text, cut to the
+    cap into as many parts as it needs (`split_message`).
+    """
+    if notice is not None:
+        return (lay_out(notice).payload(),)
+    return tuple({"text": part} for part in split_message(text))
 
 
 def _message_id_of(message: object) -> str:

@@ -27,7 +27,6 @@ from gpt_voicecoding.adapters.companion_channel.telegram.adapter import (
     ALLOWED_UPDATES,
     TelegramCompanionChannel,
     split_message,
-    utf16_length,
 )
 from gpt_voicecoding.adapters.companion_channel.telegram.api import (
     FailureLayer,
@@ -35,6 +34,7 @@ from gpt_voicecoding.adapters.companion_channel.telegram.api import (
     Transport,
     http_transport,
 )
+from gpt_voicecoding.adapters.companion_channel.telegram.layout import lay_out, utf16_length
 from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     MESSAGE_LIMIT_UTF16_UNITS,
     SettingsError,
@@ -51,6 +51,7 @@ __all__ = [
     "TelegramSettings",
     "Transport",
     "http_transport",
+    "lay_out",
     "split_message",
     "telegram_channel",
     "utf16_length",

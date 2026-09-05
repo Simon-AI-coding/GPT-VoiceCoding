@@ -27,7 +27,7 @@ Two answers, and neither of them lies:
 
 from __future__ import annotations
 
-from gpt_voicecoding.seams.companion_channel import ChannelReceipt
+from gpt_voicecoding.seams.companion_channel import ChannelReceipt, Notice
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId
@@ -60,8 +60,13 @@ class NullCompanionChannel:
         request_id: RequestId,
         origin: str = "",
         revises: tuple[str, ...] = (),
+        notice: Notice | None = None,
     ) -> ChannelReceipt:
-        """Report the truth: there was nowhere to send it, so it landed under no id."""
+        """Report the truth: there was nowhere to send it, so it landed under no id.
+
+        A structured brief changes nothing here: there is no surface to lay it
+        out on, and the text beside it is the same words (ADR 0021 §5).
+        """
         return ChannelReceipt(request_id=request_id, outcome=Delivery.FAILED, reason=NOT_CONFIGURED)
 
     async def verify(self) -> VerifyResult:

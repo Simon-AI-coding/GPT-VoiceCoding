@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorPick, AnchorTarget, Screen
 from gpt_voicecoding.core.briefing import (
@@ -90,10 +90,18 @@ def roster_screen(brief: RosterBrief) -> MenuScreen:
             for row, target in zip(notice.rows, brief.rows, strict=True)
         ]
     )
+    # **The row says what its label says** (#264 review). The address only ever
+    # went on the label, and the label is the thing a button cuts — from the
+    # end, which is exactly where the address is. So two Sessions sharing a
+    # name arrived as two buttons reading alike above a roster that named
+    # neither address, and the user could not tell which press reached which
+    # Session. The line the user reads carries it now; the button may still be
+    # cut, because the line is what the cut leans on.
+    rows = tuple(replace(row, name=label) for row, label in zip(notice.rows, labels, strict=True))
     targets: tuple[AnchorPick, ...] = tuple(row.target for row in brief.rows)
     return MenuScreen(
         text=brief_text(brief),
-        notice=RosterNotice(rows=notice.rows, counts=notice.counts, options=labels),
+        notice=RosterNotice(rows=rows, counts=notice.counts, options=labels),
         anchor=Anchor(kind=AnchorKind.MENU, target=Screen.ROSTER, options=labels, picks=targets),
     )
 
@@ -166,7 +174,7 @@ def _choices(
     *, heading: str, choices: tuple[MenuWord, ...], anchor_target: AnchorTarget
 ) -> MenuScreen:
     labels = tuple(MENU_WORDING[word] for word in choices)
-    picks: tuple[AnchorPick, ...] = tuple(str(word) for word in choices)
+    picks: tuple[AnchorPick, ...] = choices
     return MenuScreen(
         text=menu_text(heading, labels),
         notice=MenuNotice(heading=heading, options=labels),

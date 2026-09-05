@@ -38,6 +38,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from gpt_voicecoding.core.briefing import MenuWord
 from gpt_voicecoding.seams.identity import SessionTarget
 
 
@@ -63,9 +64,12 @@ class Screen(StrEnum):
 AnchorTarget = SessionTarget | Screen | str
 
 #: What one position on a menu screen stands for, when the label is not itself
-#: the meaning: the Session a roster label names, the switch a switch label
-#: names, or the menu word behind a greeting's or the config screen's label.
-AnchorPick = SessionTarget | str
+#: the meaning: the Session a roster label names, the menu word behind a
+#: greeting's or the config screen's label, or the switch a switch label names.
+#: The menu word keeps its own type rather than travelling as a bare string
+#: that the hub parses back (#264 review) — a screen's picks are written by
+#: this package, so the type they were written as is the type to read.
+AnchorPick = SessionTarget | MenuWord | str
 
 
 class AnchorKind(StrEnum):

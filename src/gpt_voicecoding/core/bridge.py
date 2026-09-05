@@ -312,14 +312,6 @@ def _notice_anchor(target: SessionTarget, waiting_for: WaitingFor) -> Anchor:
     return Anchor(kind=AnchorKind.NOTICE, target=target)
 
 
-def _menu_word(pick: str) -> MenuWord | None:
-    """The menu word a screen's pick names, or None for one no screen of this hub wrote."""
-    try:
-        return MenuWord(pick)
-    except ValueError:
-        return None
-
-
 def _receipt_anchor(target: SessionTarget) -> Anchor:
     """The Anchor row a relay's receipt registers: that Session, nothing to pick."""
     return Anchor(kind=AnchorKind.RECEIPT, target=target)
@@ -1355,11 +1347,11 @@ class BridgeCore:
                 assert isinstance(pick, SessionTarget)
                 await self._greet(pick, origin=origin)
             case Screen.CONFIG:
-                await self._config_pick(str(pick), origin=origin)
+                await self._config_pick(pick, origin=origin)
             case Screen.SWITCHES:
                 await self._flip_pick(str(pick), origin=origin)
             case SessionTarget() as target:
-                await self._session_pick(target, str(pick), origin=origin)
+                await self._session_pick(target, pick, origin=origin)
             case _:  # an Assistant Conversation's row (#265) offers nothing to pick
                 await self._reply(briefing.NUMERAL_PICKS_NOTHING_HINT, origin=origin)
 
@@ -1372,14 +1364,14 @@ class BridgeCore:
             return
         await self._reply_screen(menu.greeting_screen(session), origin)
 
-    async def _session_pick(self, target: SessionTarget, word: str, *, origin: str) -> None:
+    async def _session_pick(self, target: SessionTarget, word: AnchorPick, *, origin: str) -> None:
         """`brief`, `history` or `send message`, about one Session."""
         try:
             session = self._state.sessions.resolve(target)
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
-        match _menu_word(word):
+        match word:
             case MenuWord.BRIEF:
                 await self._brief_as_anchor(session, origin=origin)
             case MenuWord.HISTORY:
@@ -1431,9 +1423,9 @@ class BridgeCore:
             anchor=_notice_anchor(read.target, read.waiting_for),
         )
 
-    async def _config_pick(self, word: str, *, origin: str) -> None:
+    async def _config_pick(self, word: AnchorPick, *, origin: str) -> None:
         """`switch` opens the switch screen; `verify` and `live` run at once."""
-        match _menu_word(word):
+        match word:
             case MenuWord.SWITCH:
                 await self._reply_screen(self.switches_screen(), origin)
             case MenuWord.VERIFY:

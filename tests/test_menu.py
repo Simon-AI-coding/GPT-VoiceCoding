@@ -71,6 +71,10 @@ class TestTheRosterScreen:
         )
         assert screen.anchor is not None
         assert screen.anchor.picks == (CODEX, OTHER_CODEX, CLAUDE)
+        # The row carries it too, not only the label (#264 review): the label
+        # is what a button cuts, and it cuts the end — where the address is.
+        assert isinstance(screen.notice, RosterNotice)
+        assert tuple(row.name for row in screen.notice.rows) == screen.options
 
     def test_with_nothing_live_it_is_text_and_the_hint_and_no_anchor(self) -> None:
         brief = briefing.roster([], None)

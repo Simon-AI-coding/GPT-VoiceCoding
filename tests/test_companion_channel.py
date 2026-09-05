@@ -1676,9 +1676,9 @@ class TestDrawingButtonsFromLabels:
         assert laid_out.reply_markup == {
             "inline_keyboard": [
                 [
-                    {"text": "1. main", "callback_data": "1"},
-                    {"text": "2. develop", "callback_data": "2"},
-                    {"text": "3. release", "callback_data": "3"},
+                    {"text": "main", "callback_data": "1"},
+                    {"text": "develop", "callback_data": "2"},
+                    {"text": "release", "callback_data": "3"},
                 ]
             ]
         }
@@ -1705,10 +1705,7 @@ class TestDrawingButtonsFromLabels:
 
         assert laid_out.reply_markup == {
             "inline_keyboard": [
-                [
-                    {"text": "1. allow", "callback_data": "1"},
-                    {"text": "2. deny", "callback_data": "2"},
-                ]
+                [{"text": "allow", "callback_data": "1"}, {"text": "deny", "callback_data": "2"}]
             ]
         }
         assert "1. allow\n2. deny" in laid_out.text
@@ -1720,18 +1717,12 @@ class TestDrawingButtonsFromLabels:
         assert "reply_markup" not in laid_out.payload()
 
     def test_more_labels_than_one_row_holds_wrap_in_order(self) -> None:
-        markup = keyboard(("alpha", "beta", "gamma", "delta"), label_width=18)
+        markup = keyboard(("alpha", "beta", "gamma", "delta"), label_width=11)
 
         assert markup == {
             "inline_keyboard": [
-                [
-                    {"text": "1. alpha", "callback_data": "1"},
-                    {"text": "2. beta", "callback_data": "2"},
-                ],
-                [
-                    {"text": "3. gamma", "callback_data": "3"},
-                    {"text": "4. delta", "callback_data": "4"},
-                ],
+                [{"text": "alpha", "callback_data": "1"}, {"text": "beta", "callback_data": "2"}],
+                [{"text": "gamma", "callback_data": "3"}, {"text": "delta", "callback_data": "4"}],
             ]
         }
 
@@ -1740,23 +1731,21 @@ class TestDrawingButtonsFromLabels:
         laid_out = lay_out(notice(options=(label, "no")), label_width=16)
 
         (row_one, row_two) = laid_out.reply_markup["inline_keyboard"]  # type: ignore[index]
-        assert row_one == [{"text": "1. rebuild the…", "callback_data": "1"}]
-        # The number is never what gets cut: it is the button's meaning, and the
-        # whole label is on the notice line below.
-        assert utf16_length(row_one[0]["text"]) <= 16
-        assert row_two == [{"text": "2. no", "callback_data": "2"}]
+        assert row_one == [{"text": "rebuild the ind…", "callback_data": "1"}]
+        assert utf16_length(row_one[0]["text"]) == 16
+        assert row_two == [{"text": "no", "callback_data": "2"}]
         assert f"1. {label}" in laid_out.text
 
     def test_the_cut_never_splits_a_surrogate_pair(self) -> None:
-        (button,) = keyboard(("🙂🙂🙂🙂",), label_width=6)["inline_keyboard"][0]  # type: ignore[index]
+        (button,) = keyboard(("🙂🙂🙂🙂",), label_width=4)["inline_keyboard"][0]  # type: ignore[index]
 
-        assert button["text"] == "1. 🙂…"
+        assert button["text"] == "🙂…"
 
     def test_the_width_is_configured_on_the_adapter(self) -> None:
         api = FakeTelegram()
 
         asyncio.run(
-            channel(api, button_label_width=6).send(
+            channel(api, button_label_width=3).send(
                 "text", request_id=new_request_id(), notice=notice(options=("main", "no"))
             )
         )
@@ -1764,8 +1753,8 @@ class TestDrawingButtonsFromLabels:
         (call,) = api.method_calls("sendMessage")
         assert call["reply_markup"] == {
             "inline_keyboard": [
-                [{"text": "1. ma…", "callback_data": "1"}],
-                [{"text": "2. no", "callback_data": "2"}],
+                [{"text": "ma…", "callback_data": "1"}],
+                [{"text": "no", "callback_data": "2"}],
             ]
         }
 
@@ -1795,39 +1784,74 @@ class TestDrawingButtonsFromLabels:
 
         assert laid_out.reply_markup == {
             "inline_keyboard": [
-                [
-                    {"text": "1. a · b", "callback_data": "1"},
-                    {"text": "2. c · d", "callback_data": "2"},
-                ]
+                [{"text": "a · b", "callback_data": "1"}, {"text": "c · d", "callback_data": "2"}]
             ]
         }
+        # The lines are numbered because the roster offers them to be picked:
+        # line N is button N is pick N, on every surface.
         assert laid_out.text == (
-            "🔵 a · b · codex · running\n"
-            "🟡 c · d · claude · waiting for your decision\n"
+            "1. 🔵 a · b · codex · running\n"
+            "2. 🟡 c · d · claude · waiting for your decision\n"
             "sessions: 1 running, 1 waiting for your decision"
         )
 
-    def test_two_labels_alike_but_for_the_address_stay_tellable_apart(self) -> None:
+    def test_the_line_names_the_address_the_button_had_to_cut(self) -> None:
         """The cut removes the very thing that disambiguates them (#264 review).
 
         A roster tells two Sessions sharing a name apart by putting the address
         after it, and the address is at the end — so it is the first thing a
-        long label loses on the button. Before the number was on the button
-        these two read identically and the user could not see which was which.
-        The press was never in doubt: it resolves by position.
+        long label loses on the button. The two buttons may therefore read
+        alike; what makes the choice legible is the numbered line above them,
+        which carries the label whole. That is the promise the notice line
+        makes, and before this it was made only for a Session notice.
         """
         name = "port the legacy transcript reader"
         labels = tuple(
             DISAMBIGUATED_LABEL_TEMPLATE.format(name=name, address=address)
             for address in ("claude:abc123:401", "claude:def456:402")
         )
+        roster = RosterNotice(
+            rows=tuple(
+                RosterRowNotice(BriefState.RUNNING, "running", "claude", label) for label in labels
+            ),
+            counts="sessions: 2 running",
+            options=labels,
+        )
 
-        markup = keyboard(labels, label_width=32)
+        laid_out = lay_out(roster)
 
-        drawn = [button["text"] for row in markup["inline_keyboard"] for button in row]  # type: ignore[index]
-        assert len(set(drawn)) == len(labels), drawn
-        assert drawn[0].startswith("1. ")
-        assert drawn[1].startswith("2. ")
+        assert "1. 🔵 port the legacy transcript reader (claude:abc123:401)" in laid_out.text
+        assert "2. 🔵 port the legacy transcript reader (claude:def456:402)" in laid_out.text
+        drawn = [b["callback_data"] for r in laid_out.reply_markup["inline_keyboard"] for b in r]  # type: ignore[index]
+        assert drawn == ["1", "2"]
+
+    def test_a_roster_trimmed_to_the_cap_draws_no_button_for_a_row_it_dropped(self) -> None:
+        """A button under no line is a button the user cannot match (#264 review).
+
+        A roster is one message and its rows go from the back when they will
+        not fit (#262), so a long one shows the leading N. The keyboard was
+        drawn from every label regardless — sixty Sessions drew sixty buttons
+        under thirty lines, and the labels past the fold appeared nowhere. The
+        rows that stay are the leading ones, so label N is still row N.
+        """
+        labels = tuple(f"session number {index}" for index in range(1, 21))
+        roster = RosterNotice(
+            rows=tuple(
+                RosterRowNotice(BriefState.RUNNING, "running", "claude", label) for label in labels
+            ),
+            counts="sessions: 20 running",
+            options=labels,
+        )
+
+        laid_out = lay_out(roster, limit=160)
+
+        lines = [line for line in laid_out.text.split("\n") if line != roster.counts]
+        drawn = [b for row in laid_out.reply_markup["inline_keyboard"] for b in row]  # type: ignore[index]
+        assert 0 < len(lines) < len(labels), "the cap has to have dropped something"
+        assert len(drawn) == len(lines)
+        assert [button["callback_data"] for button in drawn] == [
+            str(position) for position in range(1, len(lines) + 1)
+        ]
 
     def test_a_roster_with_no_labels_draws_nothing(self) -> None:
         roster = RosterNotice(rows=(), counts="sessions: none")
@@ -1846,9 +1870,9 @@ class TestLayingOutAMenuScreen:
         assert laid_out.reply_markup == {
             "inline_keyboard": [
                 [
-                    {"text": "1. switch", "callback_data": "1"},
-                    {"text": "2. verify", "callback_data": "2"},
-                    {"text": "3. live", "callback_data": "3"},
+                    {"text": "switch", "callback_data": "1"},
+                    {"text": "verify", "callback_data": "2"},
+                    {"text": "live", "callback_data": "3"},
                 ]
             ]
         }
@@ -1873,9 +1897,8 @@ class TestLayingOutAMenuScreen:
         assert receipt.message_ids == ("1",)
         (call,) = api.method_calls("sendMessage")
         assert call["text"] == "config\n1. switch\n2. verify\n3. live"
-        # The button says the same numeral the third line of the text does.
         assert call["reply_markup"]["inline_keyboard"][0][2] == {  # type: ignore[index]
-            "text": "3. live",
+            "text": "live",
             "callback_data": "3",
         }
 

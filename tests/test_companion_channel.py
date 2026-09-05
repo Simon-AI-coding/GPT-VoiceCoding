@@ -601,13 +601,22 @@ class TestCuttingTheOriginalToOneMessage:
         assert body.endswith(" is here"), "cut fell mid-line rather than at a line break"
 
     def test_the_headline_is_never_cut_when_it_alone_is_near_the_cap(self) -> None:
-        """Less than a marker's worth of room left: the fold is the marker and nothing else."""
+        """Less than a marker's worth of room left: the fold is what fits of the marker."""
         question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 130)
 
         laid_out = lay_out(notice(question=question, newest="the whole original, every word of it"))
 
         assert entity(laid_out, "bold") == question
-        assert entity(laid_out, "expandable_blockquote") == MARKER
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        assert MARKER.startswith(entity(laid_out, "expandable_blockquote"))
+
+    def test_a_headline_that_fills_the_cap_leaves_no_fold_and_no_entity_for_one(self) -> None:
+        question = "q" * (MESSAGE_LIMIT_UTF16_UNITS - 107)
+
+        laid_out = lay_out(notice(question=question, newest="anything"))
+
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        assert [e["type"] for e in laid_out.entities] == ["bold"]
 
     def test_an_emoji_heavy_original_is_cut_in_utf16_units_with_no_surrogate_split(self) -> None:
         laid_out = lay_out(notice(newest="\N{GRINNING FACE}" * 3000))
@@ -635,6 +644,21 @@ class TestCuttingTheOriginalToOneMessage:
             "the others: 1 waiting for your decision"
         )
         assert laid_out.entities == ()
+
+    def test_a_roster_over_the_cap_drops_rows_from_the_back_and_keeps_the_counts(self) -> None:
+        """The counts name what the rows could not carry, as the hand-over's do."""
+        rows = tuple(
+            RosterRowNotice(BriefState.RUNNING, "running", "claude", f"project · task {n:03d}")
+            for n in range(300)
+        )
+
+        laid_out = lay_out(RosterNotice(rows=rows, counts="sessions: 300 running"))
+
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        lines = laid_out.text.splitlines()
+        assert lines[-1] == "sessions: 300 running"
+        assert lines[0].endswith("task 000 · claude · running")
+        assert 0 < len(lines) - 1 < 300
 
 
 class TestPushingOneMessage:

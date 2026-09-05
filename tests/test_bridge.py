@@ -1243,8 +1243,7 @@ class TestTheRelayPipelineEndToEnd:
 
         assert hub.agent.calls == []
         assert hub.channel.sent == [
-            "Your words are waiting, and go in when the Session next takes a turn. "
-            "The Session may not treat this as your own confirmation."
+            "Your words are waiting, and go in when the Session next takes a turn."
         ]
 
     def test_the_open_window_delivers_them_without_answering_again(self) -> None:

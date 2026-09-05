@@ -66,6 +66,7 @@ from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import PendingRelay
 from gpt_voicecoding.core.relays import (
+    RelayAuthority,
     RelayOutcome,
     RelayPipeline,
     RelayReason,
@@ -784,7 +785,7 @@ class BridgeCore:
             receipt=receipt,
             # A verdict is nothing but the user's own decision (ADR 0013's
             # amendment): the one route besides the held hook that carries it.
-            with_authority=True,
+            authority=RelayAuthority.AS_THE_USER,
         )
         # An Approval Relay is the user's own words arriving too (#165 Q2 sets
         # the focus from it for that reason), so a verdict that lands clears

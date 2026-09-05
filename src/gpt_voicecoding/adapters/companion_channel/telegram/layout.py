@@ -104,18 +104,28 @@ class LaidOut:
 def lay_out(notice: Notice, *, limit: int = MESSAGE_LIMIT_UTF16_UNITS) -> LaidOut:
     """Arrange one brief in this surface's shape, inside one message."""
     if isinstance(notice, RosterNotice):
-        return _roster(notice)
+        return _roster(notice, limit=limit)
     return _session(notice, limit=limit)
 
 
-def _roster(notice: RosterNotice) -> LaidOut:
-    """One line per Session — light, name, agent, state word — and the counts under it."""
-    lines = [
+def _roster(notice: RosterNotice, *, limit: int) -> LaidOut:
+    """One line per Session — light, name, agent, state word — and the counts under it.
+
+    **The counts line never goes; rows go from the back.** The same rule the
+    hand-over applies at the Call seam's ceiling (`briefing.handover`): the
+    counts are Core's summary of every Session, so a roster that could carry
+    thirty of two hundred rows still says two hundred are there, and what it
+    could not carry is named by number rather than silently absent. Rows are
+    in Briefing's order, the Focus Session first, so the back is the least
+    asked-about end.
+    """
+    rows = [
         f"{STATE_LIGHT[row.state]} {row.name}{SEPARATOR}{row.agent}{SEPARATOR}{row.state_word}"
         for row in notice.rows
     ]
-    lines.append(notice.counts)
-    return LaidOut(text="\n".join(lines))
+    while rows and utf16_length("\n".join([*rows, notice.counts])) > limit:
+        rows.pop()
+    return LaidOut(text="\n".join([*rows, notice.counts]))
 
 
 def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
@@ -144,7 +154,8 @@ def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
 
     budget = limit - utf16_length(above) - utf16_length(below)
     fold = _fitted(notice.newest, notice.cut_marker, budget)
-    entities.append(_entity(EXPANDABLE_BLOCKQUOTE, before=above, covers=fold))
+    if fold:
+        entities.append(_entity(EXPANDABLE_BLOCKQUOTE, before=above, covers=fold))
     return LaidOut(text=f"{above}{fold}{below}", entities=tuple(entities))
 
 
@@ -156,14 +167,17 @@ def _fitted(original: str, marker: str, budget: int) -> str:
     paid for — a line break first because a fold that ends on a whole line
     reads as the message it is cut from, and a space only when the window holds
     no line break at all. When nothing of the original fits beside the marker,
-    the fold is the marker alone — the headline is never the thing that gives
-    way, even where that leaves the message over the cap for Telegram to refuse.
+    the fold is the marker alone; when not even the marker fits, it is as much
+    of the marker as does, and nothing when nothing does. The headline is never
+    the thing that gives way, and the message never leaves here over the cap:
+    a notice is one message (ADR 0021 §5), and a message Telegram refuses is a
+    notice nobody receives.
     """
     if utf16_length(original) <= budget:
         return original
     room = budget - utf16_length(marker) - 1
     if room <= 0:
-        return marker
+        return marker[: prefix_within(marker, max(budget, 0))]
     hard = prefix_within(original, room)
     window = original[:hard]
     boundary = window.rfind("\n")

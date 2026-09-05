@@ -320,6 +320,19 @@ def session(session: Session, *, question_answerable: bool = False) -> SessionBr
     )
 
 
+def brief_state(session: Session) -> BriefState:
+    """Which of the five states this row is in, read the way every brief reads it.
+
+    Public for the one caller outside a brief that needs the user's five words
+    rather than the lane's lifecycle: the Relay pipeline, deciding whether the
+    words it carried answered a question the Session merely *said* — a Codex
+    turn that ended asking, which no `WaitingFor` records (ADR 0013's
+    amendment, `core/relays.py::RelayAuthority`). One reading, so the receipt
+    and the notice cannot disagree about whether there was a question.
+    """
+    return _state(session)
+
+
 def earns_a_brief(session: Session) -> bool:
     """Whether this Session has anything the user is owed a whole brief about.
 
@@ -941,11 +954,7 @@ def _decision_lines(brief: SessionBrief) -> list[str]:
     decision = brief.decision
     if decision is None:
         return []
-    if (
-        brief.state is BriefState.PERMISSION
-        or decision.tool is not None
-        or decision.summary is not None
-    ):
+    if _is_permission(brief):
         asked = decision.tool or "a tool"
         return [f"  permission: {asked}" + (f" — {decision.summary}" if decision.summary else "")]
     lines = [f"  asked: {decision.prompt or 'it asked you something'}"]
@@ -974,11 +983,7 @@ def _asked(brief: SessionBrief) -> tuple[str, tuple[str, ...], str]:
     decision = brief.decision
     if decision is None:
         return "", (), ""
-    if (
-        brief.state is BriefState.PERMISSION
-        or decision.tool is not None
-        or decision.summary is not None
-    ):
+    if _is_permission(brief):
         (line,) = _decision_lines(brief)
         return (
             line.strip(),
@@ -989,6 +994,21 @@ def _asked(brief: SessionBrief) -> tuple[str, tuple[str, ...], str]:
         decision.prompt or "it asked you something",
         tuple(option.text for option in decision.options),
         f"recommends: {decision.recommendation}" if decision.recommendation else "",
+    )
+
+
+def _is_permission(brief: SessionBrief) -> bool:
+    """Whether the decision a brief carries is a permission — the rule `_decision_lines` states.
+
+    The state decides, and the two permission-only fields are the fallback for
+    a permission that reaches here under `UNREADABLE`. One predicate, so the
+    text renderer and the channel notice cannot come to read one stop two ways.
+    """
+    decision = brief.decision
+    return decision is not None and (
+        brief.state is BriefState.PERMISSION
+        or decision.tool is not None
+        or decision.summary is not None
     )
 
 

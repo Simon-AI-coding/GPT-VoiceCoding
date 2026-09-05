@@ -89,6 +89,7 @@ from gpt_voicecoding.seams.companion_channel import (
     RosterRowNotice,
     SessionNotice,
 )
+from gpt_voicecoding.seams.control_plane import Action
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
 
 
@@ -185,17 +186,23 @@ class MenuWord(StrEnum):
 
 #: The words themselves, held here for the reason `NOTICE_WORDING` is: a menu
 #: label is a sentence the user reads and presses, so it is Core's to choose,
-#: and every surface prints the same one. Three of them are also control-plane
-#: verbs, spelled as the shared set spells them so that a label and the typed
-#: command read alike.
+#: and every surface prints the same one.
+#:
+#: **The six that are also control-plane verbs are read off `Action`**, not
+#: typed again here. A label the user presses and the command they could have
+#: typed instead are one word (ADR 0021 §6), and a literal would be a second
+#: spelling free to drift: rename the action and the parser, `USAGE` and every
+#: `/` follow it, while a hand-written label would keep offering a word the
+#: command line no longer accepts. The seam is where the hub may read them
+#: from (`tests/test_architecture.py`). The rest are this module's own words.
 MENU_WORDING: Mapping[MenuWord, str] = {
-    MenuWord.BRIEF: "brief",
-    MenuWord.HISTORY: "history",
+    MenuWord.BRIEF: str(Action.BRIEF),
+    MenuWord.HISTORY: str(Action.HISTORY),
     MenuWord.SEND_MESSAGE: "send message",
-    MenuWord.SWITCH: "switch",
-    MenuWord.VERIFY: "verify",
-    MenuWord.LIVE: "live",
-    MenuWord.CONFIG: "config",
+    MenuWord.SWITCH: str(Action.SWITCH),
+    MenuWord.VERIFY: str(Action.VERIFY),
+    MenuWord.LIVE: str(Action.LIVE),
+    MenuWord.CONFIG: str(Action.CONFIG),
     MenuWord.SWITCHES: "switches — press one to flip it",
     MenuWord.ON: "on",
     MenuWord.OFF: "off",

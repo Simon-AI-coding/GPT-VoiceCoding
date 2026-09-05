@@ -39,6 +39,7 @@ from gpt_voicecoding.seams.call import (
     SpokenBrief,
     SpokenRosterBrief,
 )
+from gpt_voicecoding.seams.control_plane import Action
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
 
@@ -1029,13 +1030,25 @@ class TestTheMenuWording:
     """The words the menu screens print, held once in English (ADR 0021 §6, #264)."""
 
     def test_the_menu_words_are_english_entries_of_one_table(self) -> None:
-        assert briefing.MENU_WORDING[MenuWord.BRIEF] == "brief"
-        assert briefing.MENU_WORDING[MenuWord.HISTORY] == "history"
         assert briefing.MENU_WORDING[MenuWord.SEND_MESSAGE] == "send message"
-        assert briefing.MENU_WORDING[MenuWord.SWITCH] == "switch"
-        assert briefing.MENU_WORDING[MenuWord.VERIFY] == "verify"
-        assert briefing.MENU_WORDING[MenuWord.LIVE] == "live"
+        assert briefing.MENU_WORDING[MenuWord.ON] == "on"
+        assert briefing.MENU_WORDING[MenuWord.OFF] == "off"
+        assert briefing.MENU_WORDING[MenuWord.SWITCHES].startswith("switches")
         assert set(briefing.MENU_WORDING) == set(MenuWord)
+
+    def test_a_label_that_is_also_a_verb_is_read_off_the_shared_set(self) -> None:
+        """Rename the action and the label follows it, rather than drifting (ADR 0021 §6).
+
+        Pinning the same literal here as the table holds would prove only that
+        two hand-written strings match; what has to hold is that the word on
+        the button is the word the command line accepts.
+        """
+        assert briefing.MENU_WORDING[MenuWord.BRIEF] == str(Action.BRIEF)
+        assert briefing.MENU_WORDING[MenuWord.HISTORY] == str(Action.HISTORY)
+        assert briefing.MENU_WORDING[MenuWord.SWITCH] == str(Action.SWITCH)
+        assert briefing.MENU_WORDING[MenuWord.VERIFY] == str(Action.VERIFY)
+        assert briefing.MENU_WORDING[MenuWord.LIVE] == str(Action.LIVE)
+        assert briefing.MENU_WORDING[MenuWord.CONFIG] == str(Action.CONFIG)
 
     def test_a_switch_label_carries_its_state(self) -> None:
         assert briefing.switch_label("duty", True) == "duty: on"

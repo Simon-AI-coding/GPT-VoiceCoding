@@ -389,7 +389,9 @@ class TelegramCompanionChannel:
 
         Consumed on the way out whatever happens next: a callback is answered
         once, so the second reply to the same press — and every reply to a
-        press this process never saw — is an ordinary message.
+        press this process never saw — is an ordinary message. A press that
+        fell past `UNANSWERED_PRESSES_KEPT` is one Telegram has also forgotten
+        by then; nothing could answer it, and its reply goes as a message too.
         """
         if not origin.startswith(CALLBACK_ORIGIN):
             return None
@@ -400,27 +402,38 @@ class TelegramCompanionChannel:
         return callback
 
     async def _toast(self, callback: str, text: str) -> bool:
-        """Show one reply as a toast, saying whether it was shown.
+        """Answer one press, and say whether the words were shown as the toast.
 
-        Not shown, and so sent as a message by the caller, when the words do
-        not fit a toast or Telegram refuses the callback — logged, because a
-        refused toast is the one failure here that the user never sees.
+        **A held press is answered exactly once, whatever the words are.** When
+        they fit a toast, they are the toast. When they do not, the callback is
+        answered with no text — that is what clears the loading indicator the
+        client draws on a pressed button — and the caller sends the words as a
+        message. A refusal either way is logged and nothing more: Telegram
+        treats a refused callback as answered, so the reply still goes as a
+        message and the user is never left with a spinning button.
+
+        Core answering a press with *no* words is not a case here by design:
+        the router fails closed and every inbound is answered
+        (`core/bridge.py::_inbound_text`), and the only text `_reply` skips is
+        empty, which no classification produces.
         """
-        if len(text) > TOAST_LIMIT_CHARACTERS:
-            return False
+        fits = len(text) <= TOAST_LIMIT_CHARACTERS
+        answer: dict[str, object] = {"callback_query_id": callback}
+        if fits:
+            answer["text"] = text
         try:
             await self._ask(
                 "answerCallbackQuery",
-                {"callback_query_id": callback, "text": text},
+                answer,
                 timeout_seconds=self._settings.request_timeout_seconds,
             )
         except TelegramError as refused:
             _log.warning(
-                "the toast answering a press was refused, so the reply goes as a message: %s",
+                "answering a press was refused, so the reply goes as a message: %s",
                 refused.detail,
             )
             return False
-        return True
+        return fits
 
     async def verify(self) -> VerifyResult:
         """Prove reachability positively, or name the layer that stopped it.

@@ -694,8 +694,15 @@ class TestAnsweringAPressAsAToast:
         receipt = asyncio.run(scenario())
 
         assert receipt.message_ids == ("1",)
-        assert api.toasts() == []
+        # The press is still answered — once, with no text — so the button's
+        # loading indicator clears; the words themselves go as a message.
+        assert api.toasts() == [(CALLBACK_ID, "")]
+        assert "text" not in api.method_calls("answerCallbackQuery")[0]
         assert api.sent() == [long]
+        assert [m for m, _ in api.calls if m in ("answerCallbackQuery", "sendMessage")] == [
+            "answerCallbackQuery",
+            "sendMessage",
+        ]
 
     def test_exactly_two_hundred_characters_still_toasts(self) -> None:
         api, sink = FakeTelegram(), Sink()

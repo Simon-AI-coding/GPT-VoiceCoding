@@ -914,13 +914,17 @@ class HarnessCallTransport:
         self._observations.note("call ended", reason=reason, spoke=self._spoke)
 
 
-def harness_call(*, sink: Any = None, settings: dict[str, Any] | None = None) -> Any:
+def harness_call(
+    *, delegated_turn_model: str, sink: Any = None, settings: dict[str, Any] | None = None
+) -> Any:
     """`[adapters] call` — the shipped adapter, with a transport that speaks.
 
     The adapter is the production `RealtimeCallAdapter`: the signalling
     conversation, the Delegated Turn and the classification rules are all the
     ones being accepted. Only the audio path is the harness's, and it is handed
-    over through the parameter the shipped factory already has for it.
+    over through the parameter the shipped factory already has for it. The
+    Call Agent's model is the root's to state and is forwarded untouched (#270),
+    so a walk runs the acting half on the same model the product ships.
 
     **Every utterance is synthesised here**, while the engine is still being
     assembled, and the same frames are reused by every call this engine holds.
@@ -970,4 +974,9 @@ def harness_call(*, sink: Any = None, settings: dict[str, Any] | None = None) ->
     def build() -> CallTransport:
         return HarnessCallTransport(settings=mine, observations=observations, utterances=utterances)
 
-    return realtime_call(sink=sink, settings=theirs, transport_factory=build)
+    return realtime_call(
+        delegated_turn_model=delegated_turn_model,
+        sink=sink,
+        settings=theirs,
+        transport_factory=build,
+    )

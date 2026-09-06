@@ -482,12 +482,21 @@ def _adapters(
         parsed them would be the hub growing adapter-shaped knowledge (ADR 0001).
         A seam with no table is called exactly as it always was, so an adapter
         that takes only the sink needs no change to keep working.
+
+        The Call seam is handed `[delegate] model` the same way, and beside the
+        table rather than inside it (#270). It is the Delegated Turn's model and
+        the Call Agent's both — one value, stated once, in this root's own
+        configuration — so it travels like `progress_capture` does: known before
+        construction, and therefore an argument to it. A second key under
+        `[adapters.settings.call]` would be the same number written twice.
         """
         factory = factory_of(reference)
         settings = config.adapters.settings_for(seam)
         arguments: dict[str, Any] = {"sink": sink}
         if seam.startswith("agent."):
             arguments["progress_capture"] = progress_capture
+        if seam == "call":
+            arguments["delegated_turn_model"] = config.delegated_turn_model
         if settings is not None:
             arguments["settings"] = settings
         try:
@@ -495,7 +504,8 @@ def _adapters(
         except TypeError as error:
             asked = " and its settings table" if settings is not None else ""
             raise EngineAssemblyError(
-                f"{reference} could not be constructed with the event sink{asked}: {error}"
+                f"{reference} could not be constructed with the arguments the {seam} seam "
+                f"is given (the event sink{asked}): {error}"
             ) from None
 
     return Adapters(

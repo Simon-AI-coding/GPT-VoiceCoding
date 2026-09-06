@@ -72,8 +72,8 @@ class ServerOwningAgent(FakeAgent):
     app_server = "the one app-server this engine spawns"
 
 
-def call_that_rides(*, sink: object = None) -> RidingCall:
-    return RidingCall(sink=sink)
+def call_that_rides(*, delegated_turn_model: str, sink: object = None) -> RidingCall:
+    return RidingCall(sink=sink, delegated_turn_model=delegated_turn_model)
 
 
 def agent_that_owns_one(*, progress_capture: object, sink: object = None) -> ServerOwningAgent:
@@ -211,6 +211,22 @@ class TestAssembly:
         # The adapter names itself; the engine never echoes the file back at you.
         assert seams["call"]["loaded"] == "tests.fakes.FakeCall"
         assert {row["outcome"] for row in seams.values()} == {"pass"}
+
+    def test_the_call_seam_is_handed_the_delegated_turns_model(self, home: Path) -> None:
+        """One `[delegate] model`, given to the Call Agent and to every Delegated Turn.
+
+        The Call Agent *is* the live thread's backing model, and a thread
+        started without one falls through to `~/.codex/config.toml` — a file
+        this product neither writes nor reads, and which on 2026-09-07 named a
+        model the running daemon refused seventeen times (#270). The value is
+        known before construction, so it travels as a constructor argument
+        rather than as a second key an operator could let drift.
+        """
+        engine = assembled(home)
+
+        # The same string `[delegate] model` states, and the one the Delegated
+        # Turn is run on: read from the file, not from a default in the adapter.
+        assert engine.adapters.call.delegated_turn_model == "the-model-the-user-chose"
 
     def test_a_factory_that_is_not_there_is_a_named_refusal(self, home: Path) -> None:
         text = CONFIG.replace("fakes:FakeCall", "fakes:NoSuchCall")
@@ -775,8 +791,8 @@ class HangingCall(FakeCall):
         raise AssertionError("unreachable: the wait above never returns")
 
 
-def call_that_hangs(*, sink: object = None) -> HangingCall:
-    return HangingCall(sink=sink)
+def call_that_hangs(*, delegated_turn_model: str, sink: object = None) -> HangingCall:
+    return HangingCall(sink=sink, delegated_turn_model=delegated_turn_model)
 
 
 class TestShutdownWithATurnInFlight:

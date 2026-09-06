@@ -42,6 +42,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.router import Classification
 from gpt_voicecoding.seams.events import Event, EventSink
 
@@ -59,9 +60,13 @@ class DelegatedAnswer:
     `ControlAnswer` for the same reason it has an `ok`: a fact that cannot be
     recovered from prose has to travel beside it.
 
-    An empty `text` with no `thread_gone` is the turn that raised something
-    nobody classified: there is nothing honest to show the user, so nothing is
-    sent (`_reply` returns on empty text) and only the log carries it.
+    **An answer with no words is not an answer** (#269). `_reply` returns on
+    empty text, so a turn that came back with nothing — because it raised
+    something nobody classified, or because a handler produced an empty string
+    — would leave the user who asked a question with silence and no way to tell
+    a lost turn from a slow one. `DelegatedTurns` puts Core's fixed
+    assistant-unavailable hint in its place, whichever way the emptiness
+    arrived, so every turn that is not `thread_gone` reaches the user as words.
     """
 
     text: str = ""
@@ -223,23 +228,43 @@ class DelegatedTurns:
     async def _turn(self, found: Classification, origin: str) -> None:
         """One turn, off the loop, ending in the one event that puts it back on it.
 
-        **A turn that raises something nobody classified is still an ending.**
-        The failures the design names come back as words in a `DelegatedAnswer`
-        (the composition root's `delegate` closure); what reaches here is
-        whatever that closure did not classify — including a wire failure out of
-        the one-shot `thread/start`, which is unguarded today
-        (`adapters/call/realtime/adapter.py::delegate`). There is nothing honest
-        to show for one, so nothing is sent and the log carries it — which is
-        what the awaited turn did too, by letting it reach the dispatch loop's
-        own handler. What is new is only that the thread moves on: a queue that
-        stopped here would leave every reply behind it unanswered, with no way
-        to notice.
+        **A Delegated Turn always answers** (#269). The failures the design
+        names come back as words in a `DelegatedAnswer` (the composition root's
+        `delegate` closure); what reaches here is whatever that closure did not
+        classify, which is a bug in this system rather than a fact about the
+        user's request. The log carries it whole, with the traceback; the user
+        carries one sentence — Core's fixed assistant-unavailable hint, because
+        a question met with silence leaves them nothing to do and no way to
+        tell a slow turn from a lost one. The seams above have their own
+        guards, so this is the last resort and not the usual road: the Call
+        adapter classifies its own start and resume failures
+        (`adapters/call/realtime/adapter.py`).
+
+        The thread moves on either way: a queue that stopped here would leave
+        every reply behind it unanswered, with no way to notice.
+
+        **Cancellation stays cancellation.** A turn a shutdown cancels answers
+        nothing: there is no user waiting on a stopping engine, and the loop
+        that would dispatch the answer is already gone (`aclose`).
         """
         try:
             answer = await self._run(found)
         except asyncio.CancelledError:
             raise
         except Exception:
-            _log.exception("a Delegated Turn raised; nothing is sent and the thread moves on")
-            answer = DelegatedAnswer()
+            _log.exception(
+                "a Delegated Turn raised; the user is told the one fact and the thread moves on"
+            )
+            answer = self._unavailable()
+        if not answer.thread_gone and not answer.text.strip():
+            # The same silence by the other road: a handler that classified its
+            # failure into no words at all. The rule is the user's, not the
+            # exception's, so it is enforced on the answer rather than only on
+            # the raise.
+            _log.warning("a Delegated Turn came back with no words; the user is told the one fact")
+            answer = self._unavailable()
         self._events.emit(DelegatedTurnFinished(found=found, origin=origin, answer=answer))
+
+    def _unavailable(self) -> DelegatedAnswer:
+        """The one sentence a turn with nothing to say is answered with."""
+        return DelegatedAnswer(text=briefing.ASSISTANT_UNAVAILABLE_HINT)

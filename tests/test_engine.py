@@ -527,22 +527,30 @@ class TestTheAssistantConversationIsWiredEndToEnd:
         assert asyncio.run(scenario()) == ASSISTANT_CONVERSATION_GONE_HINT
 
     def test_a_failed_turn_reaches_the_user_as_the_failures_own_words(self, home: Path) -> None:
-        """Otherwise the drain loop logs it and the user is left with silence (ADR 0021 §7)."""
+        """Otherwise the drain loop logs it and the user is left with silence (ADR 0021 §7).
+
+        The whole road a classified failure travels: the Call adapter's own
+        sentence — a refused turn here, a `thread/start` that never produced a
+        thread in `test_realtime_call.py` (#269) — through the root's `delegate`
+        closure, to the user, **once**.
+        """
         engine = assembled(home)
         engine.adapters.call.turn_refusals = [
             DelegatedTurnError("codex refused the delegated turn: thread is busy")
         ]
 
-        async def scenario() -> str:
+        async def scenario() -> list[str]:
             await engine.start()
             try:
                 engine.core.events.emit(InboundText(text="> summarise the diff"))
                 await _until(lambda: bool(engine.adapters.channel.sent))
-                return engine.adapters.channel.sent[-1]
+                return list(engine.adapters.channel.sent)
             finally:
                 await engine.aclose()
 
-        assert "thread is busy" in asyncio.run(scenario())
+        sent = asyncio.run(scenario())
+
+        assert sent == ["codex refused the delegated turn: thread is busy"]
 
 
 class TestSharingTheOneAppServer:

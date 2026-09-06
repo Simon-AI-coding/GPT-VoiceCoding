@@ -4994,8 +4994,13 @@ class TestADelegatedTurnDoesNotHoldTheDispatchLoop:
         assert newest is not None
         assert newest.target == "thread-2"
 
-    def test_a_turn_that_raised_says_nothing_and_lets_the_next_reply_go(self) -> None:
-        """A failure with no words is a bug, not an answer — but it is still an ending."""
+    def test_a_turn_that_raised_is_answered_with_the_fixed_hint(self, caplog) -> None:  # noqa: ANN001
+        """#269: **a Delegated Turn always answers.** The log carries why; the user, one line.
+
+        A failure nobody classified is a bug, and the user asked a question
+        either way — silence is the one answer that leaves them with nothing to
+        do. The queue behind it still moves on.
+        """
 
         class Raising(HeldTurns):
             async def delegate(self, found: Classification) -> DelegatedAnswer:
@@ -5005,6 +5010,7 @@ class TestADelegatedTurnDoesNotHoldTheDispatchLoop:
                     raise RuntimeError("nobody classified this")
                 return DelegatedAnswer(text=f"answering {found.text!r} on {found.thread_id}")
 
+        caplog.set_level("ERROR", logger="gpt_voicecoding.core.turns")
         turns = Raising()
         hub = self.hub(turns)
         opening = self.opened(hub)
@@ -5019,7 +5025,57 @@ class TestADelegatedTurnDoesNotHoldTheDispatchLoop:
         asyncio.run(scenario())
 
         assert [thread for thread, _ in turns.started] == ["thread-1", "thread-1"]
-        assert hub.channel.sent[1:] == ["answering 'two' on thread-1"]
+        assert hub.channel.sent[1:] == [
+            ASSISTANT_UNAVAILABLE_HINT,
+            "answering 'two' on thread-1",
+        ]
+        # The detail the user is not shown is in the log, whole: what the user
+        # carries is one sentence, and what a reader of the log carries is the
+        # traceback that says which bug it was.
+        raised = [one for one in caplog.records if one.exc_info is not None]
+        assert [str(one.exc_info[1]) for one in raised] == ["nobody classified this"]
+
+    def test_a_turn_that_came_back_with_no_words_is_answered_with_the_same_hint(self) -> None:
+        """The other road to silence: classified, and classified into nothing (#269).
+
+        `_reply` returns on empty text, so an answer with no words is a turn the
+        user asked a question of and heard nothing from — the same fact as a
+        turn that raised, and answered the same way.
+        """
+        turns = HeldTurns()
+        turns.answer = DelegatedAnswer()
+        hub = self.hub(turns)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="> summarise the diff"))
+            await _drained(hub)
+            turns.gate.set()
+            await _settled(hub)
+
+        asyncio.run(scenario())
+
+        assert hub.channel.sent == [ASSISTANT_UNAVAILABLE_HINT]
+
+    def test_a_turn_a_shutdown_cancels_answers_nothing(self) -> None:
+        """Cancellation stays cancellation: no user is waiting on a stopping engine."""
+        turns = HeldTurns()
+        hub = self.hub(turns)
+
+        async def scenario() -> None:
+            hub.core.events.emit(InboundText(text="> summarise the diff"))
+            await _drained(hub)
+            assert hub.core.turns.in_flight() == 1
+
+            await hub.core.turns.aclose()
+            # Nothing was raised for a loop to dispatch, and nothing is left
+            # holding the conversation.
+            await hub.core.drain()
+
+        asyncio.run(scenario())
+
+        assert turns.started == [("", "summarise the diff")]
+        assert hub.channel.sent == []
+        assert hub.core.turns.in_flight() == 0
 
     def test_a_hub_with_nothing_wired_refuses_before_it_starts_a_turn(self) -> None:
         """The refusal is still the loop's own, and no task is left holding a queue."""

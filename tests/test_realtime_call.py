@@ -27,6 +27,7 @@ import time
 import types
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from gpt_voicecoding.adapters.call.realtime import (
     DELEGATION_ACK_FILLER,
     INCLUDE_STARTUP_CONTEXT,
     SANDBOX,
+    TURN_NOT_STARTED,
     DelegatedTurnError,
     RealtimeCallAdapter,
     RealtimeCallSettings,
@@ -53,6 +55,7 @@ from gpt_voicecoding.adapters.call.realtime import (
 from gpt_voicecoding.adapters.call.realtime.adapter import _item_text
 from gpt_voicecoding.adapters.codex_app_server.process import AppServerError, attach
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
+from gpt_voicecoding.adapters.codex_app_server.wire import RemoteError
 from gpt_voicecoding.seams.call import (
     CODEX_BYTES_PER_TOKEN,
     CallDropped,
@@ -1862,6 +1865,101 @@ class TestTheDelegatedTurn:
                     )
 
                 assert "over its limit" in str(refusal.value)
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_start_codex_refuses_is_answered_in_the_adapters_own_words(
+        self, socket_path: Path
+    ) -> None:
+        """#269: the one-shot start is guarded, so a `>` is never answered with silence.
+
+        The words are this adapter's own sentence and carry nothing of the
+        refusal: what the user can do about a turn that never got a thread is
+        the same whatever the wire said, and the log is where the reason goes.
+        """
+
+        async def scenario() -> str:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server)
+
+                def refuse(_params: dict) -> dict:
+                    raise FakeRemoteError("no model with that name is configured")
+
+                server.answers("thread/start", refuse)
+                adapter, _ = await riding(server, Sink())
+
+                with pytest.raises(DelegatedTurnError) as refusal:
+                    await adapter.delegate(
+                        "summarise the diff",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                    )
+
+                assert server.calls_to("turn/start") == []
+                await adapter.aclose()
+                return str(refusal.value)
+
+        said = asyncio.run(scenario())
+
+        assert said == TURN_NOT_STARTED
+        assert "no model with that name" not in said
+
+    def test_a_start_that_never_answers_is_the_same_sentence(self, socket_path: Path) -> None:
+        """The other family: past the wire with no answer, rather than refused on it."""
+
+        async def scenario() -> str:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server)
+                slow = asyncio.Event()
+
+                async def dawdle(_params: dict) -> dict:
+                    await slow.wait()
+                    return {"thread": {"id": "delegated-1"}}
+
+                server.answers("thread/start", dawdle)
+                settings = replace(quick(), request_timeout_seconds=0.2)
+                adapter, _ = await riding(server, Sink(), settings=settings)
+
+                with pytest.raises(DelegatedTurnError) as refusal:
+                    await adapter.delegate(
+                        "summarise the diff",
+                        model="gpt-5",
+                        instructions=DELEGATED_RULES,
+                        request_id=rid(),
+                    )
+
+                slow.set()
+                assert server.calls_to("turn/start") == []
+                await adapter.aclose()
+                return str(refusal.value)
+
+        assert asyncio.run(scenario()) == TURN_NOT_STARTED
+
+    def test_a_conversation_that_cannot_be_opened_still_raises_the_wire_failure(
+        self, socket_path: Path
+    ) -> None:
+        """`open_conversation` is the menu path, and Core answers it with its own hint.
+
+        Unchanged by #269: the guard is on the turn's own start, and turning
+        this into a `DelegatedTurnError` would tell the hub a turn had failed
+        where no turn was ever run.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                delegated_script(server)
+
+                def refuse(_params: dict) -> dict:
+                    raise FakeRemoteError("no model with that name is configured")
+
+                server.answers("thread/start", refuse)
+                adapter, _ = await riding(server, Sink())
+
+                with pytest.raises(RemoteError):
+                    await adapter.open_conversation(model="gpt-5", instructions=DELEGATED_RULES)
+
                 await adapter.aclose()
 
         asyncio.run(scenario())

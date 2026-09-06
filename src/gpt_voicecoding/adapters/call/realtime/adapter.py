@@ -165,6 +165,14 @@ CODEX_RESPONSE_ITEM_PREFIX = "[AGENT] "
 #: is noise and a disclosure surface both (ADR 0018, amended after #179).
 INCLUDE_STARTUP_CONTEXT = False
 
+#: What a top-level `>` is answered with when its own thread could never be
+#: started (#269). This adapter's sentence rather than the wire's: a turn that
+#: got no thread ran nothing, so there is nothing in the refusal the user can
+#: act on, and the reason belongs in the log. It is the words of the
+#: `DelegatedTurnError` the start path raises, which the composition root
+#: already turns into the answer the user reads (ADR 0021 §7).
+TURN_NOT_STARTED = "I could not start a turn with the coding model just now"
+
 #: The item type a hand-off from the Voice to the Call Agent arrives as, on
 #: `thread/realtime/itemAdded`. Logged and raised to nobody: the seam's event set
 #: is closed, and a voice hang-up is the Call Agent running `bridgectl live` off
@@ -487,15 +495,34 @@ class RealtimeCallAdapter:
         Assistant Conversation on it (ADR 0021 §7): the turn runs there, and at
         its end the thread is unsubscribed but neither interrupted nor forgotten,
         so the next reply can resume it again.
+
+        **Both paths answer their own failures.** Whatever stops a turn — the
+        start of a fresh thread, the resume of an existing one, the turn itself
+        — leaves here as a `DelegatedTurnError` carrying words for the user, so
+        that no `>` and no reply is ever met with silence (#269).
         """
         if resume:
             return await self._resumed(resume, text, request_id, model)
-        started = await self._request(
-            "thread/start",
-            self._thread_parameters(model=model, developer_instructions=instructions),
-            timeout=self._settings.request_timeout_seconds,
-        )
-        thread_id = _thread_id_in(started)
+        try:
+            started = await self._request(
+                "thread/start",
+                self._thread_parameters(model=model, developer_instructions=instructions),
+                timeout=self._settings.request_timeout_seconds,
+            )
+            thread_id = _thread_id_in(started)
+        except (RemoteError, WireError, AppServerError) as unstarted:
+            # **Guarded like the resume below, and for the same reason** (#269):
+            # a failure escaping here is nobody's to classify — the composition
+            # root turns a `DelegatedTurnError` into the answer and lets the
+            # rest reach the turn task's log — so the user who typed `>` while
+            # the app-server was down read nothing at all. All three ways the
+            # start fails are one fact here: refused, never answered, or
+            # answered without naming a thread. No thread means no turn ran, so
+            # there is nothing in the reason for the user to act on and it goes
+            # to the log. `RemoteError` is a `WireError`, named first only to
+            # say that a refusal is one of the three.
+            _log.warning("a delegated turn's thread could not be started", exc_info=unstarted)
+            raise DelegatedTurnError(TURN_NOT_STARTED) from None
         # What the server says it is actually running, not what was asked for.
         # A caller reading back the model it already named would learn nothing.
         produced = started.get("model")

@@ -253,11 +253,16 @@ class FakeCall:
     def __init__(
         self,
         *,
+        delegated_turn_model: str = "a-model-the-user-chose",
         delegated_text: str = "the delegated answer",
         reachable: bool = True,
         verify_result: VerifyResult | None = None,
         sink: EventSink | None = None,
     ) -> None:
+        #: What the composition root hands every Call adapter (#270): one value
+        #: for the Call Agent and every Delegated Turn. Kept so a test can read
+        #: back that the root passed it; nothing in this fake acts on it.
+        self.delegated_turn_model = delegated_turn_model
         self.delegated_text = delegated_text
         #: False makes every attempt stall at CONNECTING — a call that never
         #: comes up, which is not the same as one that came up and went away.

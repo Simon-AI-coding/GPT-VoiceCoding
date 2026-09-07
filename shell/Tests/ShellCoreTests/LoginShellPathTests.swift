@@ -137,6 +137,38 @@ import Testing
         #expect(LoginShellPath.usable(path) != nil)
     }
 
+    @Test func theShellIsAskedWithNoPathOfOursToPrependTo() throws {
+        // #275, defect 1. zsh's profile prepends to what it inherits, so a child
+        // seeded with this app's own `PATH` answers `<profile> + <the launch>` —
+        // and that trailing half is a property of how the app was started, which
+        // then reached the rendered LaunchAgent plist and made every launch call
+        // the other launch's render stale.
+        //
+        // It counts `PATH` in the child's own **environment** rather than
+        // printing `$PATH`: a shell with none sets itself a compiled-in default
+        // shell variable, so `"$PATH"` answers something either way and only the
+        // environment says who put it there. Absolute paths for `env` and `grep`
+        // because this child, by construction, has nothing to resolve them with.
+        let asking = try fakeShell(
+            #"printf '%s' "$MARK$(/usr/bin/env | /usr/bin/grep -c '^PATH=')$MARK""#)
+        defer { try? FileManager.default.removeItem(at: asking) }
+
+        // This process has one — `swift test` was started from a shell — so a
+        // child with none is this removal and not an empty parent.
+        #expect(ProcessInfo.processInfo.environment["PATH"] != nil)
+        #expect(
+            LoginShellPath.readFromLoginShell(asking.path, LoginShellPath.timeout) == .said("0"))
+    }
+
+    @Test func nothingButThePathIsTakenFromTheChild() {
+        let child = LoginShellPath.childEnvironment(inherited)
+
+        #expect(child["PATH"] == nil)
+        #expect(child["SHELL"] == "/bin/zsh")
+        #expect(child["HOME"] == "/Users/nobody")
+        #expect(child.count == inherited.count - 1)
+    }
+
     @Test func aShellThatIsNotThereIsNotAnError() {
         #expect(LoginShellPath.readFromLoginShell("/no/such/shell", 1.0) == .saidNothing)
     }

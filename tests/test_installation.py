@@ -427,6 +427,7 @@ def test_a_clean_install_lands_both_items(tmp_path: Path, launchd: FakeLaunchd) 
     loaded = read_bootstrapped_render(base / "installation.json")
     assert loaded is not None and loaded.render_sha256 is not None
     assert loaded.login_asid == launchd.login_asid
+    assert loaded.boot_session == launchd.boot_session
 
 
 def test_an_uninstall_takes_both_items_back(tmp_path: Path, launchd: FakeLaunchd) -> None:

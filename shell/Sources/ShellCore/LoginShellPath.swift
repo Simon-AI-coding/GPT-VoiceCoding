@@ -371,6 +371,43 @@ public enum LoginShellPath {
         return trimmed
     }
 
+    /// The environment the login shell is asked in: the one this process has,
+    /// **minus `PATH`** — #275.
+    ///
+    /// zsh's profile *prepends* to whatever `PATH` it inherits, and the reader
+    /// is a child of this app, so seeding the child with our own `PATH` made the
+    /// answer `<profile dirs> + <whatever the app already had>`. That trailing
+    /// half is a property of how the app was launched — a terminal's `PATH` from
+    /// a terminal launch, launchd's four directories from a Finder one — and not
+    /// of the machine. It reached the rendered LaunchAgent plist, where document
+    /// comparison then called each launch's render "a job this build would write
+    /// differently" and rewrote the other launch's (#275, defect 1).
+    ///
+    /// Unsetting it hands the profile the same starting point the OS hands a
+    /// login: `/etc/zprofile` rebuilds the system part through `path_helper`
+    /// from `/etc/paths` and `/etc/paths.d`, and the user's own files prepend on
+    /// top. Nothing is written down and no constant stands in for the
+    /// environment (#38) — this removes an input, it does not supply one.
+    ///
+    /// Everything else the child inherits stays: `HOME`, `SHELL` and the rest are
+    /// what tell a profile whose machine it is on.
+    ///
+    /// **It is this process's environment, not the one `apply(to:)` was handed**,
+    /// and that is the ``Reader`` contract rather than an oversight: a reader is
+    /// given a shell and a budget, so a caller injecting an environment can
+    /// choose the shell (through ``loginShell(environment:)``) and cannot choose
+    /// what the child inherits. #275 ruled the signature unchanged, and every
+    /// caller that injects an environment today injects a fake reader with it,
+    /// so the two never disagree in practice. A caller that wanted them to would
+    /// be asking for the parameter.
+    static func childEnvironment(
+        _ parent: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var built = parent
+        built.removeValue(forKey: "PATH")
+        return built
+    }
+
     /// Run the login shell and take its answer, or nothing at all.
     ///
     /// `-l` is what makes the profile run; without it this reads the same
@@ -379,12 +416,16 @@ public enum LoginShellPath {
     /// the sentinels necessary, since an interactive profile may print. stdin is
     /// `/dev/null` and stderr is discarded, so a profile that prompts cannot
     /// block us and a profile that complains cannot be mistaken for the answer.
+    ///
+    /// The child is given ``childEnvironment``, which is this process's own
+    /// minus `PATH` — see that property for why.
     public static let readFromLoginShell: Reader = { shell, timeout in
         guard FileManager.default.isExecutableFile(atPath: shell) else { return .saidNothing }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
         process.arguments = ["-lic", script]
+        process.environment = childEnvironment()
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

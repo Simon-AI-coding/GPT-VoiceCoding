@@ -29,6 +29,7 @@ deleted a second later.
 
 from __future__ import annotations
 
+import json
 import plistlib
 import re
 from collections.abc import Sequence
@@ -880,6 +881,166 @@ def test_a_loaded_render_record_without_an_asid_fails_closed(
 
     assert standing.state is State.STALE
     assert "which login" in standing.note
+
+
+def test_a_boot_session_that_is_not_a_uuid_makes_the_whole_record_unusable(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """Validated the way the asid beside it is: a field we cannot read is no record.
+
+    Nothing writes this but us, so anything else in it is a file that was edited
+    or truncated, and a half-read record is the one thing worse than none.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    log, record = log_in(tmp_path), record_in(tmp_path)
+    agent.install(directory, found, log, record, launchd.launchd)
+    document = json.loads(record.read_text(encoding="utf-8"))
+    document["codex_launch_agent"]["boot_session"] = "this boot, honestly"
+    record.write_text(json.dumps(document), encoding="utf-8")
+
+    assert read_bootstrapped_render(record) is None
+    assert agent.inspect(directory, found, log, record, launchd.launchd).state is State.STALE
+
+
+def test_a_kernel_that_will_not_say_which_boot_it_is_does_not_blame_launchd(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """Fails closed, and names the half that was actually missing.
+
+    The boot session is read from the kernel by this module; launchd reports the
+    asid and nothing else. A note blaming launchd for it would send a reader to
+    `launchctl print`, where the asid is sitting in plain view.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    log, record = log_in(tmp_path), record_in(tmp_path)
+    agent.install(directory, found, log, record, launchd.launchd)
+    launchd.boot_session = None
+
+    standing = agent.inspect(directory, found, log, record, launchd.launchd)
+
+    assert standing.state is State.STALE
+    assert agent.BOOT_SESSION_NAME in standing.note
+    assert "launchd did not" not in standing.note
+
+
+def test_a_reboot_that_reuses_the_login_asid_is_still_a_new_login(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """#275, defect 2, and the reference machine's own sequence.
+
+    macOS hands the first GUI login of every boot the same audit session id — the
+    machine that filed this had `100024` two days and one reboot apart — so the
+    boot session is the only half of the pair that moves here. What launchd
+    loaded at that login is the file that was on disk, and this record has to
+    say so.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    record = record_in(tmp_path)
+    previous_log = log_in(tmp_path / "previous")
+    current_log = log_in(tmp_path)
+    agent.install(directory, found, previous_log, record, launchd.launchd)
+    agent.install(directory, found, current_log, record, launchd.launchd)
+    asid_before = launchd.login_asid
+
+    launchd.begin_login(agent.plist_path(directory), reboot=True)
+    reconciled = agent.install(directory, found, current_log, record, launchd.launchd)
+    standing = agent.inspect(directory, found, current_log, record, launchd.launchd)
+
+    assert launchd.login_asid == asid_before, "the fake moved the asid, so this proves nothing"
+    assert reconciled.state is State.CURRENT
+    assert standing.state is State.CURRENT
+
+
+def test_a_second_reconcile_in_one_login_leaves_the_record_where_it_is(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """Same asid and same boot session is one login, whatever else changed."""
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    record = record_in(tmp_path)
+    agent.install(directory, found, log_in(tmp_path), record, launchd.launchd)
+    bootstrapped = read_bootstrapped_render(record)
+
+    agent.install(directory, found, log_in(tmp_path / "later"), record, launchd.launchd)
+
+    assert read_bootstrapped_render(record) == bootstrapped
+
+
+def test_a_record_that_names_an_asid_and_no_boot_session_cannot_say_which_login(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """What every record written before #275 looks like, holding a matching SHA.
+
+    Matching is the case that matters: the asid it carries repeats across boots,
+    so the SHA it vouches for may be a previous login's and equal by accident.
+    That is the false `current` #132's read-back exists to prevent, so this
+    reports the render unknown rather than believing the pair it cannot form.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    log, record = log_in(tmp_path), record_in(tmp_path)
+    agent.install(directory, found, log, record, launchd.launchd)
+    loaded = read_bootstrapped_render(record)
+    assert loaded is not None and loaded.render_sha256 is not None
+    write_bootstrapped_render(
+        record,
+        BootstrappedRender(
+            render_sha256=loaded.render_sha256, login_asid=loaded.login_asid, boot_session=None
+        ),
+    )
+
+    standing = agent.inspect(directory, found, log, record, launchd.launchd)
+
+    assert standing.state is State.STALE
+    assert "which login" in standing.note
+
+
+def test_the_next_login_after_an_upgrade_settles_a_record_with_no_boot_session(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """The upgrade path out of the state above, and it takes exactly one login."""
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    log, record = log_in(tmp_path), record_in(tmp_path)
+    agent.install(directory, found, log, record, launchd.launchd)
+    loaded = read_bootstrapped_render(record)
+    assert loaded is not None
+    write_bootstrapped_render(
+        record,
+        BootstrappedRender(
+            render_sha256=loaded.render_sha256, login_asid=loaded.login_asid, boot_session=None
+        ),
+    )
+    upgraded = agent.install(directory, found, log, record, launchd.launchd)
+
+    launchd.begin_login(agent.plist_path(directory))
+    settled = agent.install(directory, found, log, record, launchd.launchd)
+
+    assert upgraded.state is State.STALE, "an unreadable record was believed"
+    assert settled.state is State.CURRENT
+    assert agent.inspect(directory, found, log, record, launchd.launchd).state is State.CURRENT
+
+
+def test_a_plist_that_differs_only_in_the_path_says_so(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """#275, defect 1's other half: a stale note that names what is stale.
+
+    `bridge-install status` from a terminal compares against that terminal's own
+    `PATH` rather than the profile's (ADR 0022: the CLI reads no login shell), so
+    this difference is the one a reporter is most likely to meet — and "would
+    write differently" alone left them nothing to look at.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    log, record = log_in(tmp_path), record_in(tmp_path)
+    agent.install(directory, found, log, record, launchd.launchd)
+    path = agent.plist_path(directory)
+    document = plistlib.loads(path.read_bytes())
+    document["EnvironmentVariables"]["PATH"] += ":/somewhere/a/terminal/added"
+    path.write_bytes(plistlib.dumps(document, sort_keys=True))
+
+    standing = agent.inspect(directory, found, log, record, launchd.launchd)
+
+    assert standing.state is State.STALE
+    assert "EnvironmentVariables.PATH" in standing.note
+    assert "Label" not in standing.note, "it named a key the two agree on"
 
 
 def test_reconcile_keeps_a_foreign_loaded_program_stale(

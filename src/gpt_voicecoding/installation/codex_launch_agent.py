@@ -55,11 +55,23 @@ event and not a timer.
 **The loaded render is this product's own read-back — #132.** `launchctl print`
 exposes the program but not the whole loaded definition, so the same program can
 hide an older resource limit or log path. When this item bootstraps a job it
-records the exact plist SHA and launchd's GUI-login ASID in `installation.json`.
-Status compares that SHA with the file on disk and keeps the program comparison
-as the foreign-origin guard. A changed ASID proves a new login loaded the bytes
-that were on disk before this reconcile; a second reconcile in the same ASID
-proves no reload at all. Missing evidence is an unknown render, never `current`.
+records the exact plist SHA and the login it was loaded in in
+`installation.json`. Status compares that SHA with the file on disk and keeps the
+program comparison as the foreign-origin guard. A changed login proves a new
+login loaded the bytes that were on disk before this reconcile; a second
+reconcile in the same login proves no reload at all. Missing evidence is an
+unknown render, never `current`.
+
+**And a login is a pair, because the ASID alone repeats across reboots — #275.**
+macOS hands the first GUI login of every boot the same audit session id, so a
+record written two days and one reboot earlier compared equal to the running
+login and was trusted as its evidence. The record and the read-back now carry
+the kernel's `kern.bootsessionuuid` beside the ASID, and every "did the login
+change?" compares the pair. A record carrying only an ASID cannot say which login
+it was written in, so it is treated as one that carries none: the render is
+unknown and it reports `stale` until the next login, never taken for a new login
+outright — that is the direction that would report `current` over a job launchd
+does not hold.
 Legacy has no equivalent: `legacy@1d32845:install.sh:174-195` loaded its job and
 never recorded or read back the loaded render, so this behavior is **not ported**.
 
@@ -82,6 +94,8 @@ launched, wrapped, per-Session app-server, and its launch marker is not adapted.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import hashlib
 import os
 import plistlib
@@ -168,12 +182,72 @@ def _run(arguments: Sequence[str]) -> tuple[int, str]:
     return (finished.returncode, (finished.stdout + finished.stderr).strip())
 
 
+#: The kernel's name for the boot this machine is in the middle of. Read rather
+#: than derived, and read through `sysctlbyname` rather than through `/usr/sbin/
+#: sysctl`, so that asking costs no subprocess and `COMMANDS_PER_RUN` — which the
+#: command timeout is divided out of — stays the three launchd commands it names.
+BOOT_SESSION_NAME: Final = "kern.bootsessionuuid"
+
+#: A UUID string and its terminator. `sysctlbyname` is asked for the length it
+#: wants, so this is only the buffer's ceiling, and a kernel that answered
+#: something longer is one this does not pretend to understand.
+BOOT_SESSION_SIZE: Final = 64
+
+
+def _boot_session() -> str | None:
+    """The kernel's boot session UUID, or `None` when it could not be read.
+
+    `None` is a real answer and not an error: everywhere this is compared, an
+    unknown boot session makes the login unknown, and an unknown login is
+    reported rather than guessed at (`_loaded_identity_problem`). Failing closed
+    here costs a `stale` line; failing open would restore exactly the false
+    `current` this field exists to prevent (#275).
+    """
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        # Spelled out rather than left to ctypes' defaults: the third argument is
+        # a `size_t *` that the kernel both reads and writes, and a machine where
+        # an int-width guess and a pointer-width truth differ would corrupt the
+        # stack rather than answer wrong.
+        libc.sysctlbyname.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+        libc.sysctlbyname.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(BOOT_SESSION_SIZE)
+        size = ctypes.c_size_t(BOOT_SESSION_SIZE)
+        answered = libc.sysctlbyname(
+            BOOT_SESSION_NAME.encode("ascii"), buffer, ctypes.byref(size), None, 0
+        )
+    except (OSError, AttributeError, ValueError):
+        return None
+    if answered != 0:
+        return None
+    return buffer.value.decode("ascii", "replace") or None
+
+
 @dataclass(frozen=True, slots=True)
 class HeldJob:
-    """The identity launchd exposes for one loaded job definition."""
+    """The identity launchd exposes for one loaded job definition.
+
+    ``login_asid`` and ``boot_session`` are one fact in two halves — see
+    :attr:`login`, and :class:`BootstrappedRender` for the measurement that
+    split them.
+    """
 
     program: str
     login_asid: int | None
+    boot_session: str | None
+
+    @property
+    def login(self) -> tuple[int, str] | None:
+        """Which login this job is loaded in, or ``None`` when it cannot say."""
+        if self.login_asid is None or self.boot_session is None:
+            return None
+        return (self.login_asid, self.boot_session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,9 +272,16 @@ class Launchd:
     domain: str
     #: ``None`` is the real ``launchctl``, looked up at call time.
     run: Callable[[Sequence[str]], tuple[int, str]] | None = None
+    #: ``None`` is the real kernel, asked at call time. Here rather than at the
+    #: call sites because a loaded job's login is one fact, and a test that could
+    #: move only half of it could not stage a reboot at all.
+    boot_session: Callable[[], str | None] | None = None
 
     def ask(self, arguments: Sequence[str]) -> tuple[int, str]:
         return (self.run or _run)(arguments)
+
+    def ask_boot_session(self) -> str | None:
+        return (self.boot_session or _boot_session)()
 
     def held_job(self) -> HeldJob | None:
         """The identity launchd currently holds for this job, if any.
@@ -213,9 +294,15 @@ class Launchd:
         own file back is the only way a status run can say that out loud.
 
         An empty ``program`` is *loaded, and launchd did not say what it runs*.
-        ``login_asid`` is the GUI login's audit session identifier. macOS changes
-        it at login, not at a kickstart inside the same login, which lets install
-        distinguish a genuine reload opportunity from a second reconcile (#132).
+
+        ``login_asid`` is the GUI login's audit session identifier and
+        ``boot_session`` is the kernel's boot session UUID, and it takes **both**
+        to name the login this job is loaded in (#275). macOS changes the asid at
+        a logout and login, not at a kickstart inside one login, which is what
+        lets install tell a genuine reload opportunity from a second reconcile
+        (#132) — but it hands the first GUI login of every boot the same asid, so
+        across a reboot the asid alone says "same login" about two logins two
+        days apart. The boot session is what tells reboots apart.
         """
         status, said = self.ask([str(LAUNCHCTL), "print", f"{self.domain}/{LABEL}"])
         if status != 0:
@@ -225,6 +312,7 @@ class Launchd:
         return HeldJob(
             program=found_program.group(1) if found_program else "",
             login_asid=int(found_asid.group(1)) if found_asid else None,
+            boot_session=self.ask_boot_session(),
         )
 
     def bootstrap(self, path: Path) -> tuple[HeldJob | None, str]:
@@ -333,6 +421,45 @@ def _unknown_identity_note(path: Path, reason: str) -> str:
     return f"{path} — the job is loaded, and launchd {reason}; loaded render is unknown"
 
 
+def _unknown_boot_session_note(path: Path) -> str:
+    """The other half of an unknown login, and it is **not** launchd's half.
+
+    A login is an ASID and a boot session (#275), and the boot session is read
+    from the kernel by this module rather than reported by launchd. Blaming
+    launchd for it would send a reader to `launchctl print`, where the ASID is
+    sitting in plain view and nothing is wrong.
+    """
+    return (
+        f"{path} — the job is loaded, and this machine did not answer which boot "
+        f"session it is in ({BOOT_SESSION_NAME}); loaded render is unknown"
+    )
+
+
+def _differing_keys(standing: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
+    """Which keys of the job document the two disagree on, dotted one level deep.
+
+    One level and no further, because that is where the answer stops being
+    useful: `EnvironmentVariables.PATH` names a thing the reader can go and look
+    at, and a path into a resource-limit dictionary's only value would not.
+
+    This exists because the note it feeds was `is a job this build would write
+    differently` and nothing else, which is true of a plist whose whole
+    difference is a `PATH` the reporter's own terminal caused (#275) and equally
+    true of one that names a different program. Sorted, so the same disagreement
+    reads the same way twice.
+    """
+    names: list[str] = []
+    for key in sorted(set(standing) | set(wanted)):
+        mine, theirs = standing.get(key), wanted.get(key)
+        if mine == theirs:
+            continue
+        if isinstance(mine, Mapping) and isinstance(theirs, Mapping):
+            names.extend(f"{key}.{inner}" for inner in _differing_keys(mine, theirs))
+        else:
+            names.append(key)
+    return names
+
+
 def _program_in(standing: JobFile | None) -> str | None:
     if standing is None:
         return None
@@ -357,6 +484,8 @@ def _loaded_identity_problem(path: Path, held: HeldJob | None, expected_program:
         return _program_mismatch_note(path, held.program, expected_program)
     if held.login_asid is None:
         return _unknown_identity_note(path, "did not say which login loaded it")
+    if held.boot_session is None:
+        return _unknown_boot_session_note(path)
     return ""
 
 
@@ -392,9 +521,12 @@ def inspect(
         if running is not None:
             return Outcome(NAME, State.STALE, note=_unknown_render_note(path))
         return Outcome(NAME, State.ABSENT, note=f"no login job at {path} — {held}")
-    if standing.document != job(runtime, log_path):
+    wanted = job(runtime, log_path)
+    if standing.document != wanted:
+        differing = _differing_keys(standing.document, wanted)
+        named = f": {', '.join(differing)}" if differing else ""
         return Outcome(
-            NAME, State.STALE, note=f"{path} is a job this build would write differently"
+            NAME, State.STALE, note=f"{path} is a job this build would write differently{named}"
         )
     if running is None:
         return Outcome(NAME, State.STALE, note=f"{path} is current, and {held}")
@@ -404,7 +536,7 @@ def inspect(
     loaded = read_bootstrapped_render(record_path)
     if loaded is None or loaded.render_sha256 is None:
         return Outcome(NAME, State.STALE, note=_unknown_render_note(path))
-    if loaded.login_asid is None:
+    if loaded.login is None:
         return Outcome(
             NAME,
             State.STALE,
@@ -441,20 +573,25 @@ def install(
 
     if held is not None:
         # A missing record proves nothing about the job already in launchd. Keep
-        # that uncertainty for this login. If the ASID changed, launchd loaded
+        # that uncertainty for this login. If the login changed, launchd loaded
         # whatever bytes were on disk *before this reconcile writes*, so those
         # bytes become the authority for the new login (#132 advisor ruling).
-        if loaded is None:
-            loaded = BootstrappedRender(render_sha256=None, login_asid=held.login_asid)
+        if loaded is None or loaded.login is None:
+            # A record that cannot name the login it was written in proves
+            # nothing about the job already in launchd — whether because there is
+            # none, or because it predates #275 and carries only an asid, which
+            # repeats across boots. Either way the render is unknown for this
+            # login, and it is *not* taken for a new one: that is the false
+            # `current` direction.
+            loaded = BootstrappedRender(
+                render_sha256=None,
+                login_asid=held.login_asid,
+                boot_session=held.boot_session,
+            )
             failure = write_bootstrapped_render(record_path, loaded)
             if failure:
                 return Outcome(NAME, State.STALE, ok=False, note=failure)
-        elif loaded.login_asid is None:
-            loaded = BootstrappedRender(render_sha256=None, login_asid=held.login_asid)
-            failure = write_bootstrapped_render(record_path, loaded)
-            if failure:
-                return Outcome(NAME, State.STALE, ok=False, note=failure)
-        elif held.login_asid is not None and held.login_asid != loaded.login_asid:
+        elif held.login is not None and held.login != loaded.login:
             loaded = BootstrappedRender(
                 render_sha256=(
                     standing.sha256
@@ -464,6 +601,7 @@ def install(
                     else None
                 ),
                 login_asid=held.login_asid,
+                boot_session=held.boot_session,
             )
             failure = write_bootstrapped_render(record_path, loaded)
             if failure:
@@ -522,7 +660,7 @@ def install(
             )
         if loaded is None or loaded.render_sha256 is None:
             return Outcome(NAME, State.STALE, note=_unknown_render_note(path))
-        if loaded.login_asid is None:
+        if loaded.login is None:
             return Outcome(
                 NAME,
                 State.STALE,
@@ -536,12 +674,12 @@ def install(
     if refusal:
         return Outcome(NAME, State.STALE, changed=rewritten, ok=False, note=refusal)
     identity_problem = _loaded_identity_problem(path, bootstrapped, str(runtime.executable))
-    bootstrapped_asid = bootstrapped.login_asid if bootstrapped is not None else None
     loaded = BootstrappedRender(
         render_sha256=(wanted_sha256 if rewritten or standing is None else standing.sha256)
         if not identity_problem
         else None,
-        login_asid=bootstrapped_asid,
+        login_asid=bootstrapped.login_asid if bootstrapped is not None else None,
+        boot_session=bootstrapped.boot_session if bootstrapped is not None else None,
     )
     failure = write_bootstrapped_render(record_path, loaded)
     if failure:

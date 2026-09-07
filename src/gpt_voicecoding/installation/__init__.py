@@ -158,6 +158,7 @@ WANTED_FIELD: Final = "wanted"
 CODEX_LAUNCH_AGENT_FIELD: Final = "codex_launch_agent"
 RENDER_SHA256_FIELD: Final = "render_sha256"
 LOGIN_ASID_FIELD: Final = "login_asid"
+BOOT_SESSION_FIELD: Final = "boot_session"
 
 
 def _read_record(path: Path) -> dict[str, Any]:
@@ -201,13 +202,35 @@ class BootstrappedRender:
     """The Codex job definition known to be loaded in one GUI login.
 
     ``render_sha256`` is ``None`` when a loaded job exists but this product has
-    no evidence of which render it holds. ``login_asid`` is launchd's audit
-    session identifier: macOS creates a new one for each GUI login, so a change
-    proves that launchd had another opportunity to load the plist from disk.
+    no evidence of which render it holds.
+
+    **A login is a pair, and one half of it is not enough — #275.**
+    ``login_asid`` is launchd's audit session identifier, which changes at a
+    logout and login *within one boot* and **repeats across boots**: measured on
+    the reference machine, the first GUI login of 2026-09-05 and the first after
+    a reboot on 2026-09-07 were both `100024`. So the asid alone cannot answer
+    the only question this record exists to answer — "were you written during the
+    login session running now?" — and a record two days and one reboot old was
+    trusted as this login's evidence. ``boot_session`` is the kernel's
+    ``kern.bootsessionuuid``, which is new for every boot; the two together are
+    :attr:`login`, and only that pair is compared.
+
+    A record written before #275 carries an asid and no boot session, so its
+    :attr:`login` is ``None`` — the same "this cannot say which login" state a
+    record with no asid is already in, which reports ``stale`` until the next
+    login rather than being taken for a new one.
     """
 
     render_sha256: str | None
     login_asid: int | None
+    boot_session: str | None = None
+
+    @property
+    def login(self) -> tuple[int, str] | None:
+        """Which login this was written in, or ``None`` when it cannot say."""
+        if self.login_asid is None or self.boot_session is None:
+            return None
+        return (self.login_asid, self.boot_session)
 
 
 def read_intent(base_dir: Path | None = None) -> Intent:
@@ -233,6 +256,7 @@ def read_bootstrapped_render(path: Path) -> BootstrappedRender | None:
         return None
     render_sha256 = candidate.get(RENDER_SHA256_FIELD)
     login_asid = candidate.get(LOGIN_ASID_FIELD)
+    boot_session = candidate.get(BOOT_SESSION_FIELD)
     if render_sha256 is not None and (
         not isinstance(render_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", render_sha256) is None
     ):
@@ -241,7 +265,14 @@ def read_bootstrapped_render(path: Path) -> BootstrappedRender | None:
         not isinstance(login_asid, int) or isinstance(login_asid, bool) or login_asid < 0
     ):
         return None
-    return BootstrappedRender(render_sha256=render_sha256, login_asid=login_asid)
+    if boot_session is not None and (
+        not isinstance(boot_session, str)
+        or re.fullmatch(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", boot_session) is None
+    ):
+        return None
+    return BootstrappedRender(
+        render_sha256=render_sha256, login_asid=login_asid, boot_session=boot_session
+    )
 
 
 def write_bootstrapped_render(path: Path, loaded: BootstrappedRender) -> str:
@@ -250,5 +281,6 @@ def write_bootstrapped_render(path: Path, loaded: BootstrappedRender) -> str:
     document[CODEX_LAUNCH_AGENT_FIELD] = {
         RENDER_SHA256_FIELD: loaded.render_sha256,
         LOGIN_ASID_FIELD: loaded.login_asid,
+        BOOT_SESSION_FIELD: loaded.boot_session,
     }
     return _write_record(path, document)

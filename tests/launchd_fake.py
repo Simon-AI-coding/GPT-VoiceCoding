@@ -51,14 +51,30 @@ class FakeLaunchd:
         #: A GUI login's audit session identifier. A kickstart leaves it alone;
         #: a new login changes it, which is #132's reload evidence.
         self.login_asid = 100_016
+        #: The kernel's boot session UUID, which is the other half of #275's
+        #: login pair. Separate from the asid, and moved separately, because the
+        #: defect is a real machine where the asid repeated and only this
+        #: changed: a fake that moved them together could not stage it.
+        self.boot_session: str | None = "8B0F0000-1111-4222-8333-000000000001"
+        #: The next one `begin_login(reboot=True)` will hand out.
+        self.next_boot = 2
 
     @property
     def held(self) -> bool:
         return self.program is not None
 
-    def begin_login(self, path: Path) -> None:
-        """Start a new fake GUI login and load the plist then on disk."""
-        self.login_asid += 1
+    def begin_login(self, path: Path, *, reboot: bool = False) -> None:
+        """Start a new fake GUI login and load the plist then on disk.
+
+        `reboot=True` is the login macOS gives the *same* asid as the last boot's
+        first one — measured, and #275's defect — so it moves the boot session
+        and leaves the asid where it is.
+        """
+        if reboot:
+            self.boot_session = f"8B0F0000-1111-4222-8333-{self.next_boot:012d}"
+            self.next_boot += 1
+        else:
+            self.login_asid += 1
         if not path.exists():
             self.program = None
             return
@@ -85,7 +101,9 @@ class FakeLaunchd:
 
     @property
     def launchd(self) -> codex_launch_agent.Launchd:
-        return codex_launch_agent.Launchd(domain=DOMAIN, run=self)
+        return codex_launch_agent.Launchd(
+            domain=DOMAIN, run=self, boot_session=lambda: self.boot_session
+        )
 
     @property
     def verbs(self) -> list[str]:

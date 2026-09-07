@@ -687,6 +687,23 @@ def codex_ended_asking(harness: Harness, target: SessionTarget = CODEX) -> None:
     )
 
 
+def claude_finished(harness: Harness) -> None:
+    """A stopped Claude turn whose words confirm it asked nothing (#274)."""
+    harness.sessions.observed_one(
+        SessionInspection(
+            target=CLAUDE,
+            workspace=Path("/tmp/workspace"),
+            state=SessionState.IDLE,
+            progress=ProgressObservation.readable(
+                has_history=True,
+                read_at=datetime(2026, 9, 6, tzinfo=UTC),
+                recent=(ProgressEntry(ordinal=0, role=ProgressRole.ASSISTANT, text="Done."),),
+            ),
+        ),
+        now=harness.now,
+    )
+
+
 class TestWhatTheRouteMadeOfTheWords:
     """The fourth fact on a receipt: the user's own answer, or words — on a question or not.
 
@@ -718,8 +735,9 @@ class TestWhatTheRouteMadeOfTheWords:
         assert outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION
 
     def test_words_into_an_idle_session_that_asked_nothing_are_words(self) -> None:
-        """A Claude turn that ended without a hook asked nothing (`briefing.FINISHED`)."""
+        """A Claude turn whose last message is a statement is FINISHED."""
         harness = Harness(window=ReplyWindow.OPEN, targets=(CLAUDE,))
+        claude_finished(harness)
 
         outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "carry on"))
 
@@ -767,6 +785,7 @@ class TestTheReceiptSentence:
     def test_an_instruction_to_a_session_that_asked_nothing_gets_no_clause(self) -> None:
         """No question, no answer to mistake for the user's own: the clause would mislead."""
         harness = Harness(window=ReplyWindow.OPEN, targets=(CLAUDE,))
+        claude_finished(harness)
 
         sentence = receipt_sentence(asyncio.run(harness.pipeline.relay(CLAUDE, "carry on")))
 

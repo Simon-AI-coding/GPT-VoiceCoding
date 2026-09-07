@@ -65,7 +65,6 @@ from gpt_voicecoding.seams.call import (
     CallState,
     Cue,
     Dial,
-    DialReason,
     SpokenBrief,
     SpokenRosterBrief,
     UserSpeaking,
@@ -73,7 +72,7 @@ from gpt_voicecoding.seams.call import (
     VoiceSpeech,
 )
 from gpt_voicecoding.seams.delivery import Delivery
-from gpt_voicecoding.seams.identity import RequestId
+from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyOutcome
 from realtime_fake import (
     ANSWER_SDP,
@@ -103,7 +102,7 @@ def dial(*hand_over: object) -> Dial:
 def brief(newest: str) -> SpokenBrief:
     """One Session Brief in Briefing's own words, as the seam carries it."""
     return SpokenBrief(
-        name="voicecoding · the dial",
+        name=SessionName("voicecoding", "the dial"),
         agent="codex",
         state="waiting for your decision",
         newest=newest,
@@ -117,7 +116,6 @@ def brief(newest: str) -> SpokenBrief:
 #: carriers, not assembled text: the two budget invariants below run each of
 #: these through `_item_text` and measure the result against what it was charged.
 HANDOVER_ITEM_EXAMPLES = (
-    DialReason(text="dialled because Sessions need the user"),
     SpokenRosterBrief(
         counts="the others: 2 running, 1 finished",
         rows=("build — codex:abc — running", "docs — claude:def:12 — finished"),
@@ -306,7 +304,6 @@ class TestBringingACallUp:
 
                 await adapter.ensure_call(
                     dial(
-                        DialReason(text="dialled because Sessions need you"),
                         SpokenRosterBrief(
                             counts="the others: 1 running",
                             rows=("build — codex:abc — running",),
@@ -322,15 +319,13 @@ class TestBringingACallUp:
                 assert [item["role"] for item in start["initialItems"]] == [
                     "developer",
                     "developer",
-                    "developer",
                 ]
-                assert start["initialItems"][0]["text"] == "dialled because Sessions need you"
-                assert start["initialItems"][1]["text"] == (
+                assert start["initialItems"][0]["text"] == (
                     "focus: voicecoding · the dial — codex:def — finished\n"
                     "the others: 1 running\n"
                     "  build — codex:abc — running"
                 )
-                assert start["initialItems"][2]["text"].endswith("  last activity: not read")
+                assert start["initialItems"][1]["text"].endswith("  last activity: not read")
                 await adapter.aclose()
 
         asyncio.run(scenario())
@@ -415,12 +410,10 @@ class TestBringingACallUp:
                 realtime_script(server, thread_id=THREAD)
                 adapter, _ = await riding(server, Sink())
 
-                await adapter.ensure_call(dial(DialReason(text="The user opened this call.")))
+                await adapter.ensure_call(dial())
 
                 start = server.calls_to("thread/realtime/start")[0]
-                assert start["initialItems"] == [
-                    {"role": "developer", "text": "The user opened this call."}
-                ]
+                assert start.get("initialItems", []) == []
                 await adapter.aclose()
 
         asyncio.run(scenario())
@@ -736,6 +729,29 @@ class TestHangingUpMidHandshake:
 
 
 class TestSpeaking:
+    def test_the_opening_is_one_append_with_the_focus_before_the_roster(self, socket_path):
+        async def scenario():
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+                try:
+                    result = await adapter.speak(
+                        (brief("Ready."), SpokenRosterBrief(counts="the others: 1 finished")),
+                        request_id=rid(),
+                    )
+                    assert result.is_delivered
+                    (append,) = server.calls_to("thread/realtime/appendSpeech")
+                    assert append["text"].startswith(
+                        "voicecoding · the dial — codex — waiting for your decision\n"
+                        "  project: voicecoding\n  task: the dial\n"
+                    )
+                    assert append["text"].endswith("\n\nthe others: 1 finished")
+                finally:
+                    await adapter.aclose()
+
+        asyncio.run(scenario())
+
     def test_speaking_into_a_live_call_is_delivered(self, socket_path: Path) -> None:
         """The brief goes out assembled, and every word in it is Briefing's (#194).
 
@@ -751,7 +767,7 @@ class TestSpeaking:
                 adapter, _ = await riding(server, Sink())
                 await adapter.ensure_call(dial())
 
-                receipt = await adapter.speak(brief("that session stopped"), request_id=rid())
+                receipt = await adapter.speak((brief("that session stopped"),), request_id=rid())
 
                 assert receipt.outcome is Delivery.DELIVERED
                 assert server.calls_to("thread/realtime/appendSpeech") == [
@@ -759,6 +775,8 @@ class TestSpeaking:
                         "threadId": THREAD,
                         "text": (
                             "voicecoding · the dial — codex — waiting for your decision\n"
+                            "  project: voicecoding\n"
+                            "  task: the dial\n"
                             "  newest: that session stopped\n"
                             "  asked: ship it?\n"
                             "  option: yes\n"
@@ -778,7 +796,7 @@ class TestSpeaking:
                 realtime_script(server, thread_id=THREAD)
                 adapter, _ = await riding(server, Sink())
 
-                receipt = await adapter.speak(brief("anyone there"), request_id=rid())
+                receipt = await adapter.speak((brief("anyone there"),), request_id=rid())
 
                 assert receipt.outcome is Delivery.FAILED
                 assert "no call is up" in receipt.reason
@@ -798,7 +816,7 @@ class TestSpeaking:
                     raise FakeRemoteError("no realtime session on that thread")
 
                 server.answers("thread/realtime/appendSpeech", refuse)
-                receipt = await adapter.speak(brief("hello"), request_id=rid())
+                receipt = await adapter.speak((brief("hello"),), request_id=rid())
 
                 assert receipt.outcome is Delivery.FAILED
                 assert "no realtime session on that thread" in receipt.reason
@@ -825,7 +843,7 @@ class TestSpeaking:
                     return {}
 
                 server.answers("thread/realtime/appendSpeech", go_quiet_then_accept)
-                receipt = await adapter.speak(brief("you are needed"), request_id=rid())
+                receipt = await adapter.speak((brief("you are needed"),), request_id=rid())
 
                 assert receipt.outcome is Delivery.UNKNOWN
                 assert "already gone" in receipt.reason
@@ -847,7 +865,7 @@ class TestSpeaking:
                     return {}
 
                 server.answers("thread/realtime/appendSpeech", die)
-                receipt = await adapter.speak(brief("you are needed"), request_id=rid())
+                receipt = await adapter.speak((brief("you are needed"),), request_id=rid())
 
                 assert receipt.outcome is Delivery.UNKNOWN
                 await adapter.aclose()
@@ -931,7 +949,7 @@ class TestHowACallStops:
 
                 audio.lose("the peer connection failed")
                 await asyncio.sleep(0.05)
-                receipt = await adapter.speak(brief("you are needed"), request_id=rid())
+                receipt = await adapter.speak((brief("you are needed"),), request_id=rid())
 
                 assert len(sink.of(CallDropped)) == 1
                 assert receipt.outcome is Delivery.FAILED

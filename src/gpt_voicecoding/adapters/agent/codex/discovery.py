@@ -53,6 +53,7 @@ from gpt_voicecoding.seams.agent import (
     ProgressObservation,
     SessionInspection,
 )
+from gpt_voicecoding.seams.identity import AgentKind
 
 _log = logging.getLogger(__name__)
 
@@ -71,15 +72,6 @@ READ_METHOD: Final = "thread/read"
 #: name is kept — the behaviour before #113, not a worse one, and the acceptance
 #: reads the Session Name aloud where a person would notice.
 PROVISIONAL_TITLE_CHARACTERS: Final = 36
-
-#: How much of a thread id stands in for a name the daemon does not have. Eight
-#: characters of a UUID, which is what `codex` itself shows and short enough to
-#: say out loud — the fallback task of every unnamed thread (#78). It is
-#: composed here, from a fact this lane already holds: nothing is asked of the
-#: Session, and the route that used to ask one (`legacy@1d32845:bridge/hook.py:
-#: 215-253`, `bridge/daemon.py:1504-1544`) was *dropped* from the #67 port table
-#: on 2026-08-25.
-SHORT_THREAD_ID_CHARACTERS: Final = 8
 
 #: What every degraded reading ends with: where the rows actually came from.
 #: The *reason* is a separate sentence, because there are two of them and they
@@ -634,21 +626,13 @@ async def _named(
     """
     if not row.child.is_main:
         return row
-    chosen = task or _short_thread_id(row.target.session_id)
+    chosen = _naming.task_name(AgentKind.CODEX, name=task, thread_id=row.target.session_id)
     if chosen is None:
         return row
     project = await projects.of(row.workspace)
     if project is None:
         return row
     return replace(row, name=_naming.compose(project, chosen))
-
-
-def _short_thread_id(thread_id: str | None) -> str | None:
-    """The head of a thread id, as a name for a thread nobody named."""
-    if thread_id is None:
-        return None
-    short = thread_id.strip()[:SHORT_THREAD_ID_CHARACTERS]
-    return short or None
 
 
 def _from_processes(

@@ -106,7 +106,6 @@ from gpt_voicecoding.seams.call import (
     DelegatedReply,
     DelegatedTurnError,
     Dial,
-    DialReason,
     HandoverItem,
     SpokenBrief,
     SpokenRosterBrief,
@@ -117,7 +116,7 @@ from gpt_voicecoding.seams.call import (
 )
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.events import EventSink
-from gpt_voicecoding.seams.identity import RequestId
+from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
 
 _log = logging.getLogger(__name__)
@@ -467,7 +466,9 @@ class RealtimeCallAdapter:
             return CallSnapshot(state=CallState.CONNECTING)
         return self.snapshot()
 
-    async def speak(self, brief: SpokenBrief, *, request_id: RequestId) -> DeliveryReceipt:
+    async def speak(
+        self, brief: tuple[HandoverItem, ...], *, request_id: RequestId
+    ) -> DeliveryReceipt:
         """Hand the call one Session Brief, graded on this adapter's own audio path.
 
         The brief is assembled into the one text the append path carries. Every
@@ -481,7 +482,10 @@ class RealtimeCallAdapter:
         try:
             await self._request(
                 "thread/realtime/appendSpeech",
-                {"threadId": live.thread_id, "text": _brief_text(brief)},
+                {
+                    "threadId": live.thread_id,
+                    "text": "\n\n".join(_item_text(item) for item in brief),
+                },
                 timeout=self._settings.request_timeout_seconds,
             )
         except RemoteError as refused:
@@ -1408,8 +1412,6 @@ def _wire_item(item: HandoverItem) -> Message:
 
 def _item_text(item: HandoverItem) -> str:
     match item:
-        case DialReason():
-            return item.text
         case SpokenRosterBrief():
             return "\n".join(_roster_text(item))
         case SpokenBrief():
@@ -1425,7 +1427,10 @@ def _roster_text(summary: SpokenRosterBrief) -> list[str]:
 
 def _brief_text(brief: SpokenBrief) -> str:
     """One Session Brief as one block of text, in the order its fields are named."""
-    lines = [f"{brief.name} — {brief.agent} — {brief.state}", f"  newest: {brief.newest}"]
+    lines = [f"{brief.name} — {brief.agent} — {brief.state}"]
+    if isinstance(brief.name, SessionName):
+        lines.extend((f"  project: {brief.name.project}", f"  task: {brief.name.task}"))
+    lines.append(f"  newest: {brief.newest}")
     lines.extend(f"  {line}" for line in brief.decision)
     lines.append(f"  answer: {brief.answerable_here}")
     lines.append(f"  last activity: {brief.last_activity_at}")

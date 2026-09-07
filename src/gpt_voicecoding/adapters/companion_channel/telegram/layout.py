@@ -218,7 +218,9 @@ def _roster(notice: RosterNotice, *, limit: int) -> tuple[LaidOut, int]:
     """
     rows = [
         f"{_position(index, notice.options)}"
-        f"{STATE_LIGHT[row.state]} {row.name}{SEPARATOR}{row.agent}{SEPARATOR}{row.state_word}"
+        f"{STATE_LIGHT[row.state]} "
+        f"{notice.options[index - 1] if notice.options else row.name}"
+        f"{SEPARATOR}{row.agent}{SEPARATOR}{row.state_word}"
         for index, row in enumerate(notice.rows, 1)
     ]
     while rows and utf16_length("\n".join([*rows, notice.counts])) > limit:

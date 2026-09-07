@@ -56,7 +56,7 @@ class TestTheRosterScreen:
 
         assert isinstance(notice, RosterNotice)
         assert notice.options == ("GPT-VoiceCoding · port the log",)
-        assert [row.name for row in notice.rows] == ["GPT-VoiceCoding · port the log"]
+        assert [row.name for row in notice.rows] == [SessionName("GPT-VoiceCoding", "port the log")]
 
     def test_two_sessions_sharing_a_name_are_told_apart_by_address(self) -> None:
         """Resolved by position either way; the suffix is for the user's eyes."""
@@ -74,7 +74,11 @@ class TestTheRosterScreen:
         # The row carries it too, not only the label (#264 review): the label
         # is what a button cuts, and it cuts the end — where the address is.
         assert isinstance(screen.notice, RosterNotice)
-        assert tuple(row.name for row in screen.notice.rows) == screen.options
+        assert [row.name for row in screen.notice.rows] == [
+            SessionName("GPT-VoiceCoding", "port the log"),
+            SessionName("GPT-VoiceCoding", "port the log"),
+            SessionName("GPT-VoiceCoding", "x"),
+        ]
 
     def test_with_nothing_live_it_is_text_and_the_hint_and_no_anchor(self) -> None:
         brief = briefing.roster([], None)

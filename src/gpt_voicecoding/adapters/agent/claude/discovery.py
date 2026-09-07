@@ -200,7 +200,7 @@ async def _named(
     The project half is the workspace's, resolved here because this is the lane
     that knows the workspace. A row with neither half stays unnamed.
     """
-    task = _name(row)
+    task = _naming.task_name(AgentKind.CLAUDE, name=_name(row))
     if task is None:
         return inspection
     project = await projects.of(inspection.workspace)

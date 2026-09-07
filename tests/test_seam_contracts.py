@@ -56,8 +56,8 @@ from gpt_voicecoding.seams.call import (
     CallState,
     Cue,
     Dial,
-    DialReason,
     SpokenBrief,
+    SpokenRosterBrief,
     UserSpeaking,
     UserSpeech,
     VoiceSpeech,
@@ -324,7 +324,7 @@ class TestTheCallContract:
 
     def test_speaking_with_no_call_up_fails_closed(self) -> None:
         call = FakeCall()
-        receipt = asyncio.run(call.speak(_brief(), request_id=new_request_id()))
+        receipt = asyncio.run(call.speak((_brief(),), request_id=new_request_id()))
         assert receipt.is_delivered is False
 
     def test_ending_a_call_is_idempotent(self) -> None:
@@ -502,7 +502,7 @@ class TestTheDial:
                 voice="speak plainly",
                 agent=CALL_AGENT_INSTRUCTIONS,
                 hand_over=tuple(
-                    DialReason(text=f"item {n}") for n in range(MAX_HANDOVER_ITEMS + 1)
+                    SpokenRosterBrief(counts=f"item {n}") for n in range(MAX_HANDOVER_ITEMS + 1)
                 ),
             )
 
@@ -513,13 +513,13 @@ class TestTheDial:
         twenty-five once `WIRE_LINE_OVERHEAD_BYTES` is charged on it, and an
         off-by-one in the comparison would slip through that.
         """
-        text = "x" * (HANDOVER_BUDGET_BYTES - WIRE_LINE_OVERHEAD_BYTES + 1)
+        text = "x" * (HANDOVER_BUDGET_BYTES - 2 * WIRE_LINE_OVERHEAD_BYTES + 1)
 
         with pytest.raises(ValueError):
             Dial(
                 voice="speak plainly",
                 agent=CALL_AGENT_INSTRUCTIONS,
-                hand_over=(DialReason(text=text),),
+                hand_over=(SpokenRosterBrief(counts=text),),
             )
 
     def test_the_budget_is_the_wires_own_ceiling_converted_by_codexs_own_estimate(
@@ -537,11 +537,11 @@ class TestTheDial:
 
     def test_a_hand_over_of_exactly_the_budget_is_accepted_here(self) -> None:
         """The ceiling is inclusive, at the new figure as at the old one."""
-        text = "x" * (HANDOVER_BUDGET_BYTES - WIRE_LINE_OVERHEAD_BYTES)
+        text = "x" * (HANDOVER_BUDGET_BYTES - 2 * WIRE_LINE_OVERHEAD_BYTES)
         dial = Dial(
             voice="speak plainly",
             agent=CALL_AGENT_INSTRUCTIONS,
-            hand_over=(DialReason(text=text),),
+            hand_over=(SpokenRosterBrief(counts=text),),
         )
 
         assert dial.hand_over_size_in_bytes == HANDOVER_BUDGET_BYTES
@@ -556,7 +556,7 @@ class TestTheDial:
         dial = Dial(
             voice="speak plainly",
             agent=CALL_AGENT_INSTRUCTIONS,
-            hand_over=(DialReason(text="简" * 10_000),),
+            hand_over=(SpokenRosterBrief(counts="简" * 10_000),),
         )
 
         assert dial.hand_over_size_in_bytes > 8192
@@ -567,7 +567,7 @@ class TestTheDial:
         dial = Dial(
             voice="speak plainly",
             agent=CALL_AGENT_INSTRUCTIONS,
-            hand_over=(DialReason(text="opened by the user"),),
+            hand_over=(SpokenRosterBrief(counts="opened by the user"),),
         )
 
         asyncio.run(call.ensure_call(dial))
@@ -579,6 +579,6 @@ class TestTheDial:
         brief = _brief()
         asyncio.run(call.ensure_call(_dial()))
 
-        asyncio.run(call.speak(brief, request_id=new_request_id()))
+        asyncio.run(call.speak((brief,), request_id=new_request_id()))
 
         assert call.spoken == [brief]

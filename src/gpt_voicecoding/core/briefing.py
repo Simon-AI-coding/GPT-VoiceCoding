@@ -8,13 +8,13 @@ I/O, no clock, no lane. Eight functions and nothing else —
     briefing.omitting_newest(brief)   -> SessionBrief
     briefing.text(brief)              -> str
     briefing.spoken(brief)            -> SpokenBrief
-    briefing.handover(sessions, ...)  -> tuple[HandoverItem, ...]
+    briefing.for_call(sessions, ...)  -> tuple[HandoverItem, ...]
     briefing.notice(brief)            -> SessionNotice
     briefing.roster_notice(brief)     -> RosterNotice
 
-`spoken` and `handover` are the Live Call's two: the first hands one brief across
+`spoken` and `for_call` are the Live Call's two: the first hands one brief across
 the Call seam as the seam's own carrier (no Core type crosses a seam, ADR 0001),
-the second builds everything a system-dialled call opens holding. `notice` and
+the second selects the dial-time background, opening or mid-call answer. `notice` and
 `roster_notice` are the Companion Channel's pair, on the same precedent (ADR
 0021 §5): the seam's own carrier, filled from the tables below, laid out by the
 adapter. All four are still only words about Sessions — the carriers are filled
@@ -63,6 +63,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
+from gpt_voicecoding.core.call_keeper import Occasion
 from gpt_voicecoding.core.sessions import Session, UndeliveredRelay, spoken_name
 from gpt_voicecoding.seams.agent import (
     ProgressAvailability,
@@ -78,7 +79,6 @@ from gpt_voicecoding.seams.agent import (
 from gpt_voicecoding.seams.call import (
     HANDOVER_BUDGET_BYTES,
     MAX_HANDOVER_ITEMS,
-    DialReason,
     HandoverItem,
     SpokenBrief,
     SpokenRosterBrief,
@@ -538,7 +538,7 @@ def spoken(brief: SessionBrief) -> SpokenBrief:
     (`core/sessions.py::spoken_name`, the same rule `_headline` follows).
     """
     return SpokenBrief(
-        name=str(brief.name) if brief.name is not None else str(brief.target),
+        name=brief.name if brief.name is not None else str(brief.target),
         agent=str(brief.agent),
         state=STATE_WORDING[brief.state],
         newest=brief.newest.words,
@@ -571,7 +571,7 @@ def notice(brief: SessionBrief) -> SessionNotice:
         state=brief.state,
         state_word=STATE_WORDING[brief.state],
         agent=str(brief.agent),
-        name=str(brief.name) if brief.name is not None else str(brief.target),
+        name=brief.name if brief.name is not None else str(brief.target),
         question=question,
         options=options,
         recommendation=recommendation,
@@ -596,7 +596,7 @@ def roster_notice(brief: RosterBrief) -> RosterNotice:
                 state=row.state,
                 state_word=STATE_WORDING[row.state],
                 agent=str(row.agent),
-                name=str(row.name) if row.name is not None else str(row.target),
+                name=row.name if row.name is not None else str(row.target),
             )
             for row in brief.rows
         ),
@@ -604,63 +604,26 @@ def roster_notice(brief: RosterBrief) -> RosterNotice:
     )
 
 
-def handover(
+def for_call(
     sessions: Sequence[Session],
     focus: SessionTarget | None,
     *,
-    reason: str,
+    occasion: Occasion = Occasion.HANDOVER,
     answerable: Collection[SessionTarget] = (),
 ) -> tuple[HandoverItem, ...]:
-    """Everything a system-dialled call opens holding, inside the wire's ceilings.
+    """Read the current roster in the shape this occasion needs (#274).
 
-    Three kinds of item, in one order the Voice can read down: why the call was
-    dialled, then the Roster Brief, then the full brief of every Session that
-    needs the user — Focus first, because the roster it is taken from is ordered
-    Focus first (#165 Q6). **A running Session gets its header row and nothing
-    more:** it is in the roster, and there is nothing it is asking of anybody —
-    unless the user's last reply to it never arrived, which is news about it
-    whatever it is doing (`earns_a_brief`, #197).
+    Hand-over holds counts, header rows and every waiting Session's brief.
+    Opening carries one brief alone for one waiting Session; with several it
+    carries the waiting Focus Session first, then the Roster Brief, or only the
+    roster without a waiting Focus. Mid-call carries only the waiting Focus.
+    Running Sessions with an undelivered reply still earn a brief (#197).
+    No waiting Sessions means no answer.
 
-    **Over budget, bodies go and words stay.** The newest message is dropped
-    from the *back* — the Sessions the roster ordered last — and each one that
-    goes is named as omitted rather than left absent (`omitting_newest`, ADR
-    0016): the user is told a message exists and could not be carried, never
-    handed half of it. The header and the whole decision stay, because they are
-    what the user acts on and they are small.
-
-    **Then the roster's header rows go, before any brief does.** A Session that
-    has a full brief is already named in it, so its header row is the one thing
-    in a hand-over that says nothing twice — and a ladder that spent briefs
-    first bought header rows with decisions. Measured: two hundred waiting
-    Sessions used to come out as one hundred and fifty-four header rows and no
-    briefs at all, which is every decision in the roster dropped to keep a list
-    of names. Whole briefs go last, from the back.
-
-    **The counts never go, at any scale.** They are the summary ADR 0016 asks
-    for: with them, a hand-over that could carry thirty-five of two hundred
-    waiting Sessions still says two hundred are waiting, so what it could not
-    carry is *named* rather than silently absent — and named without a fourth
-    kind of item on the seam #195 and #196 build on. The reason never goes
-    either.
-
-    Both ceilings are the wire's, and both are hard rejections there rather than
-    truncations (`seams/call.py`), so this returns a hand-over that fits and
-    `Dial` asserts that it does.
-
-    **Which Sessions are briefed is the roster's answer, and only the
-    roster's.** An earlier draft let the caller name the Session a call was
-    dialled about and briefed it whatever the row said, which put that Session
-    ahead of the Focus Session; a later one took the brief the provoking Stop had
-    read and appended it last, because `sessions.set_stop_reading` used to leave
-    a row that merely ended a turn in `RUNNING` (#209) and a running Session is
-    briefed by nothing here — so a call dialled by that Stop could say a Session
-    needs the user and never mention which. Since #213 the row itself says the
-    Session stopped, so the roster answers for it too and no caller passes a
-    brief in beside it.
-
-    `answerable` is the one fact a row cannot carry, as in `session`: the targets
-    whose question the lane can still route an Answer Relay into. A live adapter
-    reading, so the hub passes it in and the default is the safe one.
+    Fitting gives up newest bodies from the back (with omission words), then
+    header rows, then whole briefs. Counts survive whenever a roster is part of
+    the answer. Selection precedes fitting so unrelated bodies cannot consume
+    the opening's or mid-call Focus brief's budget.
     """
     summary = roster(sessions, focus)
     by_target = {live.target: live for live in sessions}
@@ -669,7 +632,17 @@ def handover(
         for row in summary.rows
         if row.target in by_target and earns_a_brief(by_target[row.target])
     ]
-    return _fitted(DialReason(text=reason), summary, briefs)
+    if not briefs:
+        return ()
+    if occasion is Occasion.MID_CALL:
+        briefs = [brief for brief in briefs if brief.target == focus]
+        summary = None
+    elif occasion is Occasion.OPENING:
+        if len(briefs) == 1:
+            summary = None
+        else:
+            briefs = [brief for brief in briefs if brief.target == focus]
+    return _fitted(summary, briefs, roster_first=occasion is Occasion.HANDOVER)
 
 
 def text(brief: SessionBrief | RosterBrief) -> str:
@@ -727,27 +700,20 @@ def _state(session: Session) -> BriefState:
 def _turn_ended(session: Session) -> BriefState:
     """A Session that stopped and is waiting on nothing this reader can name.
 
-    On the Claude lane that is FINISHED: the turn is done and the Session is
-    idle for a new instruction (#165 Q7), which is legacy's own sentence
-    (`legacy@1d32845:bridge/host.py:226-234`), **ported**. Its question is
-    structural — a tool call the adapter reads — so a Claude turn that ended
-    without one ended without one, and there is nothing here to guess.
-
-    On the Codex lane the default is DECISION (#166 B2), and a turn is promoted
-    out of it only on the evidence in `_asking`. The lane is asked here rather
-    than the answer being stored on the row, because it is Briefing's reading
-    and not the lane's observation.
+    Both lanes default to DECISION and are promoted only on the evidence in
+    `_asking` (#274). Structured questions and permissions took precedence in
+    `_state`; this text pass chooses state only, never a decision's contents.
+    Adapted from Codex's #166/#188 rule; legacy's unconditional finished wording
+    (`legacy@1d32845:bridge/host.py:226-234`) no longer settles a prose question.
     """
-    if session.target.agent is AgentKind.CLAUDE:
-        return BriefState.FINISHED
-    answer = _final_answer(session.progress)
+    answer = _final_answer(session.progress, phased=session.target.agent is AgentKind.CODEX)
     if answer is None or _asking(answer):
         return BriefState.DECISION
     return BriefState.FINISHED
 
 
 # ----------------------------------------------------------------------
-# Did the Codex turn end on a question? (#188, on the evidence in #176.)
+# Did the stopped turn end on a question? (#188, on the evidence in #176.)
 # ----------------------------------------------------------------------
 
 #: What the user was shown, once what they were not is taken out: a fenced code
@@ -782,7 +748,7 @@ _OPTION_BLOCK: Final = re.compile(
 _NAMED_OPTION: Final = re.compile(r"(?:选项|方案)\s*[A-Za-z\d一二三四五六七八九十]")
 
 
-def _final_answer(progress: ProgressObservation) -> str | None:
+def _final_answer(progress: ProgressObservation, *, phased: bool = True) -> str | None:
     """The newest message the source marked as this turn's answer, if it did.
 
     **The search stops at the turn it is about.** A progress tail holds several
@@ -805,8 +771,8 @@ def _final_answer(progress: ProgressObservation) -> str | None:
     is only the wordless opener that reads past it, which is the case the
     `turn_id` closes.
 
-    Nothing is classified without an answer, and every way of not having one
-    stays DECISION: a build old enough to mark no `phase`, a turn that has said
+    Nothing is classified without an answer. For Codex, every way of not having
+    one stays DECISION: a build old enough to mark no `phase`, a turn that has said
     nothing yet, and a turn whose only message so far is `commentary`. A
     `commentary` newest with this turn's answer behind it is not one of them —
     the answer is what is classified (3 of 669 turns, #176 §2.1) — and reading
@@ -820,7 +786,11 @@ def _final_answer(progress: ProgressObservation) -> str | None:
                 return None
         elif entry.turn_id != newest_turn:
             return None
-        if entry.phase is ProgressPhase.FINAL_ANSWER:
+        # Claude's transcript has no phase field. Its newest assistant message
+        # in this turn is the answer; Codex retains its own final-answer rule.
+        if entry.role is ProgressRole.ASSISTANT and (
+            not phased or entry.phase is ProgressPhase.FINAL_ANSWER
+        ):
             return entry.text
     return None
 
@@ -930,13 +900,14 @@ def _answerable_here(session: Session, *, question_answerable: bool) -> bool:
 
 
 def _fitted(
-    reason: DialReason,
-    summary: RosterBrief,
+    summary: RosterBrief | None,
     briefs: list[SessionBrief],
+    *,
+    roster_first: bool,
 ) -> tuple[HandoverItem, ...]:
-    """Give things back, in the order the docstring of `handover` names, until it fits.
+    """Give things back, in the order the docstring of `for_call` names, until it fits.
 
-    Three rungs, in the order `handover` states — every newest body from the back,
+    Three rungs, in the order `for_call` states — every newest body from the back,
     then the roster's header rows from the back, then whole briefs from the back.
     The loop stops at the first arrangement that fits, so a hand-over that already
     does is returned untouched: the common case, and the one where every body is
@@ -946,14 +917,13 @@ def _fitted(
     that repeats something already said. A brief is given up last because it is
     the only thing that carries a decision.
 
-    **The reason and the counts are never given up**, at any scale: they are what
-    is left when everything else has gone, and the counts are what still say how
+    **The counts are never given up** when a roster is carried: they still say how
     many Sessions the call could not carry (ADR 0016).
     """
     carried = list(briefs)
-    rows = list(summary.rows)
+    rows = list(summary.rows) if summary is not None else []
     while True:
-        items = _handover_items(reason, summary, rows, carried)
+        items = _handover_items(summary, rows, carried, roster_first=roster_first)
         if _within_ceilings(items):
             return items
         if _one_body_less(carried):
@@ -963,8 +933,7 @@ def _fitted(
         if carried:
             carried.pop()
             continue
-        # The reason and the counts alone. Nothing here is the caller's to trim,
-        # and both are bounded by their own writers.
+        # Only the counts remain, bounded by their own writer.
         return items
 
 
@@ -987,16 +956,15 @@ def _one_row_less(rows: list[RosterRow], briefs: list[SessionBrief]) -> bool:
 
 
 def _handover_items(
-    reason: DialReason,
-    summary: RosterBrief,
+    summary: RosterBrief | None,
     rows: list[RosterRow],
     briefs: list[SessionBrief],
+    *,
+    roster_first: bool,
 ) -> tuple[HandoverItem, ...]:
-    return (
-        reason,
-        _spoken_roster(summary, rows),
-        *(spoken(brief) for brief in briefs),
-    )
+    spoken_briefs = tuple(spoken(brief) for brief in briefs)
+    roster_items = (_spoken_roster(summary, rows),) if summary is not None else ()
+    return roster_items + spoken_briefs if roster_first else spoken_briefs + roster_items
 
 
 def _within_ceilings(items: tuple[HandoverItem, ...]) -> bool:

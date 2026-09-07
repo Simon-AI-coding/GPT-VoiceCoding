@@ -52,7 +52,7 @@ by a newer one about the same Session
 (`legacy@1d32845:bridge/coordinator.py:1306-1337`,
 `legacy@1d32845:bridge/store.py:2768-2814`). The supersession is **adapted**
 into the fresh reading: this module keeps one flag and no queue, and what is
-said is `focus_brief()`'s answer at the moment of speaking, which supersedes
+said is `read(Occasion.MID_CALL)`'s answer at the moment of speaking, which supersedes
 every event since the flag was armed without holding any of them. Pacing by an
 interval is **new** — legacy paced by the queue draining, which is not a pace at
 all on a wire with no silent mid-call path (#175). The EVENT cue and the Focus
@@ -66,6 +66,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from gpt_voicecoding.core.adjudication import SwitchAdjudicator
@@ -81,7 +82,6 @@ from gpt_voicecoding.seams.call import (
     CallState,
     Cue,
     Dial,
-    DialReason,
     HandoverItem,
     SpokenBrief,
     UserSpeaking,
@@ -128,11 +128,13 @@ MID_CALL_NOTHING_LINE = (
 )
 MID_CALL_UNDELIVERED_LINE = "the Live Call would not carry the Focus Session's brief: %s"
 
-#: Why a call the user opened exists, and the *whole* hand-over it gets (#167
-#: Q6). A user who pressed the toggle is about to say what they want; briefing
-#: them on the roster they were looking at when they pressed it would be the
-#: system talking first, on a call the user opened to talk.
-USER_OPENED = "The user opened this call. Wait to be spoken to, then act on what they ask for."
+
+class Occasion(StrEnum):
+    """Which answer the Keeper needs from its fresh reading."""
+
+    HANDOVER = "handover"
+    OPENING = "opening"
+    MID_CALL = "mid_call"
 
 
 @runtime_checkable
@@ -151,36 +153,11 @@ class Briefer(Protocol):
     that armed the owed dial may have been answered at the terminal.
     """
 
-    def handover(self) -> tuple[HandoverItem, ...] | None:
-        """The hand-over a system-dialled call comes up holding, or None.
+    def read(self, occasion: Occasion) -> tuple[HandoverItem, ...] | None:
+        """What is to be said now, in order; None when nobody needs the user.
 
-        `None` means **nobody needs the user** — not "nothing to say about the
-        Session that woke me". It is the answer that cancels an owed dial, so a
-        Cool-down that elapses onto a quiet machine ends in silence rather than
-        in a call about nothing.
-
-        The items are `Dial.hand_over`'s own, exactly as #194 shapes them: the
-        `SpokenBrief` and friends `Briefing` builds. There is no type between
-        the two, because a second one would be a second place that decides what
-        a hand-over is made of.
-        """
-        ...
-
-    def focus_brief(self) -> SpokenBrief | None:
-        """The Focus Session as it stands **now**, or None if it is past needing the user.
-
-        The mid-call counterpart of `handover`, and read on the same terms: at
-        the moment of sounding, never at the moment of the event (ADR 0017). A
-        word owed to the Focus Session cannot go stale, because it is composed
-        when it is spoken — so the answer to "the Session was answered at the
-        terminal while the Voice was mid-sentence" is `None` here, and the
-        Keeper says nothing at all.
-
-        A `SpokenBrief` and not Briefing's own `SessionBrief`: the Keeper knows
-        nothing of what is said (`CONTEXT.md`, *Call Keeper*), so what crosses
-        this Protocol is the thing the Call seam already carries (#194,
-        `seams/call.py::speak`) and the mapping is the production adapter's, as
-        it already is for `handover`'s items.
+        HANDOVER is silent dial-time background; OPENING is the first word of
+        a system-dialled call; MID_CALL carries only the Focus Session.
         """
         ...
 
@@ -206,8 +183,8 @@ class Permits:
 class Dialling:
     """Open a call. `user_opened` says which of the two kinds it is.
 
-    A user-opened call carries the single `USER_OPENED` item and is never
-    briefed; a system-dialled one carries whatever the Briefer answers with, and
+    A user-opened call carries no hand-over; a system-dialled one carries
+    whatever the Briefer answers with, and
     is cancelled when that answer is `None`.
     """
 
@@ -244,6 +221,8 @@ class Speaking:
     would be a brief the machine had been holding since the event, which is the
     replay ADR 0017 forbids.
     """
+
+    occasion: Occasion = Occasion.MID_CALL
 
 
 #: The closed set of things the state machine asks the shell to do. An empty
@@ -290,6 +269,7 @@ class CallTime:
         self._silence_end_seconds = silence_end_seconds
         self._speech_settle_seconds = speech_settle_seconds
         self._call_id: str | None = None
+        self._system_opening = False
         self._last_activity_at: float | None = None
         self._voice_speaking = False
         self._user_speaking = False
@@ -335,7 +315,7 @@ class CallTime:
         `focus` says only whether the event concerns the Focus Session — never
         what it was about, and never a brief. Who needs the user is read off the
         Briefer at the moment of acting, in both directions: a call is dialled
-        on a fresh hand-over, and a word is spoken from a fresh `focus_brief`.
+        on a fresh hand-over, and a word is spoken from a fresh `read(Occasion.MID_CALL)`.
 
         Four answers, in the order they are decided:
 
@@ -435,9 +415,14 @@ class CallTime:
                 self._note_speech(now, voice=event.speaking)
                 return self._owed_word(now, permits)
             case CallStarted():
-                # Adopted whoever opened it: one voice surface, one holder.
-                self.dialled(now, call_id=event.call_id)
-                return (Sounding(Cue.CONNECTED),)
+                opening = self._system_opening and event.call_id == self._call_id
+                self._system_opening = False
+                if event.call_id != self._call_id:
+                    self.dialled(now, call_id=event.call_id)
+                acts: tuple[Act, ...] = (Sounding(Cue.CONNECTED),)
+                if opening and permits.dial:
+                    acts += (Speaking(Occasion.OPENING),)
+                return acts
 
     def status(self, now: float) -> KeeperStatus:
         """The three facts the control plane and the hub read off this object."""
@@ -450,7 +435,7 @@ class CallTime:
 
     # -- what the shell reports back --------------------------------------
 
-    def dialled(self, now: float, *, call_id: str | None) -> None:
+    def dialled(self, now: float, *, call_id: str | None, user_opened: bool = True) -> None:
         """What a dial produced: a call id, or None for one that did not come up.
 
         A failed dial is an end of a call as far as Cool-down is concerned
@@ -460,6 +445,7 @@ class CallTime:
         refused call into a loop in the reference implementation.
         """
         self._dial_owed = False
+        self._system_opening = call_id is not None and not user_opened
         if call_id is None:
             self._start_cool_down(now)
             return
@@ -480,6 +466,7 @@ class CallTime:
     def ended(self, now: float) -> None:
         """The call is over, however it ended. Cool-down starts here and only here."""
         self._call_id = None
+        self._system_opening = False
         self._last_activity_at = None
         self._voice_speaking = False
         self._user_speaking = False
@@ -776,8 +763,8 @@ class CallKeeper:
         call is up, and the user's own "end this call" refused by the very
         switch that says the system should be quiet.
 
-        A call opened here gets no hand-over beyond the single line saying the
-        user opened it (#167 Q6): they pressed the toggle in order to talk, and
+        A call opened here gets no hand-over (#274): they pressed the toggle
+        in order to talk, and
         briefing them on the roster they were already looking at would be the
         system speaking first.
         """
@@ -848,7 +835,7 @@ class CallKeeper:
                 case Sounding():
                     await self._play(act.cue)
                 case Speaking():
-                    await self._say_what_stands_now(now)
+                    await self._say_what_stands_now(now, act.occasion)
                 case Ending():
                     if act.ceiling:
                         _log.info(CEILING_END_LINE, self._time.silence_end_seconds)
@@ -869,9 +856,9 @@ class CallKeeper:
         """
         hand_over: tuple[HandoverItem, ...]
         if user_opened:
-            hand_over = (DialReason(text=USER_OPENED),)
+            hand_over = ()
         else:
-            fresh = self._briefer.handover()
+            fresh = self._briefer.read(Occasion.HANDOVER)
             if fresh is None:
                 _log.info("the Cool-down elapsed and nobody needs the user; the dial is cancelled")
                 self._time.nothing_to_say(now)
@@ -890,11 +877,13 @@ class CallKeeper:
             raise
         # A snapshot that is not UP is deliberately **not** claimed: claiming a
         # call that never arrived would bar the dial that fixes it.
-        self._time.dialled(now, call_id=snapshot.call_id if snapshot.is_up else None)
+        self._time.dialled(
+            now, call_id=snapshot.call_id if snapshot.is_up else None, user_opened=user_opened
+        )
         return snapshot
 
-    async def _say_what_stands_now(self, now: float) -> None:
-        """Speak the Focus Session's brief into the gap, read at this instant.
+    async def _say_what_stands_now(self, now: float, occasion: Occasion) -> None:
+        """Speak this occasion's answer, read at this instant.
 
         The reading is taken here and nowhere earlier (ADR 0017): the wait that
         armed the word may have been answered at the terminal while the Voice was
@@ -915,25 +904,41 @@ class CallKeeper:
         finished — otherwise a `speak` the wire took ten seconds to accept buys
         ten seconds less than the ceiling it is owed.
         """
-        brief = self._briefer.focus_brief()
-        if brief is None:
-            _log.info(MID_CALL_NOTHING_LINE)
+        words = self._briefer.read(occasion)
+        if not words:
+            _log.info(
+                "the opening found nobody needing the user; nothing is spoken"
+                if occasion is Occasion.OPENING
+                else MID_CALL_NOTHING_LINE
+            )
             self._time.nothing_to_speak(now)
             return
+        first = next((item for item in words if isinstance(item, SpokenBrief)), None)
+        if occasion is Occasion.OPENING:
+            _log.info(
+                "the system-dialled call was told to speak; first Session: %s",
+                first.name if first is not None else "none (Roster Brief only)",
+            )
         receipt: DeliveryReceipt | None = None
         try:
-            receipt = await self._call.speak(brief, request_id=new_request_id())
+            receipt = await self._call.speak(words, request_id=new_request_id())
         finally:
             landed = receipt is not None and receipt.is_delivered
             self._time.spoke(now, delivered_at=self._clock() if landed else None)
+        if occasion is Occasion.OPENING:
+            if not receipt.is_delivered:
+                _log.info("the Live Call would not carry the opening: %s", receipt.reason)
+            return
         if receipt.outcome is Delivery.DELIVERED:
             # The Session's name, and nothing else off the brief: a whole-lane
             # run has no other way to tell *which* Session was announced, and
             # the name is what the user would have heard first.
             _log.info(
                 MID_CALL_SPOKEN_LINE,
-                brief.name,
-                CARRIED_UNDELIVERED if brief.undelivered else NOTHING_UNDELIVERED,
+                first.name if first is not None else "none",
+                CARRIED_UNDELIVERED
+                if first is not None and first.undelivered
+                else NOTHING_UNDELIVERED,
             )
         else:
             _log.info(MID_CALL_UNDELIVERED_LINE, receipt.reason)

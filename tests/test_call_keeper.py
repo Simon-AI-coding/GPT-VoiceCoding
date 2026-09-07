@@ -30,10 +30,10 @@ from gpt_voicecoding.core.adjudication import SwitchAdjudicator
 from gpt_voicecoding.core.call_keeper import (
     CARRIED_UNDELIVERED,
     NOTHING_UNDELIVERED,
-    USER_OPENED,
     CallKeeper,
     Dialling,
     Ending,
+    Occasion,
     Permits,
     Sounding,
     Speaking,
@@ -48,7 +48,6 @@ from gpt_voicecoding.seams.call import (
     CallState,
     Cue,
     Dial,
-    DialReason,
     HandoverItem,
     SpokenBrief,
     UserSpeaking,
@@ -84,9 +83,8 @@ FOCUS = SpokenBrief(
     last_activity_at="a moment ago",
 )
 
-#: What a system-dialled call's hand-over looks like in these tests: the reason
-#: the Briefer's production adapter puts first, and one Session Brief behind it.
-NEEDS_THE_USER: tuple[HandoverItem, ...] = (DialReason(text="Sessions need the user."), WAITING)
+#: The fake Briefer's answer for a system-dialled call.
+NEEDS_THE_USER: tuple[HandoverItem, ...] = (WAITING,)
 
 
 class FakeBriefer:
@@ -110,13 +108,12 @@ class FakeBriefer:
         #: sounding and never at the moment of the event.
         self.focus_readings = 0
 
-    def handover(self) -> tuple[HandoverItem, ...] | None:
+    def read(self, occasion: Occasion) -> tuple[HandoverItem, ...] | None:
+        if occasion is Occasion.MID_CALL:
+            self.focus_readings += 1
+            return (self.focus,) if self.focus is not None else None
         self.readings += 1
         return self.answer
-
-    def focus_brief(self) -> SpokenBrief | None:
-        self.focus_readings += 1
-        return self.focus
 
 
 class Keeper:
@@ -430,10 +427,60 @@ class TestWhatTheSwitchesDecideAndWhen:
 
 
 class TestWhatACallIsOpenedOn:
-    def test_a_user_opened_call_carries_the_single_item_and_stays_silent(self) -> None:
+    @pytest.mark.parametrize("outcome", [Delivery.DELIVERED, Delivery.FAILED, Delivery.UNKNOWN])
+    def test_only_a_delivered_opening_moves_the_ceiling(self, outcome):
+        class SlowCall(FakeCall):
+            async def speak(self, words, *, request_id):
+                assert self.cues == [Cue.CONNECTED]
+                keeper.now += 10
+                return DeliveryReceipt(request_id=request_id, outcome=outcome, reason="observed")
+
+        keeper = Keeper(call=SlowCall())
+        keeper.wake()
+        keeper.now += 20
+        keeper.hear(CallStarted(call_id="call-1"))
+        keeper.wait(31)
+        assert keeper.call.calls_ended == (0 if outcome is Delivery.DELIVERED else 1)
+        if outcome is Delivery.DELIVERED:
+            keeper.wait(30)
+            assert keeper.call.calls_ended == 1
+
+    @pytest.mark.parametrize("switch", [SwitchName.DUTY, SwitchName.VOICE])
+    def test_a_switch_disabled_during_dial_suppresses_the_opening(self, switch):
+        keeper = Keeper()
+        keeper.wake()
+        keeper.flip(switch, False)
+        keeper.hear(CallStarted(call_id="call-1"))
+        assert keeper.call.spoken == []
+
+    def test_system_connection_speaks_once_from_a_fresh_reading(self, caplog):
+        keeper = Keeper()
+        keeper.wake()
+        keeper.briefer.answer = (FOCUS,)
+        with caplog.at_level("INFO"):
+            keeper.hear(CallStarted(call_id="call-1"))
+        assert keeper.call.cues == [Cue.CONNECTED]
+        assert keeper.call.spoken == [FOCUS]
+        assert "system-dialled call was told to speak" in caplog.text
+        assert "repo · the focus session" in caplog.text
+        keeper.hear(CallStarted(call_id="call-1"))
+        assert keeper.call.spoken == [FOCUS]
+
+    def test_user_connection_waits_and_a_vanished_wait_is_not_spoken(self):
+        user = Keeper()
+        user.toggle()
+        user.hear(CallStarted(call_id="call-1"))
+        assert user.call.spoken == []
+        system = Keeper()
+        system.wake()
+        system.briefer.answer = None
+        system.hear(CallStarted(call_id="call-1"))
+        assert system.call.spoken == []
+
+    def test_a_user_opened_call_carries_no_handover_and_stays_silent(self) -> None:
         keeper = Keeper()
         keeper.toggle()
-        assert keeper.call.opened_on[-1].hand_over == (DialReason(text=USER_OPENED),)
+        assert keeper.call.opened_on[-1].hand_over == ()
         assert keeper.briefer.readings == 0
         assert keeper.call.spoken == []
 

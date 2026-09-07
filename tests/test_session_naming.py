@@ -13,9 +13,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from gpt_voicecoding.adapters.agent._naming import compose
+from gpt_voicecoding.adapters.agent._naming import compose, task_name
 from gpt_voicecoding.adapters.agent._project import ProjectNames, _project_in
-from gpt_voicecoding.seams.identity import SessionName
+from gpt_voicecoding.seams.identity import AgentKind, SessionName
+
+
+def test_task_choice_preserves_each_lanes_facts():
+    assert task_name(AgentKind.CLAUDE, name="workspace-claude-ed") == "workspace-claude-ed"
+    assert task_name(AgentKind.CLAUDE, name=None, thread_id="abcdefghijk") is None
+    assert task_name(AgentKind.CODEX, name="Fix login", thread_id="abcdefghijk") == "Fix login"
+    assert task_name(AgentKind.CODEX, name=None, thread_id=" abcdefghijk ") == "abcdefgh"
+    assert task_name(AgentKind.CODEX, name=None, thread_id=None) is None
+    assert task_name(AgentKind.CODEX, name=None, thread_id="  ") is None
 
 
 def answering(*answers: str | None) -> ProjectNames:

@@ -35,7 +35,6 @@ from gpt_voicecoding.seams.call import (
     HANDOVER_BUDGET_BYTES,
     MAX_HANDOVER_ITEMS,
     Dial,
-    DialReason,
     SpokenBrief,
     SpokenRosterBrief,
 )
@@ -101,6 +100,24 @@ PERMISSION = WaitingFor(
 
 
 class TestTheFiveStates:
+    def test_prose_questions_have_the_same_state_and_empty_decision_on_both_surfaces(self):
+        for target in (CLAUDE, CODEX):
+            brief = briefing.session(row(target, progress=said("Pick 1 or 2?")))
+            assert brief.state is BriefState.DECISION
+            assert briefing.spoken(brief).state == "waiting for your decision"
+            assert briefing.spoken(brief).decision == ()
+            notice = briefing.notice(brief)
+            assert notice.question == ""
+            assert notice.newest == "Pick 1 or 2?"
+            from gpt_voicecoding.adapters.companion_channel.telegram.layout import lay_out
+
+            laid_out = lay_out(notice)
+            assert laid_out.text == (
+                "🟡 waiting for your decision\n"
+                f"{target.agent} · gpt-voicecoding · a task\n\nPick 1 or 2?"
+            )
+            assert [entity["type"] for entity in laid_out.entities] == ["expandable_blockquote"]
+
     def test_a_question_wait_is_a_decision(self) -> None:
         brief = briefing.session(row(state=SessionState.WAITING, waiting_for=QUESTION))
         assert brief.state is BriefState.DECISION
@@ -335,11 +352,9 @@ class TestACodexTurnThatAskedNothing:
             is BriefState.DECISION
         )
 
-    def test_the_claude_lane_is_untouched(self) -> None:
-        """Claude's question is structural, so its turn end is FINISHED whatever
-        the words were (`legacy@1d32845:bridge/host.py:226-234`)."""
+    def test_the_claude_lane_also_reads_a_prose_question(self) -> None:
         finished = briefing.session(row(CLAUDE, progress=codex_said(("同意吗？", FINAL_ANSWER))))
-        assert finished.state is BriefState.FINISHED
+        assert finished.state is BriefState.DECISION
 
     def test_a_promotion_never_outranks_a_question_the_lane_reported(self) -> None:
         """The heuristic reads a turn that stopped on nothing; a typed wait wins."""
@@ -533,6 +548,26 @@ class TestText:
 
 
 class TestTheSpokenBrief:
+    def test_opening_shape_is_selected_from_the_current_roster(self):
+        from gpt_voicecoding.core.call_keeper import Occasion
+
+        one = row()
+        other = row(CODEX, progress=codex_said(("Done.", FINAL_ANSWER)))
+        assert briefing.for_call((), None, occasion=Occasion.OPENING) == ()
+        assert briefing.for_call((one,), None, occasion=Occasion.OPENING) == (
+            briefing.spoken(briefing.session(one)),
+        )
+        opening = briefing.for_call((one, other), CLAUDE, occasion=Occasion.OPENING)
+        assert [type(item) for item in opening] == [SpokenBrief, SpokenRosterBrief]
+        assert opening[0] == briefing.spoken(briefing.session(one))
+        assert [
+            type(item) for item in briefing.for_call((one, other), None, occasion=Occasion.OPENING)
+        ] == [SpokenRosterBrief]
+        assert briefing.for_call((one, other), None, occasion=Occasion.MID_CALL) == ()
+        assert briefing.for_call((one, other), CLAUDE, occasion=Occasion.MID_CALL) == (
+            briefing.spoken(briefing.session(one)),
+        )
+
     """One Session Brief as the Call seam carries it — this module's words, as data.
 
     A Core type may not cross a seam (ADR 0001), so what crosses is the seam's
@@ -549,7 +584,7 @@ class TestTheSpokenBrief:
 
         spoken = briefing.spoken(brief)
 
-        assert spoken.name == "gpt-voicecoding · a task"
+        assert spoken.name == SessionName(project="gpt-voicecoding", task="a task")
         assert spoken.agent == "claude"
         assert spoken.state == "waiting for your decision"
         assert spoken.newest == "I got this far"
@@ -645,10 +680,9 @@ class TestARunningSessionWithWordsThatNeverArrived:
         assert briefing.earns_a_brief(row(state=SessionState.RUNNING, undelivered=self.HELD))
 
     def test_the_hand_over_carries_that_brief_rather_than_a_header_row_alone(self) -> None:
-        items = briefing.handover(
+        items = briefing.for_call(
             (row(CODEX, state=SessionState.RUNNING, undelivered=self.HELD),),
             focus=CODEX,
-            reason="Sessions need the user.",
         )
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
@@ -667,27 +701,24 @@ class TestTheHandover:
     hands `Dial` something it would refuse.
     """
 
-    def test_the_first_item_says_why_the_call_was_dialled(self) -> None:
-        items = briefing.handover((row(),), focus=None, reason="Sessions need you")
+    def test_the_handover_starts_with_background_roster_and_has_no_dial_reason(self) -> None:
+        items = briefing.for_call((row(),), focus=None)
 
-        assert items[0] == DialReason(text="Sessions need you")
-        assert isinstance(items[1], SpokenRosterBrief)
+        assert isinstance(items[0], SpokenRosterBrief)
 
     def test_a_running_session_gets_a_header_row_and_no_brief(self) -> None:
-        items = briefing.handover(
-            (row(CODEX, state=SessionState.RUNNING),), focus=None, reason="dialled"
-        )
+        items = briefing.for_call((row(CODEX, state=SessionState.RUNNING), row()), focus=None)
 
-        summary = items[1]
+        summary = items[0]
         assert isinstance(summary, SpokenRosterBrief)
-        assert summary.rows == ("gpt-voicecoding · a task — codex:def — running",)
-        assert [item for item in items if isinstance(item, SpokenBrief)] == []
+        assert "gpt-voicecoding · a task — codex:def — running" in summary.rows
+        assert [item.agent for item in items if isinstance(item, SpokenBrief)] == ["claude"]
 
     def test_the_focus_session_is_briefed_first(self) -> None:
         focus = row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION)
         other = row(CLAUDE, state=SessionState.WAITING, waiting_for=PERMISSION)
 
-        items = briefing.handover((other, focus), focus=CODEX, reason="dialled")
+        items = briefing.for_call((other, focus), focus=CODEX)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert [item.state for item in briefs] == [
@@ -712,17 +743,15 @@ class TestTheHandover:
         """
         running = row(CODEX, state=SessionState.RUNNING, progress=said("it stopped here"))
 
-        items = briefing.handover((running,), focus=None, reason="dialled")
+        items = briefing.for_call((running,), focus=None)
 
         assert [item for item in items if isinstance(item, SpokenBrief)] == []
 
     def test_a_question_is_answerable_here_only_when_the_lane_says_so(self) -> None:
         waiting = row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION)
 
-        without = briefing.handover((waiting,), focus=None, reason="dialled")
-        with_route = briefing.handover(
-            (waiting,), focus=None, reason="dialled", answerable=(CODEX,)
-        )
+        without = briefing.for_call((waiting,), focus=None)
+        with_route = briefing.for_call((waiting,), focus=None, answerable=(CODEX,))
 
         assert _only_brief(without).answerable_here == "at the terminal"
         assert _only_brief(with_route).answerable_here == "from here"
@@ -745,7 +774,7 @@ class TestTheHandover:
             for index in range(200)
         )
 
-        items = briefing.handover(sessions, focus=None, reason="dialled")
+        items = briefing.for_call(sessions, focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert briefs, "every decision was given up to keep a list of names"
@@ -770,7 +799,7 @@ class TestTheHandover:
             for index in range(12)
         )
 
-        items = briefing.handover(sessions, focus=None, reason="dialled")
+        items = briefing.for_call(sessions, focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert len(briefs) == 12
@@ -800,7 +829,7 @@ class TestTheHandover:
             for index in range(200)
         )
 
-        items = briefing.handover(sessions, focus=None, reason="dialled")
+        items = briefing.for_call(sessions, focus=None)
 
         assert len(items) <= MAX_HANDOVER_ITEMS
         assert _fits(items)
@@ -826,7 +855,7 @@ class TestTheHandover:
             for index in range(6)
         )
 
-        items = briefing.handover(sessions, focus=None, reason="因为有会话在等你")
+        items = briefing.for_call(sessions, focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert len(briefs) == 6
@@ -862,9 +891,9 @@ class TestTheHandover:
             for index in range(200)
         )
 
-        items = briefing.handover((*others, focus), focus=CODEX, reason="dialled")
+        items = briefing.for_call((*others, focus), focus=CODEX)
 
-        summary = items[1]
+        summary = items[0]
         assert isinstance(summary, SpokenRosterBrief)
         assert summary.counts == "the others: 200 waiting for your decision"
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
@@ -887,7 +916,7 @@ class TestTheHandover:
         stopped = row(CODEX, state=SessionState.IDLE, progress=said("it stopped here"))
         waiting = row(CLAUDE, state=SessionState.WAITING, waiting_for=PERMISSION)
 
-        items = briefing.handover((stopped, waiting), focus=None, reason="dialled")
+        items = briefing.for_call((stopped, waiting), focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert [item.state for item in briefs] == [
@@ -900,7 +929,7 @@ class TestTheHandover:
         """One Session, one brief. The roster's reading is the only one there is."""
         stopped = row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION)
 
-        items = briefing.handover((stopped,), focus=None, reason="dialled")
+        items = briefing.for_call((stopped,), focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert len(briefs) == 1
@@ -938,7 +967,7 @@ class TestTheChannelNotice:
         assert notice.state is BriefState.DECISION
         assert notice.state_word == "waiting for your decision"
         assert notice.agent == "claude"
-        assert notice.name == "gpt-voicecoding · a task"
+        assert notice.name == SessionName(project="gpt-voicecoding", task="a task")
         assert notice.question == "Which base?"
         assert notice.options == ("main", "develop")
         assert notice.recommendation == "recommends: main"
@@ -1003,7 +1032,12 @@ class TestTheChannelNotice:
         notice = briefing.roster_notice(summary)
 
         assert [(r.state, r.name, r.agent, r.state_word) for r in notice.rows] == [
-            (BriefState.RUNNING, "gpt-voicecoding · a task", "claude", "running"),
+            (
+                BriefState.RUNNING,
+                SessionName(project="gpt-voicecoding", task="a task"),
+                "claude",
+                "running",
+            ),
             (BriefState.DECISION, str(CODEX), "codex", "waiting for your decision"),
         ]
         assert notice.counts == "the others: 1 waiting for your decision"

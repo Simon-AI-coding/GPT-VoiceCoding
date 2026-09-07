@@ -46,7 +46,6 @@ from gpt_voicecoding.core.briefing import (
     QUESTION_ALREADY_ANSWERED_HINT,
     BriefState,
 )
-from gpt_voicecoding.core.call_keeper import USER_OPENED
 from gpt_voicecoding.core.errors import (
     BridgeCoreError,
     CallInstructionsMissing,
@@ -86,7 +85,6 @@ from gpt_voicecoding.seams.call import (
     CallStarted,
     CallState,
     Cue,
-    DialReason,
     SpokenBrief,
     SpokenRosterBrief,
     UserSpeech,
@@ -99,7 +97,7 @@ from gpt_voicecoding.seams.companion_channel import (
     SessionNotice,
 )
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
-from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
+from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
 from hub import CLAUDE, CODEX, TEN_MINUTES, Hub
 
 #: The one record every Companion Channel send writes (#261, ADR 0021 §10). A
@@ -204,7 +202,7 @@ class TestTheStopNoticePipelineEndToEnd:
         # field: derived per read, with the lane's answer folded in.
         assert status.reply_windows[CODEX] is ReplyWindow.OPEN
 
-    def test_a_claude_turn_that_ended_is_counted_as_finished_at_once(self) -> None:
+    def test_a_claude_turn_without_readable_words_defaults_to_decision_at_once(self) -> None:
         """Every reader of the roster, not only the notice (#213).
 
         The Stop used to leave the row `RUNNING` until the next discovery pass —
@@ -217,7 +215,7 @@ class TestTheStopNoticePipelineEndToEnd:
         hub.emit(SessionStopped(target=CLAUDE))
 
         summary = briefing.roster(hub.state.sessions.live(), None)
-        assert summary.counts == {BriefState.FINISHED: 1}
+        assert summary.counts == {BriefState.DECISION: 1}
         assert hub.state.sessions.resolve(CLAUDE).state is SessionState.IDLE
 
     def test_a_stop_for_a_session_the_roster_never_saw_is_still_briefed_as_stopped(
@@ -237,7 +235,7 @@ class TestTheStopNoticePipelineEndToEnd:
         hub.emit(SessionStopped(target=stranger))
 
         (notice,) = hub.channel.sent
-        assert notice.startswith("claude:stranger:999 — finished")
+        assert notice.startswith("claude:stranger:999 — waiting for your decision")
 
     def test_a_failed_stop_read_does_not_replace_a_readable_roster_observation(self) -> None:
         hub = Hub()
@@ -326,7 +324,7 @@ class TestTheStopNoticePipelineEndToEnd:
         assert isinstance(notice, SessionNotice)
         assert notice.state is BriefState.DECISION
         assert notice.state_word == "waiting for your decision"
-        assert notice.name == "GPT-VoiceCoding · port the log"
+        assert notice.name == SessionName("GPT-VoiceCoding", "port the log")
         assert notice.agent == "codex"
         assert notice.question == "Which base?"
         assert notice.options == ("main", "feature")
@@ -343,14 +341,14 @@ class TestTheStopNoticePipelineEndToEnd:
 
         assert hub.channel.notices == [None]
 
-    def test_a_finished_stop_pushes_the_briefs_text(self) -> None:
-        """A Claude turn that ended asking nothing is FINISHED, in Briefing's words."""
+    def test_a_claude_stop_without_readable_words_pushes_the_decision_state(self) -> None:
+        """Without words there is no evidence to promote a stop out of DECISION."""
         hub = Hub(voice=False, sessions=((CLAUDE, "port the log"),))
 
         hub.emit(SessionStopped(target=CLAUDE))
 
         assert hub.channel.sent == [
-            "GPT-VoiceCoding · port the log — claude:def:100 — finished\n"
+            "GPT-VoiceCoding · port the log — claude:def:100 — waiting for your decision\n"
             "  newest: not read\n"
             "  answer: from here\n"
             "  last activity: not read"
@@ -1778,8 +1776,7 @@ class TestTheOneCallInvariantEndToEnd:
 
         hub.toggle()
 
-        assert hub.call.opened_on[0].hand_over == (DialReason(text=USER_OPENED),)
-        assert "wait to be spoken to" in USER_OPENED.lower()
+        assert hub.call.opened_on[0].hand_over == ()
 
     def test_a_system_dialled_call_comes_up_holding_the_roster_and_the_waiting(
         self,
@@ -1800,8 +1797,7 @@ class TestTheOneCallInvariantEndToEnd:
         )
 
         kinds = [type(item) for item in hub.call.opened_on[0].hand_over]
-        assert kinds[0] is DialReason
-        assert kinds[1] is SpokenRosterBrief
+        assert kinds[0] is SpokenRosterBrief
         assert SpokenBrief in kinds
         assert hub.call.spoken == []
         assert "Which base?" in handed_over(hub.call)
@@ -1824,7 +1820,6 @@ class TestTheOneCallInvariantEndToEnd:
         hub.emit(SessionStopped(target=CODEX))
 
         assert [type(item) for item in hub.call.opened_on[0].hand_over] == [
-            DialReason,
             SpokenRosterBrief,
             SpokenBrief,
         ]
@@ -1833,7 +1828,7 @@ class TestTheOneCallInvariantEndToEnd:
         # The codex lane reads a turn that ended without a final answer as a
         # decision (#166 B2); what matters here is that it is not `running`.
         assert briefed.state == "waiting for your decision"
-        assert "port the log" in briefed.name
+        assert "port the log" in str(briefed.name)
 
     def test_the_session_a_stop_dialled_about_is_briefed_exactly_once(self) -> None:
         """One Session, one brief: the roster is the only thing briefed from.
@@ -2971,7 +2966,7 @@ class TestMidCallNewsThroughTheWholeHub:
         self.gap(hub)
 
         (spoken,) = hub.call.spoken
-        assert "port the log" in spoken.name
+        assert "port the log" in str(spoken.name)
         assert "Which base?" in " ".join(spoken.decision)
         assert hub.call.calls_started == 1, "mid-call news never dials a second call"
 
@@ -3112,7 +3107,7 @@ class TestARelayThatFinallyFailedReachesTheUser:
         self.gap(hub)
 
         (spoken,) = hub.call.spoken
-        assert "port the log" in spoken.name
+        assert "port the log" in str(spoken.name)
         assert spoken.undelivered == "your last reply did not arrive, because ceiling_passed"
 
     def test_a_session_the_user_has_since_left_only_rings(self) -> None:
@@ -3534,13 +3529,15 @@ class TestEveryMenuScreenIsAnAnchor:
         hub.emit(InboundText(text="2", in_reply_to="1", origin="callback:9"))
 
         assert hub.channel.sent[-1] == (
-            "GPT-VoiceCoding · build the shell — claude:def:100 — finished\n"
+            "GPT-VoiceCoding · build the shell — claude:def:100 — waiting for your decision\n"
             "1. brief\n"
             "2. history\n"
             "3. send message"
         )
         assert hub.channel.notices[-1] == MenuNotice(
-            heading="GPT-VoiceCoding · build the shell — claude:def:100 — finished",
+            heading=(
+                "GPT-VoiceCoding · build the shell — claude:def:100 — waiting for your decision"
+            ),
             options=("brief", "history", "send message"),
         )
 

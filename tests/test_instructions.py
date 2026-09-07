@@ -443,6 +443,12 @@ class TestTheTwoBudgets:
 
 
 class TestTheVoiceHearsProse:
+    def test_the_engine_hands_the_words_and_the_voice_is_told_how(self, instructions):
+        voice = instructions.voice.text
+        assert "This person opened the call themselves" not in voice
+        assert "Speak what the engine hands you when it hands it" in voice
+        assert "otherwise wait to be spoken to" in voice
+
     """ADR 0018: the Voice's set is natural language, and names no mechanism."""
 
     #: A heading, a bullet, a fenced or inline code span, and a `key: value`
@@ -512,7 +518,7 @@ class TestTheVoiceHearsProse:
         """#173 §3: who you are, the opened call, the two briefs, and so on to hanging up."""
         marks = (
             "what it did not hand you, you do not have",
-            "connect tone",
+            "Speak what the engine hands you",
             "Session Brief",
             "Roster Brief",
             "five at a time",

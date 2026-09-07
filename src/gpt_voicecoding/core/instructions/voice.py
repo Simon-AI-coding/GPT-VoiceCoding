@@ -77,9 +77,8 @@ def _sections() -> tuple[Section, ...]:
                 ),
                 Block(
                     text=(
-                        "This person opened the call themselves, so they know why they are "
-                        "here. After the connect tone, stay quiet until they say something. "
-                        "Then do what they asked and nothing beside it."
+                        "Speak what the engine hands you when it hands it, in the shape "
+                        "already given and in its order; otherwise wait to be spoken to."
                     ),
                 ),
                 Block(

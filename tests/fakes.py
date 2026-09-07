@@ -43,7 +43,6 @@ from gpt_voicecoding.seams.call import (
     Cue,
     DelegatedReply,
     Dial,
-    DialReason,
     HandoverItem,
     SpokenBrief,
     SpokenRosterBrief,
@@ -271,7 +270,8 @@ class FakeCall:
             outcome=VerifyOutcome.PASS, loaded="tests.fakes.FakeCall"
         )
         self.sink = sink
-        self.spoken: list[SpokenBrief] = []
+        self.spoken: list[HandoverItem] = []
+        self.utterances: list[tuple[HandoverItem, ...]] = []
         self.delegated: list[tuple[str, str]] = []
         #: The `Dial` every call was opened on, in order — both audiences' texts
         #: and the hand-over. Bridge Core is the only source of these, so a test
@@ -321,14 +321,17 @@ class FakeCall:
     async def call_state(self) -> CallSnapshot:
         return self._snapshot
 
-    async def speak(self, brief: SpokenBrief, *, request_id: RequestId) -> DeliveryReceipt:
+    async def speak(
+        self, brief: tuple[HandoverItem, ...], *, request_id: RequestId
+    ) -> DeliveryReceipt:
         if not self._snapshot.is_up:
             return DeliveryReceipt(
                 request_id=request_id,
                 outcome=Delivery.FAILED,
                 reason="no call is up to speak into",
             )
-        self.spoken.append(brief)
+        self.utterances.append(brief)
+        self.spoken.extend(brief)
         return DeliveryReceipt(
             request_id=request_id, outcome=Delivery.DELIVERED, reason="spoken into the call"
         )
@@ -418,13 +421,11 @@ def _items(call: FakeCall) -> list[HandoverItem]:
 
 def _words(item: HandoverItem) -> tuple[str, ...]:
     match item:
-        case DialReason():
-            return (item.text,)
         case SpokenRosterBrief():
             return (item.counts, item.focus or "", *item.rows)
         case SpokenBrief():
             return (
-                item.name,
+                str(item.name),
                 item.agent,
                 item.state,
                 item.newest,

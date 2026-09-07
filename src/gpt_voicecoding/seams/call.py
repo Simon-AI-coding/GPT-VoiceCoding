@@ -27,7 +27,8 @@ slot carries which audience is the realtime adapter's alone to know; nothing
 above this seam ever learns a slot name.
 
 **A brief crosses this seam as a brief, not as a sentence to read out.** `speak`
-takes a `SpokenBrief` — `CONTEXT.md`'s *Stop Notice* says the Live Call "does not
+takes ordered `SpokenBrief` and `SpokenRosterBrief` items. `CONTEXT.md`'s
+*Stop Notice* says the Live Call "does not
 receive text to read out; it receives the Session Brief itself and speaks from
 it". The carrier is seam-owned because no Core type may cross a seam (ADR 0001),
 and it carries Briefing's *own words* rather than raw values, because Briefing is
@@ -63,7 +64,7 @@ from typing import Final, Protocol, runtime_checkable
 
 from gpt_voicecoding.seams.delivery import DeliveryReceipt
 from gpt_voicecoding.seams.events import Event
-from gpt_voicecoding.seams.identity import RequestId
+from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyResult
 
 
@@ -138,26 +139,6 @@ MAX_HANDOVER_ITEMS: Final = 128
 
 
 @dataclass(frozen=True, slots=True)
-class DialReason:
-    """Why this call exists, in one line — the hand-over's leading item.
-
-    A call the user opened and a call the system dialled are different calls to
-    be on, and the Voice is owed which one it is before anything else it is
-    handed. The words are the caller's; this carries them.
-    """
-
-    text: str
-
-    def __post_init__(self) -> None:
-        if not self.text.strip():
-            raise ValueError("a dial reason says why the call exists; there are no words here")
-
-    @property
-    def size_in_bytes(self) -> int:
-        return _bytes_of(self.text)
-
-
-@dataclass(frozen=True, slots=True)
 class SpokenRosterBrief:
     """How many Sessions are in each state, and one header row for each.
 
@@ -189,7 +170,8 @@ class SpokenBrief:
 
     The Session Brief's own fields, minus the address it was taken by: an
     adapter has nothing to do with a `SessionTarget`, and the Session is named
-    to the Voice by `name`. Every field is a string Briefing has already worded,
+    to the Voice by `name`. The name retains its project and task; every other
+    field is already worded,
     so the adapter assembles and never phrases (see the module docstring).
 
     **`undelivered` is `CONTEXT.md`'s *Session Brief* promise, sourced** — "when
@@ -201,7 +183,8 @@ class SpokenBrief:
     arrives here already worded, like every other field.
     """
 
-    name: str
+    #: The identity seam's name, or the address when none is known.
+    name: SessionName | str
     agent: str
     state: str
     newest: str
@@ -219,7 +202,7 @@ class SpokenBrief:
     @property
     def size_in_bytes(self) -> int:
         return _bytes_of(
-            self.name,
+            str(self.name),
             self.agent,
             self.state,
             self.newest,
@@ -227,12 +210,16 @@ class SpokenBrief:
             self.last_activity_at,
             self.undelivered,
             *self.decision,
+        ) + (
+            _bytes_of(self.name.project, self.name.task)
+            if isinstance(self.name, SessionName)
+            else 0
         )
 
 
-#: The closed set of things a hand-over is made of. Three kinds, and the adapter
+#: The closed set of things a hand-over is made of. Two kinds, and the adapter
 #: maps each to exactly one wire item.
-HandoverItem = DialReason | SpokenRosterBrief | SpokenBrief
+HandoverItem = SpokenRosterBrief | SpokenBrief
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,8 +447,10 @@ class CallAdapter(Protocol):
         """What this adapter's own connection state says, right now."""
         ...
 
-    async def speak(self, brief: SpokenBrief, *, request_id: RequestId) -> DeliveryReceipt:
-        """Hand the call one Session Brief. Graded from this adapter's own state.
+    async def speak(
+        self, brief: tuple[HandoverItem, ...], *, request_id: RequestId
+    ) -> DeliveryReceipt:
+        """Hand the call ordered Session Briefs and an optional Roster Brief in one utterance.
 
         A brief and not a sentence: the Voice words what it is given, and this
         seam hands it the thing to be worded (`CONTEXT.md`, *Stop Notice*).

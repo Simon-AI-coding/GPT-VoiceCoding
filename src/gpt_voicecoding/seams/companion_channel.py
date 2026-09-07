@@ -60,7 +60,7 @@ from typing import Protocol, runtime_checkable
 
 from gpt_voicecoding.seams.delivery import DeliveryReceipt
 from gpt_voicecoding.seams.events import Event
-from gpt_voicecoding.seams.identity import RequestId
+from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyResult
 
 
@@ -154,7 +154,7 @@ class SessionNotice:
     state_word: str
     agent: str
     #: The Session Name where there is one, else the address (`_headline`'s rule).
-    name: str
+    name: SessionName | str
     question: str = ""
     options: tuple[str, ...] = ()
     #: Briefing's whole line for the recommendation, empty when there is none.
@@ -181,7 +181,7 @@ class RosterRowNotice:
     state: BriefState
     state_word: str
     agent: str
-    name: str
+    name: SessionName | str
 
 
 @dataclass(frozen=True, slots=True)

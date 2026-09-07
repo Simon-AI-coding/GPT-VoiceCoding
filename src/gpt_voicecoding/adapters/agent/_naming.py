@@ -31,9 +31,25 @@ from __future__ import annotations
 
 import logging
 
-from gpt_voicecoding.seams.identity import NAME_SEPARATOR, SessionName
+from gpt_voicecoding.seams.identity import NAME_SEPARATOR, AgentKind, SessionName
 
 _log = logging.getLogger(__name__)
+
+# The existing #78 fallback: the eight UUID characters codex shows to the user.
+SHORT_THREAD_ID_CHARACTERS = 8
+
+
+def task_name(agent: AgentKind, *, name: str | None, thread_id: str | None = None) -> str | None:
+    """Choose the task from lane facts, preserving the #78 policy (#274).
+
+    Claude supplies its roster name; Codex supplies its observed thread name
+    and id. Discovery still decides whether a daemon title is an official name.
+    """
+    if agent is AgentKind.CLAUDE or name:
+        return name
+    if thread_id is None:
+        return None
+    return thread_id.strip()[:SHORT_THREAD_ID_CHARACTERS] or None
 
 
 def compose(project_name: str, task: str) -> SessionName | None:

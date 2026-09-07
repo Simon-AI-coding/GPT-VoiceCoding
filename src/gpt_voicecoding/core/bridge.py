@@ -55,7 +55,7 @@ from gpt_voicecoding.core.briefing import (
     RosterBrief,
     SessionBrief,
 )
-from gpt_voicecoding.core.call_keeper import CallKeeper
+from gpt_voicecoding.core.call_keeper import CallKeeper, Occasion
 from gpt_voicecoding.core.clock import Clock, default_clock, wall_clock
 from gpt_voicecoding.core.errors import (
     BridgeCoreError,
@@ -128,7 +128,6 @@ from gpt_voicecoding.seams.call import (
     CallStarted,
     Dial,
     HandoverItem,
-    SpokenBrief,
     UserSpeaking,
     UserSpeech,
     VoiceSpeech,
@@ -192,14 +191,6 @@ NO_DELEGATE_HANDLER = "I can't take a delegated turn right now — nothing is wi
 #: (#184). One per edge, never per delta — a long answer is hundreds of those.
 VOICE_SPEAKING_LINE = "the call's own Voice started speaking"
 VOICE_QUIET_LINE = "the call's own Voice stopped speaking"
-
-#: Why a call the *system* dialled exists. The items after it are the roster and
-#: the Sessions waiting, so this says what they are for and nothing they say.
-SYSTEM_DIALLED = (
-    "This call was dialled because Sessions need the user. "
-    "What follows is the roster and each Session that is waiting; "
-    "speak from it, and do not invent anything it does not say."
-)
 
 
 def stop_brief(
@@ -392,72 +383,19 @@ class RosterBriefer:
         self._sessions = sessions
         self._answerable = answerable
 
-    def handover(self) -> tuple[HandoverItem, ...] | None:
-        """What a system-dialled call comes up holding, or None if nobody needs the user.
-
-        **Every row, including the one that just stopped.** Since #213 the
-        registry holds a just-stopped Session as stopped, so a fresh reading
-        covers the Session that provoked the dial like any other and nothing is
-        passed in beside the roster (`core/briefing.py::handover`).
-
-        **"Nobody needs the user" is read off the hand-over itself.** A call is
-        worth dialling when there is a Session Brief to carry — a Session that
-        stopped, whatever it stopped on — and the one place that decides which
-        rows earn a brief is `briefing.handover` (every live main row that is
-        not `RUNNING`). Asking it and then looking at what came back keeps that
-        rule in one place; re-deriving it here would be a second answer that
-        drifts, which is how a call came up saying a Session needed the user and
-        never mentioning which (#209).
-
-        `None` and not an empty tuple: a reason and a roster count with no brief
-        behind them is still a call, and the distinction is the one the Keeper
-        acts on — a Cool-down that elapses onto a machine where every wait has
-        since been answered at the terminal ends in silence.
-        """
+    def read(self, occasion: Occasion) -> tuple[HandoverItem, ...] | None:
+        """Ask Briefing for this occasion's answer from the live roster."""
         sessions = self._sessions.live()
-        items = briefing.handover(
-            sessions,
-            self._sessions.focus,
-            reason=SYSTEM_DIALLED,
-            answerable=tuple(
-                session.target for session in sessions if self._answerable_for(session)
-            ),
-        )
-        if not any(isinstance(item, SpokenBrief) for item in items):
-            return None
-        return items
-
-    def focus_brief(self) -> SpokenBrief | None:
-        """The Focus Session as it stands now, or None if it is past needing the user.
-
-        The mid-call half of the same seam (#196), read on the same terms as
-        `handover` and by the same rule: **a Session earns a brief when its
-        roster row is not `RUNNING`**, and that rule lives in one place. So the
-        row is taken from `briefing.roster` — which is also what settles the two
-        edges a target lookup would have to answer for itself, an exited Session
-        and a Child Process appearing nowhere (#165 Q7).
-
-        `None` where there is no Focus Session, where its row has gone, and
-        where the row says it is running again: the wait that armed the word may
-        have been answered at the terminal while the Voice was mid-sentence, and
-        all three of those are the same silence.
-        """
-        focus = self._sessions.focus
-        if focus is None:
-            return None
-        sessions = self._sessions.live()
-        row = next(
-            (row for row in briefing.roster(sessions, focus).rows if row.target == focus), None
-        )
-        if row is None:
-            return None
-        session = next((live for live in sessions if live.target == focus), None)
-        if session is None:  # pragma: no cover - the roster read it out of this list
-            return None
-        if not briefing.earns_a_brief(session):
-            return None
-        return briefing.spoken(
-            briefing.session(session, question_answerable=self._answerable_for(session))
+        return (
+            briefing.for_call(
+                sessions,
+                self._sessions.focus,
+                occasion=occasion,
+                answerable=tuple(
+                    session.target for session in sessions if self._answerable_for(session)
+                ),
+            )
+            or None
         )
 
     def _answerable_for(self, session: Session) -> bool:

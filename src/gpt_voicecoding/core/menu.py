@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from gpt_voicecoding.core.anchors import Anchor, AnchorKind, AnchorPick, AnchorTarget, Screen
 from gpt_voicecoding.core.briefing import (
@@ -95,7 +95,7 @@ def roster_screen(brief: RosterBrief) -> MenuScreen:
     notice = roster_notice(brief)
     labels = _disambiguated(
         [
-            (row.name, str(target.target))
+            (str(row.name), str(target.target))
             for row, target in zip(notice.rows, brief.rows, strict=True)
         ]
     )
@@ -104,13 +104,12 @@ def roster_screen(brief: RosterBrief) -> MenuScreen:
     # end, which is exactly where the address is. So two Sessions sharing a
     # name arrived as two buttons reading alike above a roster that named
     # neither address, and the user could not tell which press reached which
-    # Session. The line the user reads carries it now; the button may still be
-    # cut, because the line is what the cut leans on.
-    rows = tuple(replace(row, name=label) for row, label in zip(notice.rows, labels, strict=True))
+    # Session. Layout uses the whole option label on the row as well as the
+    # button; the row's SessionName stays intact across the seam (#274).
     targets: tuple[AnchorPick, ...] = tuple(row.target for row in brief.rows)
     return MenuScreen(
         text=brief_text(brief),
-        notice=RosterNotice(rows=rows, counts=notice.counts, options=labels),
+        notice=RosterNotice(rows=notice.rows, counts=notice.counts, options=labels),
         anchor=Anchor(kind=AnchorKind.MENU, target=Screen.ROSTER, options=labels, picks=targets),
     )
 

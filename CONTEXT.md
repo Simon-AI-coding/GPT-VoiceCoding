@@ -144,7 +144,7 @@ Git repository the Session is working in — its own directory when it is in non
 says what the Session is doing, in words the user can understand. The task is read from the
 best source the agent has already written (a name the user gave it, the agent's own generated
 title, the user's first words to it, the agent's derived name as the floor), so every main
-Session has one and none is asked to supply one. It climbs to a better source as one appears
+Session the agent has identified has one, none is asked to supply one, and none is invented. It climbs to a better source as one appears
 and never falls back; a change is not announced. A Session Name is for recognising a Session,
 never for addressing it — that is the address's job (ADR 0024).
 _Avoid_: label, title, session label

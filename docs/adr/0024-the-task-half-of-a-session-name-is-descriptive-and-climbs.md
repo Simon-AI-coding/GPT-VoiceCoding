@@ -16,7 +16,10 @@ already written, and the module picks the highest of a fixed ladder — Claude: 
 user-given name (`nameSource` not `derived`), the newest `ai-title`, the first
 prompt cleaned, the derived name as the floor; Codex: a `Thread.name` that is
 not the `preview` read back, the `preview` cleaned, the short thread id as the
-floor. Because the floor always exists, every main Session is named. The name
+floor. The floor is the agent's own identity, so every main Session the agent
+has identified is named; a row with no identity yet (a Codex process without a
+thread id, a Claude registry row with no name and no transcript) stays unnamed
+and is shown by its address — the bridge never composes a name. The name
 climbs and never falls: a higher rung replaces a lower one, the same rung
 follows its source's latest value, a source that vanishes leaves the last name
 standing. A change is not announced on any surface. Cleaning the first-words
@@ -40,4 +43,6 @@ the user's first turn wait on a synchronous, unbounded step — the "often timed
 out" the user reported; its immutability semantics are **adapted** into
 climb-never-fall, and its validation (non-empty, one line, no silent fallback)
 is **ported**. All judgement lives in the one pure naming module; adapters carry
-facts, Bridge Core stores the result and the rung it came from.
+facts and the resolved project name; the module lives in Bridge Core (ADR 0001:
+`core` imports no adapter), which calls it and stores the result and the rung it
+came from.

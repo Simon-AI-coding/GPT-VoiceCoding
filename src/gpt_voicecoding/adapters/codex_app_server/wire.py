@@ -6,6 +6,13 @@ attach to. The framing is hand-rolled rather than taken from a library because
 this package ships with no dependencies and one client's worth of RFC 6455 is
 some eighty lines — the reference implementation made the same trade and it held.
 
+**The protocol lives in ``gpt_voicecoding.websocket`` and the transport lives
+here.** It moved there when #272 gave installation a second caller for it: a
+`bridge-install status` handshake cannot import an adapter (ADR 0012), and a
+second hand-rolled RFC 6455 with nothing holding the two in step is #47. This
+module still owns every wait, every buffer and every sentence about the far
+side; what it no longer owns is what a frame's bytes look like.
+
 **Three kinds of inbound message, three destinations.** A response goes to the
 future its request is waiting on; a notification goes to the notification
 handler; and a *server request* — which is how an approval reaches us — goes to
@@ -26,19 +33,18 @@ frames and matches ids.
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
-import os
-import struct
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-#: RFC 6455's fixed accept-key salt. Not a secret; the handshake is a proof of
-#: protocol, not of identity.
-WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+from gpt_voicecoding import websocket
+
+#: RFC 6455's fixed accept-key salt. Re-exported rather than re-typed: it is
+#: ``gpt_voicecoding.websocket``'s now, and this name is what the suite's own
+#: app-server fake reaches for (`tests/codex_fake.py`).
+WEBSOCKET_GUID = websocket.WEBSOCKET_GUID
 
 #: How much of one frame this client will hold before it decides the far side is
 #: not a codex app-server. Generous enough for a whole thread readback.
@@ -60,12 +66,12 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 #: signalled anyway.
 CLOSE_TIMEOUT_SECONDS = 1.0
 
-_OPCODE_CONTINUATION = 0x0
-_OPCODE_TEXT = 0x1
-_OPCODE_BINARY = 0x2
-_OPCODE_CLOSE = 0x8
-_OPCODE_PING = 0x9
-_OPCODE_PONG = 0xA
+_OPCODE_CONTINUATION = websocket.OPCODE_CONTINUATION
+_OPCODE_TEXT = websocket.OPCODE_TEXT
+_OPCODE_BINARY = websocket.OPCODE_BINARY
+_OPCODE_CLOSE = websocket.OPCODE_CLOSE
+_OPCODE_PING = websocket.OPCODE_PING
+_OPCODE_PONG = websocket.OPCODE_PONG
 
 #: What JSON-RPC calls "method not found". Answered to any server request this
 #: client was not built to handle, so the far side is told rather than stalled.
@@ -241,7 +247,7 @@ class AppServerConnection:
         if writer is not None:
             with suppress(Exception):
                 async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
-                    writer.write(self._frame(b"", _OPCODE_CLOSE))
+                    writer.write(websocket.client_frame(b"", _OPCODE_CLOSE))
                     await writer.drain()
             writer.close()
             with suppress(Exception):
@@ -320,38 +326,18 @@ class AppServerConnection:
         """The client half of RFC 6455, verified rather than assumed."""
         reader, writer = self._reader, self._writer
         assert reader is not None and writer is not None
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        writer.write(
-            (
-                "GET / HTTP/1.1\r\n"
-                "Host: localhost\r\n"
-                "Upgrade: websocket\r\n"
-                "Connection: Upgrade\r\n"
-                f"Sec-WebSocket-Key: {key}\r\n"
-                "Sec-WebSocket-Version: 13\r\n"
-                "\r\n"
-            ).encode("ascii")
-        )
+        request, key = websocket.upgrade_request()
+        writer.write(request)
         await writer.drain()
         try:
-            header = await reader.readuntil(b"\r\n\r\n")
+            header = await reader.readuntil(websocket.UPGRADE_TERMINATOR)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as error:
             raise WireError(f"the codex app-server closed during the handshake: {error}") from None
 
-        lines = header.decode("iso-8859-1").split("\r\n")
-        if not lines or " 101 " not in lines[0]:
-            raise WireError(
-                f"the codex app-server refused the WebSocket upgrade: {lines[0] if lines else ''!r}"
-            )
-        headers: dict[str, str] = {}
-        for line in lines[1:]:
-            name, separator, value = line.partition(":")
-            if separator:
-                headers[name.strip().casefold()] = value.strip()
-        expected = base64.b64encode(
-            hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()  # noqa: S324
-        ).decode("ascii")
-        if headers.get("sec-websocket-accept") != expected:
+        status, headers = websocket.upgrade_answer(header)
+        if websocket.ACCEPTED_STATUS not in status:
+            raise WireError(f"the codex app-server refused the WebSocket upgrade: {status!r}")
+        if headers.get(websocket.ACCEPT_HEADER) != websocket.accept_key(key):
             raise WireError("the codex app-server's WebSocket accept key does not match")
 
     async def _send(self, message: Message, writer: asyncio.StreamWriter) -> None:
@@ -360,66 +346,49 @@ class AppServerConnection:
             raise WireError("this message is larger than the configured frame limit")
         async with self._write_lock:
             try:
-                writer.write(self._frame(payload, _OPCODE_TEXT))
+                writer.write(websocket.client_frame(payload, _OPCODE_TEXT))
                 await writer.drain()
             except OSError as error:
                 raise WireClosed(f"writing to the codex app-server failed: {error}") from None
 
-    def _frame(self, payload: bytes, opcode: int) -> bytes:
-        """One masked client frame. A client always masks; a server never does."""
-        mask = os.urandom(4)
-        length = len(payload)
-        header = bytearray((0x80 | opcode,))
-        if length <= 125:
-            header.append(0x80 | length)
-        elif length <= 0xFFFF:
-            header.append(0x80 | 126)
-            header.extend(struct.pack("!H", length))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack("!Q", length))
-        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-        return bytes(header) + mask + masked
-
     async def _read_message(self) -> Message:
-        """One whole JSON-RPC message, reassembled across continuation frames."""
-        fragments = bytearray()
-        started = False
+        """One whole JSON-RPC message, awaited a frame at a time.
+
+        What each opcode means, and how fragments become a message, is
+        `websocket.Reassembly`'s — one spelling of it on this machine, shared
+        with the blocking client `bridge-install status` runs (#272, #47). What
+        stays here is the awaiting, and every sentence about the far side.
+        """
+        gathering = websocket.Reassembly(self._max_frame_bytes)
         while True:
-            opcode, final, payload = await self._read_frame()
-            if opcode == _OPCODE_CLOSE:
-                raise WireError("the codex app-server closed the WebSocket")
-            if opcode == _OPCODE_PING:
-                await self._pong(payload)
-                continue
-            if opcode == _OPCODE_PONG:
-                continue
-            if opcode in (_OPCODE_TEXT, _OPCODE_BINARY) and not started:
-                fragments.extend(payload)
-                started = True
-            elif opcode == _OPCODE_CONTINUATION and started:
-                fragments.extend(payload)
-            else:
-                raise WireError(f"unexpected WebSocket opcode {opcode} from the codex app-server")
-            if len(fragments) > self._max_frame_bytes:
-                raise WireError("a codex app-server message exceeds the configured frame limit")
-            if final:
+            step = gathering.take(*await self._read_frame())
+            if step.refuse is not None:
+                raise WireError(f"the codex app-server {step.refuse}")
+            if step.pong_with is not None:
+                await self._send_frame(step.pong_with)
+            if step.message is not None:
                 break
         try:
-            message = json.loads(bytes(fragments))
+            message = json.loads(step.message)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise WireError(f"the codex app-server sent unreadable JSON: {error}") from None
         if not isinstance(message, dict):
             raise WireError("the codex app-server sent something that is not a JSON object")
         return message
 
-    async def _pong(self, payload: bytes) -> None:
+    async def _send_frame(self, frame: bytes) -> None:
+        """One already-built frame, on the write lock. Failing is not an error here.
+
+        The only caller is the pong above, and a pong nobody can hear is a
+        courtesy the read loop must not die of: the connection ending is
+        something `_read_frame` will report on its own terms a moment later.
+        """
         writer = self._writer
         if writer is None:
             return
         async with self._write_lock:
             with suppress(OSError):
-                writer.write(self._frame(payload, _OPCODE_PONG))
+                writer.write(frame)
                 await writer.drain()
 
     async def _read_frame(self) -> tuple[int, bool, bytes]:
@@ -427,23 +396,21 @@ class AppServerConnection:
         if reader is None:
             raise WireClosed("this connection is not open")
         first, second = await reader.readexactly(2)
-        if first & 0x70:
+        prefix = websocket.frame_prefix(first, second)
+        if prefix.reserved:
             raise WireError("the codex app-server set reserved WebSocket bits")
-        final = bool(first & 0x80)
-        opcode = first & 0x0F
-        masked = bool(second & 0x80)
-        length = second & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", await reader.readexactly(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", await reader.readexactly(8))[0]
+        length = prefix.length
+        if prefix.extended_length_bytes:
+            length = websocket.extended_length(
+                await reader.readexactly(prefix.extended_length_bytes)
+            )
         if length > self._max_frame_bytes:
             raise WireError("a codex app-server frame exceeds the configured frame limit")
-        mask = await reader.readexactly(4) if masked else b""
+        mask = await reader.readexactly(websocket.MASK_BYTES) if prefix.masked else b""
         payload = await reader.readexactly(length) if length else b""
-        if masked:
-            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-        return opcode, final, payload
+        if prefix.masked:
+            payload = websocket.unmask(payload, mask)
+        return prefix.opcode, prefix.final, payload
 
     def _require_open(self) -> asyncio.StreamWriter:
         writer = self._writer

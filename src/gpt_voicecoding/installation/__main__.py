@@ -43,6 +43,7 @@ from gpt_voicecoding.installation import (
     State,
     claude_hooks,
     codex_launch_agent,
+    codex_runtime,
     read_intent,
     write_intent,
 )
@@ -74,7 +75,11 @@ class Placement:
     claude_config_directory: Path
     interpreter: Path
     launch_agents_directory: Path
-    codex_home: Path
+    #: This machine's one codex, or the reason there is none. Resolved here,
+    #: once, from the ``PATH`` this process was given — which is the user's own
+    #: login ``PATH``, because the shell hands the installation subprocess the
+    #: environment it built for the engine (#272, ADR 0022).
+    codex: codex_runtime.Resolution
     codex_log_path: Path
     installation_record_path: Path
     launchd: codex_launch_agent.Launchd
@@ -91,7 +96,7 @@ def _resolve(
         claude_config_directory=claude_hooks.default_config_directory(environ, home),
         interpreter=interpreter,
         launch_agents_directory=codex_launch_agent.default_launch_agents_directory(home),
-        codex_home=codex_launch_agent.default_codex_home(environ, home),
+        codex=codex_runtime.resolve(environ, home),
         codex_log_path=codex_daemon_log_path(base_dir),
         installation_record_path=installation_path(base_dir),
         launchd=launchd or codex_launch_agent.default_launchd(),
@@ -103,7 +108,7 @@ def _inspect_all(where: Placement) -> list[Outcome]:
         claude_hooks.inspect(where.claude_config_directory, where.interpreter),
         codex_launch_agent.inspect(
             where.launch_agents_directory,
-            where.codex_home,
+            where.codex,
             where.codex_log_path,
             where.installation_record_path,
             where.launchd,
@@ -116,7 +121,7 @@ def _install_all(where: Placement) -> list[Outcome]:
         claude_hooks.install(where.claude_config_directory, where.interpreter),
         codex_launch_agent.install(
             where.launch_agents_directory,
-            where.codex_home,
+            where.codex,
             where.codex_log_path,
             where.installation_record_path,
             where.launchd,
@@ -175,7 +180,7 @@ def main(
     if verb == "status":
         outcomes = _inspect_all(where)
         print(_intent_line(read_intent(base_dir)))
-        print(_daemon_line(where))
+        print(_server_line(where))
     elif verb == "uninstall":
         outcomes = _uninstall_all(where)
         # Only when it really came back out. `wanted: false` is what stops every
@@ -216,17 +221,27 @@ def _with_intent(outcomes: list[Outcome], *, wanted: bool, base_dir: Path | None
     return [*outcomes, Outcome(RECORD_NAME, State.ABSENT, ok=False, note=failure)]
 
 
-def _daemon_line(where: Placement) -> str:
-    """What the running Codex daemon says about itself, for the `status` verb only.
+def _server_line(where: Placement) -> str:
+    """What the shared Codex app-server says about itself, for `status` only.
 
-    Never on the install path. This is a subprocess to a control socket that is
-    absent whenever the daemon is not running, which is most of the time; a
-    reconcile runs before the engine at every launch and has no business paying
-    for it. A person typing `status` is asking exactly this question.
+    Never on the install path. This dials a control socket that is absent
+    whenever the server is not running, and a reconcile runs before the engine
+    at every launch with no business paying for it. A person typing `status` is
+    asking exactly this question.
+
+    **It is a handshake now, not a subprocess** (#272). `codex app-server daemon
+    version` is gone with the rest of the `daemon` subcommands; what replaced it
+    is one connect-and-`initialize` on the derived control socket, measured at
+    1 ms against a live server where the subprocess cost 139 ms. It says nothing
+    about versions, and that is the point rather than an omission: with one
+    codex on the machine there is no second version for the first to disagree
+    with, so #67's no-pin ruling is dissolved rather than reopened.
     """
-    if not codex_launch_agent.managed_binary(where.codex_home).exists():
-        return f"{codex_launch_agent.NAME}: no managed Codex binary, so no daemon to ask"
-    return f"{codex_launch_agent.NAME}: {codex_launch_agent.daemon_versions(where.codex_home)}"
+    if where.codex.runtime is None:
+        return f"{codex_launch_agent.NAME}: {where.codex.reason}, so no app-server to ask"
+    return (
+        f"{codex_launch_agent.NAME}: {codex_runtime.answering(where.codex.runtime.control_socket)}"
+    )
 
 
 def _intent_line(intent: Intent) -> str:

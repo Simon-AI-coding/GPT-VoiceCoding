@@ -26,17 +26,32 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from gpt_voicecoding.installation import codex_launch_agent
+from gpt_voicecoding.installation import codex_runtime
 
 
 def default_executable(environ: Mapping[str, str]) -> str:
-    """Derive the executable from Installation's managed binary for ``CODEX_HOME``.
+    """The one codex the user has, resolved over the ``PATH`` the engine runs on.
 
-    #82 chose that binary over PATH. This is the first ``adapters -> installation``
-    import under ADR 0012's one-way dependency rule; Installation never imports
-    back into the engine.
+    #82 derived a managed standalone binary from ``CODEX_HOME`` instead; #272
+    and ADR 0022 replaced it with the codex the user actually types, and this is
+    where that default arrives in the engine. The engine already runs on the
+    user's real ``PATH`` — ``ProcessLauncher.swift`` reads it from their login
+    shell and spawns with it — so an ordinary ``which`` over that ``PATH`` is
+    the whole of the resolution here.
+
+    **A machine with no codex gets the bare name, not a refusal.** The
+    executable is what a Live Call's own app-server is spawned from, and
+    ``CodexSettings`` will not hold an empty one — but an engine that refused to
+    start because a coding agent is missing would take the control plane and the
+    Claude lane down with it. The bare name is also honest: it is what the user
+    types, it is what a spawn will resolve again on the ``PATH`` of the moment,
+    and that re-resolution is what a `nvm use` or an uninstall needs.
+
+    This is the one ``adapters -> installation`` import under ADR 0012's one-way
+    dependency rule; Installation never imports back into the engine.
     """
-    return str(codex_launch_agent.managed_binary(codex_launch_agent.default_codex_home(environ)))
+    resolved = codex_runtime.resolve_executable(environ)
+    return str(resolved) if resolved is not None else codex_runtime.EXECUTABLE_NAME
 
 
 #: A short runtime root: Darwin caps an `AF_UNIX` path at 103 bytes, and a

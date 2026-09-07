@@ -116,7 +116,9 @@ _log = logging.getLogger(__name__)
 #: so `FAILED` is the honest grade rather than the `UNKNOWN` a spent attempt
 #: earns. The daemon's own words are appended, because "the daemon is not up" and
 #: "`codex` is not on the PATH" send a person to different places.
-PRE_WIRE_UNREACHABLE = "nothing was sent: this Session is reached through the shared Codex daemon"
+PRE_WIRE_UNREACHABLE = (
+    "nothing was sent: this Session is reached through the shared Codex app-server"
+)
 
 #: What a Relay is told for a TUI that has not taken a turn yet. #73: a Codex
 #: Session gains its thread id at its first turn, and until then there is no

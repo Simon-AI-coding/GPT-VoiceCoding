@@ -60,7 +60,7 @@ import Testing
     }
 
     @Test func aRunThatCannotStartIsReportedRatherThanThrown() async {
-        let report = await InstallationRunner().run(
+        let report = await InstallationRunner(readPath: LoginShellPath.unasked).run(
             EngineCommand(
                 executable: "/nowhere/python3", arguments: ["-m", "x", "reconcile"],
                 source: .developerPath))
@@ -75,7 +75,7 @@ import Testing
         // and the read could only ever end on the grace timeout. An assertion on
         // the words alone would have gone green again for the wrong reason.
         let started = Date()
-        let report = await InstallationRunner().run(
+        let report = await InstallationRunner(readPath: LoginShellPath.unasked).run(
             EngineCommand(
                 executable: "/bin/echo", arguments: ["claude-hooks: current"],
                 source: .developerPath))
@@ -92,7 +92,7 @@ import Testing
         // never starts. SIGTERM is a request, and this child refuses it — so the
         // only thing that makes the claim true is the escalation after it.
         let started = Date()
-        let report = await InstallationRunner().run(
+        let report = await InstallationRunner(readPath: LoginShellPath.unasked).run(
             EngineCommand(
                 executable: "/bin/sh",
                 arguments: ["-c", "trap '' TERM; echo holding; while :; do sleep 1; done"],
@@ -106,7 +106,7 @@ import Testing
     }
 
     @Test func aFailedRunReportsTheFirstThingItSaid() async {
-        let report = await InstallationRunner().run(
+        let report = await InstallationRunner(readPath: LoginShellPath.unasked).run(
             EngineCommand(
                 executable: "/bin/sh",
                 arguments: ["-c", "echo 'claude-hooks: FAILED — a reason'; exit 1"],
@@ -115,4 +115,75 @@ import Testing
         #expect(report.ok == false)
         #expect(report.failure == "claude-hooks: FAILED — a reason")
     }
+
+    // MARK: - The login PATH the reconcile resolves codex over (#272, ADR 0022)
+
+    @Test func theChildRunsOnTheLoginShellsPath() async {
+        // The whole of option A: the reconcile cannot find the user's codex on
+        // the PATH launchd gives a Finder-opened app, so it is given the same
+        // reading `ProcessLauncher` gives the engine.
+        let report = await InstallationRunner(
+            readPath: { _, _ in .said("/opt/only-here:/usr/bin:/bin") },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh", arguments: ["-c", "printf '%s' \"$PATH\""],
+                source: .developerPath))
+
+        #expect(report.lines == ["/opt/only-here:/usr/bin:/bin"])
+    }
+
+    @Test func aLoginShellThatSaysNothingLeavesTheChildOnThePathWeHad() async {
+        // Fails open, exactly as the engine's spawn does: a reading that could
+        // not be taken may never make a run worse than not asking at all.
+        let report = await InstallationRunner(
+            readPath: { _, _ in .ranOutOfTime },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh", arguments: ["-c", "printf '%s' \"$PATH\""],
+                source: .developerPath))
+
+        #expect(report.lines == ["/usr/bin:/bin"])
+    }
+
+    @Test func whatTheReadingCameToIsReportedEveryRun() async {
+        // Every run, including the ones that worked — a surface clears its own
+        // warning by being told the next reading was fine, and a report that
+        // only fired on failure would leave a stale one up for ever.
+        let recorded = Recorder()
+        _ = await InstallationRunner(
+            readPath: { _, _ in .said("/opt/only-here") },
+            report: { recorded.record($0) },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(executable: "/bin/echo", arguments: [], source: .developerPath))
+
+        #expect(recorded.latest == .adopted(shell: "/bin/zsh", path: "/opt/only-here"))
+    }
+
+    @Test func aBundledRunStillKeepsBytecodeOutOfTheBundle() async {
+        // The PATH handover replaced the branch that built this environment, so
+        // the rule it used to carry is pinned rather than assumed to have come
+        // across with it.
+        let report = await InstallationRunner(
+            readPath: LoginShellPath.unasked,
+            environment: ["PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf '%s' \"$PYTHONDONTWRITEBYTECODE\""],
+                source: .bundled))
+
+        #expect(report.lines == ["1"])
+    }
+}
+
+/// One outcome, written on the runner's thread and read on the test's.
+private final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: LoginShellPath.Outcome?
+
+    func record(_ outcome: LoginShellPath.Outcome) { lock.withLock { last = outcome } }
+    var latest: LoginShellPath.Outcome? { lock.withLock { last } }
 }

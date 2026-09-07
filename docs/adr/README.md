@@ -19,8 +19,9 @@
 | [0017](0017-a-missed-call-is-briefed-from-a-fresh-reading.md) | A missed call is briefed from a fresh reading, never from replayed events |
 | [0018](0018-one-dial-two-audiences.md) | One dial, two audiences: the Voice hears prose, the Call Agent hears its rules |
 | [0019](0019-one-claude-approval-route-per-machine.md) | One Claude approval route per user per machine, and the first live engine holds it |
-| [0020](0020-a-codex-session-is-a-daemon-thread-a-terminal-vouches-for.md) | A Codex Session is a daemon-held user root that a live terminal vouches for |
+| [0020](0020-a-codex-session-is-a-daemon-thread-a-terminal-vouches-for.md) | A Codex Session is a daemon-held user root that a live terminal vouches for — **vocabulary amended 2026-09-07**: "daemon" means the shared app-server (ADR 0022) |
 | [0021](0021-the-companion-channel-is-a-surface-the-user-replies-on.md) | The Companion Channel is a surface the user replies on: an Anchor names the target, a numeral picks the option |
+| [0022](0022-the-shared-app-server-is-the-users-own-codex.md) | The shared app-server is the user's own codex, on a derived control socket — **supersedes #82's managed standalone and `daemon start`** |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67), [#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

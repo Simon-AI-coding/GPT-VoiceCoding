@@ -13,14 +13,28 @@ that forgets does not fail — it silently changes the machine and passes. So th
 real runner is taken away from the whole suite here, and a test that wants a
 subprocess has to say so by supplying its own.
 
-**The real shared Codex daemon.** `shared_daemon.locate` shells out to `codex
-app-server daemon version` to find the socket the machine's daemon is listening
-on, and #77 put that lookup on the path every Relay and every Approval now
-takes. A test that reached it would not merely read: it would attach to the
-daemon holding the Sessions the person running the tests has open, and a Relay
-is a `turn/start`. Injecting a `locate` or a `run` is the design; taking the
-real runner away is what makes forgetting it fail loudly instead of quietly
-starting a turn in somebody's work.
+**The real shared Codex app-server.** `shared_daemon.locate` finds the socket
+the machine's server is listening on, and #77 put that lookup on the path every
+Relay and every Approval now takes. A test that reached it would not merely
+read: it would attach to the server holding the Sessions the person running the
+tests has open, and a Relay is a `turn/start`. Injecting a `locate`, or naming a
+`control_socket` of one's own, is the design; refusing the machine's real one is
+what makes forgetting it fail loudly instead of quietly starting a turn in
+somebody's work.
+
+**The hazard got sharper with #272, which is why this guard changed shape.**
+Until then the lookup was a subprocess — `codex app-server daemon version` — and
+taking the runner away could not be forgotten around. Now it is a `stat` of
+`$CODEX_HOME/app-server-control/app-server-control.sock`, which no fixture can
+intercept by refusing a subprocess.
+
+So what is refused is the **one combination that can reach the machine**: a
+`SharedDaemon` built with neither a `control_socket` of its own nor a `locate`
+of its own. Either alone is enough to reach nobody — a path under `tmp_path` is
+a path under `tmp_path`, and an injected `locate` never looks at the one it was
+handed — and refusing more than that would have the suite stubbing the very
+thing under test. Refusing less is what let a forgotten construction dial the
+developer's own live server, which is the accident this exists for.
 
 **The real Claude Session registry.** #77 put this engine on Claude Code's own
 cross-session wire, and being answerable there means publishing a peer key into
@@ -66,6 +80,7 @@ from gpt_voicecoding.adapters.agent.claude import bootstrap
 from gpt_voicecoding.adapters.agent.claude.inbox import ReplyInbox
 from gpt_voicecoding.adapters.agent.claude.registry import DEFAULT_REGISTRY_DIRECTORY
 from gpt_voicecoding.adapters.agent.codex import shared_daemon
+from gpt_voicecoding.adapters.agent.codex.shared_daemon import SharedDaemon
 from gpt_voicecoding.installation import codex_launch_agent
 from launchd_fake import FakeLaunchd
 
@@ -78,36 +93,67 @@ def _no_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(
             "a test reached the real machine through "
             f"gpt_voicecoding.installation.codex_launch_agent: {list(arguments)}. "
-            "Pass a Launchd with a `run` of its own, or a `run=` to daemon_versions."
+            "Pass a Launchd with a `run` of its own."
         )
 
     monkeypatch.setattr(codex_launch_agent, "_run", refuse)
 
 
 @pytest.fixture(autouse=True)
-def _no_real_codex_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_real_codex_app_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one lookup that leads to the machine's own Codex Sessions, refused.
 
-    **Scoped to that command rather than to the runner**, and the distinction is
-    the hazard rather than a convenience. `_run` is a general subprocess helper
-    whose own timeout is proved against `/bin/sleep`, which names no daemon and
-    reaches nobody's Sessions. What must never happen is the *lookup* —
-    `codex app-server daemon version` answers with the socket the machine's
-    daemon is listening on, and from there a Relay is a `turn/start` in somebody's
-    open work.
+    **Scoped to that path rather than to `locate` outright**, and the
+    distinction is the hazard rather than a convenience. `locate` is a pure
+    question about a path a test may perfectly well name in its own `tmp_path`,
+    and refusing it altogether would make every test inject a stub for something
+    that reaches nobody. What must never happen is the *machine's* socket: the
+    server on the other end of it is holding the Sessions the person running the
+    tests has open, and from there a Relay is a `turn/start` in their work.
     """
-    real = shared_daemon._run  # noqa: SLF001
+    forbidden = shared_daemon.default_control_socket()
+    real_init = SharedDaemon.__init__
 
-    async def refuse(arguments: list[str]) -> tuple[int, str]:
-        if tuple(arguments[1:]) == shared_daemon.DAEMON_VERSION_ARGUMENTS:
+    def guarded(
+        self: SharedDaemon,
+        *,
+        control_socket: Path | None = None,
+        locate: object = shared_daemon.locate,
+        **rest: object,
+    ) -> None:
+        # The *resolved* socket, not the absence of one: a caller may legitimately
+        # want the default — the composition root does — and a test that moved
+        # `CODEX_HOME` under `tmp_path` has already put that default somewhere
+        # harmless. What is refused is landing on this machine's own.
+        reaches = Path(control_socket or shared_daemon.default_control_socket())
+        if reaches == forbidden and locate is shared_daemon.locate:
             raise AssertionError(
-                "a test looked for the machine's own Codex daemon through "
-                f"gpt_voicecoding.adapters.agent.codex.shared_daemon: {arguments}. "
-                "Pass a SharedDaemon with a `locate`/`attach` of its own, or a `run=` to locate."
+                "a test built a SharedDaemon that would dial the machine's own Codex "
+                f"app-server at {forbidden}, holding the Sessions whoever is running "
+                "these tests has open. Pass a `control_socket` under `tmp_path`, move "
+                "`CODEX_HOME` there, or pass a `locate` of its own."
             )
-        return await real(arguments)
+        real_init(self, control_socket=control_socket, locate=locate, **rest)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(shared_daemon, "_run", refuse)
+    monkeypatch.setattr(SharedDaemon, "__init__", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _codex_absence_is_never_the_machines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whether *this* machine has a codex is not allowed to decide a test.
+
+    `SharedDaemon` adds "and there is no codex on this machine" to its note when
+    the socket is missing *and* nothing resolves on the `PATH` (#272). That
+    resolution is a `shutil.which` and reaches nobody, so it is not the hazard
+    the fixture above guards — but it does read the developer's environment, and
+    a note that gains a clause on a machine without codex and loses it on one
+    with codex is a test whose output depends on who ran it. So the default
+    answers a fixed path, and a test about the absence injects
+    `resolve_executable=lambda: None` and says so.
+    """
+    monkeypatch.setattr(
+        shared_daemon, "default_resolve_executable", lambda: Path("/somewhere/bin/codex")
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -20,7 +20,7 @@ import plistlib
 from collections.abc import Sequence
 from pathlib import Path
 
-from gpt_voicecoding.installation import codex_launch_agent
+from gpt_voicecoding.installation import codex_launch_agent, codex_runtime
 
 #: The domain a fake launchd answers in. A real one is `gui/<uid>`; this is that
 #: shape and no user's, so a command built from it could not work by accident.
@@ -92,20 +92,56 @@ class FakeLaunchd:
         return [command[1] for command in self.commands]
 
 
-def codex_home(root: Path, *, managed: bool = True) -> Path:
-    """A `CODEX_HOME` under `root`, with the standalone managed binary when asked.
+def codex_home(root: Path) -> Path:
+    """A `CODEX_HOME` under `root`. Nothing this product owns lives in it.
 
-    Shared, because both the item's own tests and the boundary's build the same
-    thing: a `root` of `tmp_path` is what makes the Codex item a real participant
-    rather than a permanent `ABSENT`, and two spellings of it would drift the
-    moment the managed package's layout does.
+    Since #272 the Codex item derives one thing from this directory — the
+    control socket — and takes the executable off the `PATH` instead. So a home
+    is now just a directory, and what makes the item a real participant rather
+    than a permanent `ABSENT` is :func:`codex_on_path`.
     """
     home = root / ".codex"
-    if managed:
-        binary = codex_launch_agent.managed_binary(home)
-        binary.parent.mkdir(parents=True)
-        binary.write_text("#!/bin/sh\n", encoding="utf-8")
-        binary.chmod(0o755)
-    else:
-        home.mkdir()
+    home.mkdir(parents=True, exist_ok=True)
     return home
+
+
+def codex_on_path(root: Path) -> Path:
+    """A directory holding an executable `codex`, for a `PATH` to be built from.
+
+    Shared, because both the item's own tests and the boundary's build the same
+    thing, and two spellings of it would drift the moment resolution does. The
+    file carries the executable bit because that is what `which` looks for — a
+    `codex` without it is a machine with no codex on it, which is a case of its
+    own and has a test of its own.
+    """
+    directory = root / "bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    binary = directory / codex_runtime.EXECUTABLE_NAME
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    return directory
+
+
+def codex(root: Path, *, home: Path | None = None) -> codex_runtime.Resolution:
+    """What a test machine rooted at `root` resolves its one codex to.
+
+    Built by running the real :func:`codex_runtime.resolve` over an environment
+    the test composed, rather than by constructing a `CodexRuntime` outright: a
+    fake that skipped resolution would let the item's tests pass over a runtime
+    the resolver could never produce.
+    """
+    return codex_runtime.resolve(
+        {
+            "PATH": str(codex_on_path(root)),
+            codex_runtime.CODEX_HOME_VARIABLE: str(home if home is not None else codex_home(root)),
+        }
+    )
+
+
+def no_codex(root: Path) -> codex_runtime.Resolution:
+    """A machine with a `PATH` and no codex anywhere on it."""
+    empty = root / "empty-bin"
+    empty.mkdir(parents=True, exist_ok=True)
+    return codex_runtime.resolve(
+        {"PATH": str(empty), codex_runtime.CODEX_HOME_VARIABLE: str(codex_home(root))}
+    )

@@ -459,7 +459,7 @@ DAEMON_ROSTER_METHOD = codex_discovery.ROSTER_METHOD
 #: functions, defaulted here and injectable only so a test can pin the reading
 #: without a socket — there is deliberately no second route to the daemon under
 #: `tests/acceptance` (advisor ruling on #232).
-DaemonLocator = Callable[[str], Awaitable[tuple[codex_shared_daemon.DaemonAddress | None, str]]]
+DaemonLocator = Callable[[Path], tuple[codex_shared_daemon.DaemonAddress | None, str]]
 DaemonDial = Callable[..., Awaitable[Any]]
 
 #: The long spelling of a config override, and the only one that can be written
@@ -559,7 +559,7 @@ class DaemonMembership:
 def codex_daemon_membership(
     thread_id: str,
     *,
-    executable: str | None = None,
+    control_socket: Path | None = None,
     settings: CodexSettings | None = None,
     locate: DaemonLocator = codex_shared_daemon.locate,
     attach: DaemonDial = codex_app_server.attach,
@@ -575,13 +575,12 @@ def codex_daemon_membership(
     `roster` failed, and nine steps were SKIPPED behind it (#232).
 
     **Asked the engine's own way, through the engine's own functions.**
-    `shared_daemon.locate` finds the socket by asking `codex app-server daemon
-    version`, which is the one address that cannot go stale, and
-    `codex_app_server.attach` becomes one more client of a daemon somebody else
-    owns. This is `foreign_codex_refusal`'s rule applied a second time: a harness
-    that implemented the wire again would be a second answer to a question the
-    product already answers, and the product's answer is the one that decides
-    whether a row appears.
+    `shared_daemon.locate` settles the derived control socket — the one place
+    that path is spelled, since #272 — and `codex_app_server.attach` becomes one
+    more client of a server somebody else owns. This is `foreign_codex_refusal`'s
+    rule applied a second time: a harness that implemented the wire again would
+    be a second answer to a question the product already answers, and the
+    product's answer is the one that decides whether a row appears.
 
     **The connection is let go of on every path.** Join-only is the daemon
     module's rule and it is this call's too: it opens a client, asks one method,
@@ -608,7 +607,7 @@ def codex_daemon_membership(
     return asyncio.run(
         _codex_daemon_membership(
             thread_id.strip(),
-            executable=executable or codex_settings.executable,
+            control_socket=control_socket or codex_shared_daemon.default_control_socket(),
             settings=codex_settings,
             locate=locate,
             attach=attach,
@@ -619,18 +618,17 @@ def codex_daemon_membership(
 async def _codex_daemon_membership(
     thread_id: str,
     *,
-    executable: str,
+    control_socket: Path,
     settings: CodexSettings,
     locate: DaemonLocator,
     attach: DaemonDial,
 ) -> DaemonMembership:
-    address, why_not = await locate(executable)
+    address, why_not = locate(control_socket)
     if address is None:
         return DaemonMembership(thread_id=thread_id, held=None, reason=why_not)
-    where = (
-        f"{address.socket_path} (CLI {address.cli_version!r}, "
-        f"app-server {address.app_server_version!r})"
-    )
+    # The socket, and nothing about versions: with one codex on the machine
+    # there is no second version for the first to disagree with (#272).
+    where = str(address.socket_path)
     try:
         connection = await attach(
             address.socket_path, version=__version__, settings=settings, experimental=False
@@ -640,7 +638,7 @@ async def _codex_daemon_membership(
             thread_id=thread_id,
             held=None,
             daemon=where,
-            reason=f"the shared Codex daemon at {where} could not be dialled: {undialled!r}",
+            reason=f"the shared Codex app-server at {where} could not be dialled: {undialled!r}",
         )
     try:
         answer = await connection.request(
@@ -652,7 +650,7 @@ async def _codex_daemon_membership(
             held=None,
             daemon=where,
             reason=(
-                f"the shared Codex daemon at {where} did not answer "
+                f"the shared Codex app-server at {where} did not answer "
                 f"{DAEMON_ROSTER_METHOD}: {unanswered!r}"
             ),
         )
@@ -666,7 +664,7 @@ async def _codex_daemon_membership(
             held=None,
             daemon=where,
             reason=(
-                f"the shared Codex daemon at {where} answered {DAEMON_ROSTER_METHOD} in a "
+                f"the shared Codex app-server at {where} answered {DAEMON_ROSTER_METHOD} in a "
                 f"shape this run cannot read: {answer!r}"
             ),
         )

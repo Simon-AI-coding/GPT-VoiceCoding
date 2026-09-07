@@ -46,7 +46,6 @@ from gpt_voicecoding.adapters.agent.codex.threads import ApprovalRouting
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings, SettingsError
 from gpt_voicecoding.core.sessions import SessionRegistry
 from gpt_voicecoding.engine.composition import DEFAULT_DISCOVERY_SECONDS
-from gpt_voicecoding.installation import codex_launch_agent
 from gpt_voicecoding.seams.agent import (
     ApprovalRequest,
     ApprovalVerdict,
@@ -204,8 +203,8 @@ def no_daemon() -> SharedDaemon:
     pre-wire `FAILED` case in its own right.
     """
 
-    async def not_running(_executable: str) -> tuple[None, str]:
-        return None, "the shared Codex daemon is not answering: no daemon is running"
+    def not_running(_socket: Path) -> tuple[None, str]:
+        return None, "the shared Codex app-server is not answering: there is no socket"
 
     return SharedDaemon(settings=CodexSettings(), version="test", locate=not_running)
 
@@ -433,13 +432,13 @@ class TestCarryingTheUsersWords:
         receipt = asyncio.run(scenario())
         assert receipt.outcome is Delivery.FAILED
         assert PRE_WIRE_UNREACHABLE in receipt.reason
-        assert "no daemon is running" in receipt.reason
+        assert "there is no socket" in receipt.reason
 
     def test_that_refusal_names_the_daemons_own_reason(self, socket_path: Path) -> None:
         """ "The daemon is down" and "`codex` is not installed" send you elsewhere."""
 
         async def scenario():
-            async def missing(_executable: str) -> tuple[None, str]:
+            def missing(_socket: Path) -> tuple[None, str]:
                 return None, "codex could not be run: No such file or directory"
 
             adapter = CodexAgentAdapter(
@@ -501,6 +500,7 @@ class TestSupplement:
     def test_both_routes_are_offered_because_steer_is_stable(self) -> None:
         adapter = CodexAgentAdapter(
             progress_capture=PROGRESS_CAPTURE,
+            daemon=no_daemon(),
         )
         assert adapter.supported_routes() == frozenset({RelayRoute.DELIVER, RelayRoute.SUPPLEMENT})
 
@@ -1372,39 +1372,74 @@ class TestSettings:
         assert CodexSettings.of(None) == CodexSettings()
         assert CodexSettings.of({}) == CodexSettings()
 
-    def test_construction_paths_agree_for_a_configured_codex_home(
+    def test_construction_paths_agree_on_a_stated_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        environ = {"CODEX_HOME": str(tmp_path / "codex-home")}
-        monkeypatch.setenv("CODEX_HOME", environ["CODEX_HOME"])
+        directory = tmp_path / "bin"
+        directory.mkdir()
+        (directory / "codex").write_text("#!/bin/sh\n", encoding="utf-8")
+        (directory / "codex").chmod(0o755)
+        monkeypatch.setenv("PATH", str(directory))
 
-        assert CodexSettings().executable == CodexSettings.of({}, environ=environ).executable
+        assert (
+            CodexSettings().executable
+            == CodexSettings.of({}, environ={"PATH": str(directory)}).executable
+        )
 
-    def test_construction_paths_agree_without_a_configured_codex_home(
+    def test_construction_paths_agree_when_there_is_no_codex(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setenv("PATH", "/nowhere-at-all")
 
         assert CodexSettings().executable == CodexSettings.of({}, environ={}).executable
 
-    def test_direct_construction_derives_the_executable_per_instance(
+    def test_direct_construction_resolves_the_executable_per_instance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "first"))
+        """Re-resolved rather than remembered — the `nvm use` case (#272).
+
+        Nothing writes the resolved path down, here or in `config.toml`, so a
+        machine whose codex moved gets the new one at the next construction
+        rather than a recorded path that no longer exists.
+        """
+        for name in ("first", "second"):
+            directory = tmp_path / name
+            directory.mkdir()
+            (directory / "codex").write_text("#!/bin/sh\n", encoding="utf-8")
+            (directory / "codex").chmod(0o755)
+
+        monkeypatch.setenv("PATH", str(tmp_path / "first"))
         first = CodexSettings()
-        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "second"))
+        monkeypatch.setenv("PATH", str(tmp_path / "second"))
 
         second = CodexSettings()
 
         assert first.executable != second.executable
 
-    def test_the_default_executable_is_installations_managed_binary(self, tmp_path: Path) -> None:
-        environ = {"CODEX_HOME": str(tmp_path / "codex-home")}
+    def test_the_default_executable_is_the_codex_on_the_engines_path(self, tmp_path: Path) -> None:
+        """#272 replaced #82's managed standalone with the codex the user types.
 
-        settings = CodexSettings.of(None, environ=environ)
+        The engine already runs on the user's real `PATH` — the shell reads it
+        from their login shell and spawns with it — so an ordinary `which` over
+        that `PATH` is the whole of the resolution.
+        """
+        directory = tmp_path / "bin"
+        directory.mkdir()
+        (directory / "codex").write_text("#!/bin/sh\n", encoding="utf-8")
+        (directory / "codex").chmod(0o755)
 
-        expected = codex_launch_agent.managed_binary(codex_launch_agent.default_codex_home(environ))
-        assert Path(settings.executable).resolve() == expected.resolve()
+        settings = CodexSettings.of(None, environ={"PATH": str(directory)})
+
+        assert Path(settings.executable).resolve() == (directory / "codex").resolve()
+
+    def test_no_codex_anywhere_is_the_bare_name_and_never_a_refusal(self) -> None:
+        """An engine that refused to start over a missing coding agent would take
+        the control plane and the Claude lane down with it. The bare name is also
+        what the user types, and what a spawn resolves again on the PATH of the
+        moment — which is the re-resolve a `nvm use` needs."""
+        settings = CodexSettings.of(None, environ={"PATH": "/nowhere-at-all"})
+
+        assert settings.executable == "codex"
 
     def test_a_blank_executable_is_refused_on_both_construction_paths(self) -> None:
         with pytest.raises(SettingsError, match="executable must name"):
@@ -1437,12 +1472,21 @@ class TestSettings:
         assert settings.executable == "/opt/codex"
         assert settings.socket_directory == Path("~/sockets").expanduser()
 
-    def test_the_factory_builds_an_adapter_from_a_table(self) -> None:
+    def test_the_factory_builds_an_adapter_from_a_table(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The composition root's own path, so the daemon is the shipped default.
+
+        `CODEX_HOME` is moved under `tmp_path` because that default derives the
+        control socket from it, and a factory test has no business naming the
+        socket the developer's own Sessions are on (`tests/conftest.py`).
+        """
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
         adapter = codex_agent(
             progress_capture=PROGRESS_CAPTURE,
             sink=Sink(),
             settings={"receipt_timeout_seconds": 2},
-            environ={"CODEX_HOME": "/codex-home"},
+            environ={"CODEX_HOME": str(tmp_path / "codex-home")},
         )
         assert isinstance(adapter, CodexAgentAdapter)
 
@@ -1595,8 +1639,8 @@ def daemon_at(path: Path) -> SharedDaemon:
     machine's own daemon (`tests/conftest.py`).
     """
 
-    async def found(_executable: str) -> tuple[DaemonAddress, str]:
-        return DaemonAddress(socket_path=path, cli_version="t", app_server_version="t"), ""
+    def found(_socket: Path) -> tuple[DaemonAddress, str]:
+        return DaemonAddress(socket_path=path), ""
 
     return SharedDaemon(settings=CodexSettings(), version="test", locate=found)
 

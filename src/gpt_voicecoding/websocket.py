@@ -16,6 +16,14 @@ any loop exists. Trying to share the I/O too would mean one of the two callers
 holding a transport shaped for the other, and this module deliberately holds
 neither: nothing here opens, reads or writes anything.
 
+**What is shared goes as far as the opcodes, and stops at the wait.** Both
+callers reassemble a message the same way — skip a pong, answer a ping, gather
+data frames and continuations until the final one — and that reassembly is
+protocol, not transport. It lives here as :class:`Reassembly`, which is fed
+decoded frames and says what to do about each; what it never does is *get* one.
+Splitting it there is what lets one caller await its frames and the other block
+for them while the rule about which opcode means what is written once.
+
 **Nothing here words an error about codex, either.** Both callers phrase their
 own refusals, because "the codex app-server set reserved WebSocket bits" is the
 engine's sentence about its own far side and a leaf that owned it would be
@@ -197,3 +205,53 @@ def extended_length(raw: bytes) -> int:
 def unmask(payload: bytes, mask: bytes) -> bytes:
     """Apply a frame's mask. Its own inverse, which is why writing uses it too."""
     return bytes(byte ^ mask[index % MASK_BYTES] for index, byte in enumerate(payload))
+
+
+@dataclass(frozen=True, slots=True)
+class Step:
+    """What a reassembler makes of one frame: at most one of these is set.
+
+    Three outcomes and no fourth. `pong_with` is a frame the caller must send
+    back, because a peer that pings a client which never pongs is entitled to
+    hang up; `message` is a whole message, reassembled; `refuse` is a reason
+    this is not a peer speaking the protocol. All three unset means "read
+    another frame" — a pong to ignore, or a fragment held for the next one.
+    """
+
+    message: bytes | None = None
+    pong_with: bytes | None = None
+    refuse: str | None = None
+
+
+class Reassembly:
+    """One message, gathered across frames. Reads nothing and writes nothing.
+
+    Fed `(opcode, final, payload)` — however the caller got them — and answers
+    a :class:`Step`. It holds only the fragments of the message being gathered,
+    so one instance reads one message and is then done with.
+
+    `limit` is the caller's own ceiling on a message, checked as the fragments
+    grow rather than after: a peer that keeps sending continuations would
+    otherwise be an unbounded buffer that is only noticed once it is full.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._fragments = bytearray()
+        self._started = False
+
+    def take(self, opcode: int, final: bool, payload: bytes) -> Step:
+        if opcode == OPCODE_CLOSE:
+            return Step(refuse="closed the WebSocket")
+        if opcode == OPCODE_PING:
+            return Step(pong_with=client_frame(payload, OPCODE_PONG))
+        if opcode == OPCODE_PONG:
+            return Step()
+        if opcode in (OPCODE_TEXT, OPCODE_BINARY) and not self._started:
+            self._started = True
+        elif opcode != OPCODE_CONTINUATION or not self._started:
+            return Step(refuse=f"sent an unexpected WebSocket opcode {opcode}")
+        self._fragments.extend(payload)
+        if len(self._fragments) > self._limit:
+            return Step(refuse="sent a message past the configured frame limit")
+        return Step(message=bytes(self._fragments)) if final else Step()

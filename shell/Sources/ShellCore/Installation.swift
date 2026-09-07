@@ -90,13 +90,22 @@ private final class OutputBox: @unchecked Sendable {
 /// login-and-interactive lesson on this machine, and it is the one that already
 /// learned it the hard way.
 ///
-/// What that costs, stated rather than bounded: one extra login-shell read per
-/// app launch — ~0.45 s on the reference machine — because the reconcile runs
-/// once at launch and the engine's own read happens per spawn. It is inside the
-/// 30 s ``Installation/deadline`` and it happens before the engine starts. The
-/// alternative was caching the reading across the two, which is a copy of
-/// somebody's profile with a lifetime to reason about, and ``LoginShellPath``'s
-/// own ruling is against exactly that.
+/// **The invariant is one implementation, not one reading** (Simon's ruling on
+/// #272's review). This reads the login shell and so does every engine spawn,
+/// so a launch pays for two — one extra login-shell read per app launch,
+/// ~0.5 s measured, inside the 30 s ``Installation/deadline`` and spent before
+/// the engine starts. That cost buys nothing that could be called consistency:
+/// the plist this renders is a **snapshot** until the next reconcile, while
+/// ``ProcessLauncher`` re-reads on every spawn by its own documented rule, so
+/// the two already diverge by design the moment somebody edits their profile.
+/// Handing the reconcile's reading to the first spawn would protect one second
+/// of agreement between two values that are meant to be read at different
+/// times — a special case, and a copy of somebody's profile with a lifetime to
+/// reason about, which is what ``LoginShellPath``'s own ruling is against.
+///
+/// What *is* shared is the thing that can be got wrong: `-l -i`, the sentinels,
+/// the budget and the fail-open. One implementation of that lesson on this
+/// machine, which is what #272 refused option (B) over.
 public struct InstallationRunner: Sendable {
     /// Where the `PATH` comes from. A seam for the same reason
     /// ``ProcessLauncher``'s is: a suite that is not about the `PATH` may

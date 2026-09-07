@@ -139,6 +139,24 @@ def _no_real_codex_app_server(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _codex_absence_is_never_the_machines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whether *this* machine has a codex is not allowed to decide a test.
+
+    `SharedDaemon` adds "and there is no codex on this machine" to its note when
+    the socket is missing *and* nothing resolves on the `PATH` (#272). That
+    resolution is a `shutil.which` and reaches nobody, so it is not the hazard
+    the fixture above guards — but it does read the developer's environment, and
+    a note that gains a clause on a machine without codex and loses it on one
+    with codex is a test whose output depends on who ran it. So the default
+    answers a fixed path, and a test about the absence injects
+    `resolve_executable=lambda: None` and says so.
+    """
+    monkeypatch.setattr(
+        shared_daemon, "default_resolve_executable", lambda: Path("/somewhere/bin/codex")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test publishes this process as a peer of the real machine's Sessions."""
     real = ReplyInbox._publish_key  # noqa: SLF001

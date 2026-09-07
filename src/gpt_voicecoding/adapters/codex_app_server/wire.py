@@ -247,7 +247,7 @@ class AppServerConnection:
         if writer is not None:
             with suppress(Exception):
                 async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
-                    writer.write(self._frame(b"", _OPCODE_CLOSE))
+                    writer.write(websocket.client_frame(b"", _OPCODE_CLOSE))
                     await writer.drain()
             writer.close()
             with suppress(Exception):
@@ -346,54 +346,49 @@ class AppServerConnection:
             raise WireError("this message is larger than the configured frame limit")
         async with self._write_lock:
             try:
-                writer.write(self._frame(payload, _OPCODE_TEXT))
+                writer.write(websocket.client_frame(payload, _OPCODE_TEXT))
                 await writer.drain()
             except OSError as error:
                 raise WireClosed(f"writing to the codex app-server failed: {error}") from None
 
-    def _frame(self, payload: bytes, opcode: int) -> bytes:
-        """One masked client frame. A client always masks; a server never does."""
-        return websocket.client_frame(payload, opcode)
-
     async def _read_message(self) -> Message:
-        """One whole JSON-RPC message, reassembled across continuation frames."""
-        fragments = bytearray()
-        started = False
+        """One whole JSON-RPC message, awaited a frame at a time.
+
+        What each opcode means, and how fragments become a message, is
+        `websocket.Reassembly`'s — one spelling of it on this machine, shared
+        with the blocking client `bridge-install status` runs (#272, #47). What
+        stays here is the awaiting, and every sentence about the far side.
+        """
+        gathering = websocket.Reassembly(self._max_frame_bytes)
         while True:
-            opcode, final, payload = await self._read_frame()
-            if opcode == _OPCODE_CLOSE:
-                raise WireError("the codex app-server closed the WebSocket")
-            if opcode == _OPCODE_PING:
-                await self._pong(payload)
-                continue
-            if opcode == _OPCODE_PONG:
-                continue
-            if opcode in (_OPCODE_TEXT, _OPCODE_BINARY) and not started:
-                fragments.extend(payload)
-                started = True
-            elif opcode == _OPCODE_CONTINUATION and started:
-                fragments.extend(payload)
-            else:
-                raise WireError(f"unexpected WebSocket opcode {opcode} from the codex app-server")
-            if len(fragments) > self._max_frame_bytes:
-                raise WireError("a codex app-server message exceeds the configured frame limit")
-            if final:
+            step = gathering.take(*await self._read_frame())
+            if step.refuse is not None:
+                raise WireError(f"the codex app-server {step.refuse}")
+            if step.pong_with is not None:
+                await self._send_frame(step.pong_with)
+            if step.message is not None:
                 break
         try:
-            message = json.loads(bytes(fragments))
+            message = json.loads(step.message)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise WireError(f"the codex app-server sent unreadable JSON: {error}") from None
         if not isinstance(message, dict):
             raise WireError("the codex app-server sent something that is not a JSON object")
         return message
 
-    async def _pong(self, payload: bytes) -> None:
+    async def _send_frame(self, frame: bytes) -> None:
+        """One already-built frame, on the write lock. Failing is not an error here.
+
+        The only caller is the pong above, and a pong nobody can hear is a
+        courtesy the read loop must not die of: the connection ending is
+        something `_read_frame` will report on its own terms a moment later.
+        """
         writer = self._writer
         if writer is None:
             return
         async with self._write_lock:
             with suppress(OSError):
-                writer.write(self._frame(payload, _OPCODE_PONG))
+                writer.write(frame)
                 await writer.drain()
 
     async def _read_frame(self) -> tuple[int, bool, bytes]:

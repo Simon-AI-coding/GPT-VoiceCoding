@@ -116,6 +116,25 @@ HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 #: put them in a status line.
 UNREADABLE_ANSWER_QUOTED_CHARS: Final = 120
 
+#: The most this read will hold from one message. An `initialize` answer is a
+#: short document; anything past this is a peer this status line has no business
+#: buffering, and the bound is what keeps a `bridge-install status` from growing
+#: to whatever a peer feels like sending. Deliberately far below the engine
+#: client's 32 MiB, which is sized for a whole thread readback and reads
+#: nothing of the sort here.
+MAX_MESSAGE_BYTES: Final = 1024 * 1024
+
+#: The id this connection's one request carries. A whole number, because the
+#: answer is matched on it and JSON-RPC lets a peer echo an id of any shape.
+INITIALIZE_ID: Final = 1
+
+#: How many messages this will read past before it gives up looking for that
+#: answer. A server may notify on the way — the engine's own client routes such
+#: things to a handler — and a status read has nowhere to put them, so it skips
+#: them. Bounded so a peer that only ever notifies cannot hold the read open to
+#: the socket timeout, once per message, for as long as it likes.
+MESSAGES_BEFORE_THE_ANSWER: Final = 32
+
 
 def default_codex_home(environ: Mapping[str, str], home: Path | None = None) -> Path:
     """The Codex home this run is about."""
@@ -290,14 +309,44 @@ def _handshake(socket_path: Path) -> dict[str, Any]:
                 f"whatever is listening on {socket_path} is not a codex app-server "
                 f"(it answered {status!r} to a WebSocket upgrade)"
             )
-        _send(connection, {"id": 1, "method": "initialize", "params": _initialize_params()})
-        answer = _receive(connection)
+        _send(
+            connection,
+            {"id": INITIALIZE_ID, "method": "initialize", "params": _initialize_params()},
+        )
+        answer = _await_initialize(connection, socket_path)
         _send(connection, {"method": "initialized", "params": {}})
     error = answer.get("error")
     if error is not None:
         raise _HandshakeRefused(f"{socket_path} answered initialize with an error: {error}")
     result = answer.get("result")
-    return result if isinstance(result, dict) else {}
+    if not isinstance(result, dict):
+        # Neither a result nor an error is not an answer. Taken as an empty
+        # result it would report a peer that said `{}` — or said nothing this
+        # request asked for — as a server that answered, which is the one thing
+        # a status line must not do.
+        raise _HandshakeRefused(
+            f"{socket_path} answered initialize with neither a result nor an error"
+        )
+    return result
+
+
+def _await_initialize(connection: socket.socket, socket_path: Path) -> dict[str, Any]:
+    """The answer to *this* request, told apart from anything else on the wire.
+
+    Matched on the id rather than taken as the first message to arrive. The
+    server may notify before it answers — the engine's own client exists partly
+    to route such things — and a first-message read would take a notification,
+    find no `result` in it, and report whatever it decided that meant. Skipped
+    here rather than handled: a status read has nowhere to put a notification
+    and no reason to want one.
+    """
+    for _ in range(MESSAGES_BEFORE_THE_ANSWER):
+        message = _receive(connection)
+        if message.get("id") == INITIALIZE_ID and message.get("method") is None:
+            return message
+    raise _HandshakeRefused(
+        f"{socket_path} sent {MESSAGES_BEFORE_THE_ANSWER} messages without answering initialize"
+    )
 
 
 def _initialize_params() -> dict[str, Any]:
@@ -314,38 +363,26 @@ def _send(connection: socket.socket, message: dict[str, Any]) -> None:
 
 
 def _receive(connection: socket.socket) -> dict[str, Any]:
-    """One whole JSON-RPC message, reassembled across continuation frames.
+    """One whole JSON-RPC message, read a frame at a time and blocking.
 
-    Pings are answered on the way past, because a server that pings a client
-    that never pongs is entitled to hang up mid-handshake. Everything else that
-    is not a data frame is refused rather than skipped: this connection expects
-    exactly one answer, and a peer sending something else is not the server this
-    is here to recognise.
+    What each opcode means, and how fragments become a message, is
+    `websocket.Reassembly`'s — the same one the engine's client uses, so a
+    protocol change is one edit rather than two that can drift (#47). What is
+    here is the blocking read, because this runs before any event loop exists.
     """
-    fragments = bytearray()
-    started = False
+    gathering = websocket.Reassembly(MAX_MESSAGE_BYTES)
     while True:
-        opcode, final, payload = _read_frame(connection)
-        if opcode == websocket.OPCODE_CLOSE:
-            raise _HandshakeRefused("the shared app-server closed the WebSocket")
-        if opcode == websocket.OPCODE_PING:
-            connection.sendall(websocket.client_frame(payload, websocket.OPCODE_PONG))
-            continue
-        if opcode == websocket.OPCODE_PONG:
-            continue
-        if opcode in (websocket.OPCODE_TEXT, websocket.OPCODE_BINARY) and not started:
-            fragments.extend(payload)
-            started = True
-        elif opcode == websocket.OPCODE_CONTINUATION and started:
-            fragments.extend(payload)
-        else:
-            raise _HandshakeRefused(f"unexpected WebSocket opcode {opcode}")
-        if final:
+        step = gathering.take(*_read_frame(connection))
+        if step.refuse is not None:
+            raise _HandshakeRefused(f"it {step.refuse}")
+        if step.pong_with is not None:
+            connection.sendall(step.pong_with)
+        if step.message is not None:
             break
     try:
-        message = json.loads(bytes(fragments))
+        message = json.loads(step.message)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        quoted = bytes(fragments)[:UNREADABLE_ANSWER_QUOTED_CHARS].decode("utf-8", "replace")
+        quoted = step.message[:UNREADABLE_ANSWER_QUOTED_CHARS].decode("utf-8", "replace")
         raise _HandshakeRefused(f"it answered initialize with unreadable JSON: {quoted}") from None
     if not isinstance(message, dict):
         raise _HandshakeRefused("it answered initialize with something that is not an object")
@@ -360,6 +397,8 @@ def _read_frame(connection: socket.socket) -> tuple[int, bool, bytes]:
     length = prefix.length
     if prefix.extended_length_bytes:
         length = websocket.extended_length(_read_exactly(connection, prefix.extended_length_bytes))
+    if length > MAX_MESSAGE_BYTES:
+        raise _HandshakeRefused("it sent a frame larger than this read will hold")
     mask = _read_exactly(connection, websocket.MASK_BYTES) if prefix.masked else b""
     payload = _read_exactly(connection, length) if length else b""
     if prefix.masked:

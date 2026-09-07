@@ -115,6 +115,82 @@ class TestFindingIt:
             assert address is not None or reason
 
 
+class TestSayingThereIsNoCodexAtAll:
+    """#272's first edge case, on the engine's side of it.
+
+    A machine with no codex has no socket either, so the socket reason alone is
+    true and sends the reader looking for a server that was never going to be
+    there. The engine runs on the user's real `PATH`, so whether they have a
+    codex is one `which` away, and the lane carries the answer on `degraded`.
+    """
+
+    def test_no_codex_and_no_socket_says_both(self, tmp_path: Path) -> None:
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=tmp_path / "nothing-here.sock",
+            resolve_executable=lambda: None,
+        )
+
+        assert asyncio.run(daemon.client()) is None
+        assert "there is no socket" in daemon.note
+        assert "there is no codex on this machine" in daemon.note
+
+    def test_a_codex_that_is_there_leaves_the_socket_reason_alone(self, tmp_path: Path) -> None:
+        """A machine that has a codex and no running server needs the first
+        sentence and would be misled by the second."""
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=tmp_path / "nothing-here.sock",
+            resolve_executable=lambda: Path("/opt/bin/codex"),
+        )
+
+        assert asyncio.run(daemon.client()) is None
+        assert "there is no socket" in daemon.note
+        assert "no codex" not in daemon.note
+
+    def test_the_socket_reason_comes_first(self, tmp_path: Path) -> None:
+        """What this build observed leads; the resolution explains it.
+
+        Never the other way: the dial's own words are the fact, and the missing
+        codex is the reason behind it.
+        """
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=tmp_path / "nothing-here.sock",
+            resolve_executable=lambda: None,
+        )
+        asyncio.run(daemon.client())
+
+        assert daemon.note.index("no socket") < daemon.note.index("no codex")
+
+    def test_a_joined_server_is_never_asked_the_question(self, socket_path: Path) -> None:
+        """An engine that is joined has its answer, and the ordinary tick pays nothing."""
+        asked = []
+
+        async def attach(path: Path, **_: object) -> object:
+            class _Connection:
+                is_open = True
+
+                async def aclose(self) -> None:
+                    pass
+
+            return _Connection()
+
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=socket_path,
+            attach=attach,
+            resolve_executable=lambda: asked.append(1) or None,  # type: ignore[func-returns-value]
+        )
+
+        assert asyncio.run(daemon.client()) is not None
+        assert asked == []
+
+
 class TestWhatAJoinedServerHasToSayAboutItself:
     """Nothing — and #272 dissolves #67 rather than reopening it.
 

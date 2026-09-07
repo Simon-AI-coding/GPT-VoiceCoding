@@ -35,6 +35,16 @@ disagree, so there is nothing to report and nothing to compare. Everything else
 one that refused the connection — stays, because those are still facts about
 this engine's reach and the user still deserves to see them.
 
+**"There is no socket" and "there is no codex" are different sentences, and
+this says whichever is true.** A machine with no codex on it has no socket
+either, so the socket reason alone is true and sends the reader to look for a
+server that was never going to be there. The engine runs on the user's real
+`PATH` — the shell reads it from their login shell and spawns with it — so
+whether they have a codex at all is one `which` away, and the lane says so as
+part of the same `degraded` note (#272's first edge case, on this side of it).
+It is asked only when there is no socket: an engine that is joined has its
+answer already, and the ordinary tick pays nothing.
+
 **Locating is re-tried, not remembered.** The address is looked up only when
 there is no live connection, so a healthy engine does no work per tick; an
 engine whose server is down probes once per discovery instead, which is the only
@@ -65,6 +75,16 @@ from gpt_voicecoding.adapters.codex_app_server.wire import AppServerConnection, 
 from gpt_voicecoding.installation import codex_runtime
 
 _log = logging.getLogger(__name__)
+
+
+def default_resolve_executable() -> Path | None:
+    """Whether this machine has a codex at all, on the `PATH` the engine runs on.
+
+    A seam for the same reason `locate` is one: a test naming its own answer
+    reaches nobody, and the real one reads the environment of whoever is
+    running it.
+    """
+    return codex_runtime.resolve_executable(os.environ)
 
 
 def default_control_socket() -> Path:
@@ -131,6 +151,7 @@ class SharedDaemon:
         control_socket: Path | None = None,
         locate: Callable[[Path], tuple[DaemonAddress | None, str]] = locate,
         attach: Callable[..., Awaitable[Any]] = attach,
+        resolve_executable: Callable[[], Path | None] | None = None,
     ) -> None:
         self._settings = settings
         self._version = version
@@ -140,6 +161,7 @@ class SharedDaemon:
         #: unanswerable at any moment a person could ask.
         self._control_socket = control_socket or default_control_socket()
         self._locate = locate
+        self._resolve_executable = resolve_executable
         self._attach = attach
         self._connection: AppServerConnection | None = None
         self._note = ""
@@ -234,7 +256,7 @@ class SharedDaemon:
 
             address, reason = self._locate(self._control_socket)
             if address is None:
-                self._note = reason
+                self._note = self._also_no_codex(reason)
                 return None
             try:
                 connection = await self._attach(
@@ -262,6 +284,24 @@ class SharedDaemon:
             self._socket_path = address.socket_path
             self._note = ""
             return connection
+
+    def _also_no_codex(self, reason: str) -> str:
+        """The socket reason, and — when it is the deeper fact — the missing codex.
+
+        Ordered that way round on purpose: the reason the dial actually
+        produced comes first, because it is what this build observed, and the
+        resolution is the explanation behind it. Never the other way, and never
+        instead: a machine that has a codex and no running server needs the
+        first sentence and would be misled by the second.
+        """
+        # Resolved when it is *asked*, not when this class was defined: the
+        # module attribute is the one `tests/conftest.py` takes away, and a
+        # default bound at definition would have made that fixture a no-op —
+        # which is exactly how the first draft of it went unnoticed.
+        resolve = self._resolve_executable or default_resolve_executable
+        if resolve() is not None:
+            return reason
+        return f"{reason} — and there is no codex on this machine to have started one"
 
     async def aclose(self) -> None:
         """Let go of this engine's end. The server and its Sessions carry on.

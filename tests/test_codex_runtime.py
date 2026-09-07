@@ -251,10 +251,20 @@ class FakeAppServer:
     """
 
     def __init__(
-        self, path: Path, *, answer: Callable[[dict[str, Any]], Any] | None = None
+        self,
+        path: Path,
+        *,
+        answer: Callable[[dict[str, Any]], Any] | None = None,
+        notify_first: bool = False,
+        notify_forever: bool = False,
     ) -> None:
         self._path = path
-        self._answer = answer or (lambda _: {"userAgent": "gpt-voicecoding/0.153.4"})
+        self._answer = answer or (lambda _: {"result": {"userAgent": "gpt-voicecoding/0.153.4"}})
+        #: Send one notification before answering, which is what a real server
+        #: does whenever something happened while this client was connecting.
+        self._notify_first = notify_first
+        #: Never answer, only notify. The peer the message bound exists for.
+        self._notify_forever = notify_forever
         self._listener = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
         self._listener.bind(str(path))
         self._listener.listen(1)
@@ -294,6 +304,8 @@ class FakeAppServer:
                 ).encode("ascii")
             )
             self.upgraded = True
+            if self._notify_first:
+                self._write(client, {"method": "thread/started", "params": {}})
             while True:
                 message = self._read(client)
                 if message is None:
@@ -301,6 +313,10 @@ class FakeAppServer:
                 self.asked.append(message)
                 if message.get("id") is None:
                     continue
+                if self._notify_forever:
+                    for _ in range(codex_runtime.MESSAGES_BEFORE_THE_ANSWER + 1):
+                        self._write(client, {"method": "thread/event", "params": {}})
+                    return
                 answered = self._answer(message)
                 if answered is None:
                     return
@@ -460,6 +476,47 @@ class TestWhatAStatusRunSaysAboutTheSharedServer:
 
         assert "is not answering" in said
         assert "answered initialize with an error" in said
+
+    def test_a_notification_on_the_way_is_not_mistaken_for_the_answer(
+        self, socket_path: Path
+    ) -> None:
+        """Matched on the id, not taken as the first message to arrive.
+
+        A server may notify before it answers — the engine's own client exists
+        partly to route such things — and a first-message read would take the
+        notification, find no `result` in it, and report whatever it decided
+        that meant.
+        """
+        with FakeAppServer(
+            socket_path,
+            answer=lambda _: {"result": {"codexHome": "/real/.codex"}},
+            notify_first=True,
+        ) as server:
+            said = codex_runtime.answering(socket_path)
+
+        assert "answered initialize" in said
+        assert "/real/.codex" in said
+        assert server.upgraded
+
+    def test_an_answer_with_neither_a_result_nor_an_error_is_not_an_answer(
+        self, socket_path: Path
+    ) -> None:
+        """`{}` taken as an empty result would report a peer that said nothing
+        this request asked for as a server that answered."""
+        with FakeAppServer(socket_path, answer=lambda _: {}):
+            said = codex_runtime.answering(socket_path)
+
+        assert "is not answering" in said
+        assert "neither a result nor an error" in said
+
+    def test_a_peer_that_only_ever_notifies_is_given_up_on(self, socket_path: Path) -> None:
+        """Bounded, so a peer that never answers cannot hold the read open at the
+        socket timeout once per message for as long as it likes."""
+        with FakeAppServer(socket_path, answer=lambda _: None, notify_forever=True):
+            said = codex_runtime.answering(socket_path)
+
+        assert "is not answering" in said
+        assert "without answering initialize" in said
 
     def test_a_server_that_hangs_up_mid_handshake_is_not_answering(self, socket_path: Path) -> None:
         with FakeAppServer(socket_path, answer=lambda _: None):

@@ -30,7 +30,7 @@ THEIRS = "01998f4c-0d5a-7c31-9f2b-6a0c1e77bb20"
 
 SOCKET = Path("/tmp/codex-app-server-501/daemon.sock")
 
-ADDRESS = DaemonAddress(socket_path=SOCKET, cli_version="0.153.0", app_server_version="0.149.1")
+ADDRESS = DaemonAddress(socket_path=SOCKET)
 
 #: The flags run `20260904T202319Z` launched the Codex lane with.
 FLAGS_WITH_THE_OVERRIDE = (
@@ -44,8 +44,8 @@ FLAGS_WITH_THE_OVERRIDE = (
 
 
 def locating(address: DaemonAddress | None, reason: str = ""):
-    async def locate(executable: str) -> tuple[DaemonAddress | None, str]:
-        assert executable, "the daemon is located through an executable, never a guessed path"
+    def locate(control_socket: Path) -> tuple[DaemonAddress | None, str]:
+        assert control_socket, "the app-server is located through its derived control socket"
         return address, reason
 
     return locate
@@ -92,7 +92,7 @@ def membership(
 ) -> support.DaemonMembership:
     return support.codex_daemon_membership(
         thread_id,
-        executable="codex",
+        control_socket=SOCKET,
         locate=locating(address, locate_reason),
         attach=attaching(connection, attach_raises),
     )
@@ -125,11 +125,16 @@ class TestWhatTheDaemonWasAskedAndAnswered:
         assert connection.closed
 
     def test_the_address_the_reading_came_through_is_carried(self) -> None:
+        """The socket, and nothing about versions — #272.
+
+        This used to carry the CLI's version and the running app-server's,
+        because `daemon version` answered both and they could disagree. With one
+        codex on the machine there is no pair to disagree, so there is nothing
+        for the journal to record beyond where the reading happened.
+        """
         read = membership(connection=Connection({"data": [MINE]}))
 
-        assert str(SOCKET) in read.daemon
-        assert "0.153.0" in read.daemon
-        assert "0.149.1" in read.daemon
+        assert read.daemon == str(SOCKET)
 
 
 class TestWhatWasNotObservedIsNotClaimed:

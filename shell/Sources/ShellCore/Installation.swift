@@ -78,8 +78,53 @@ private final class OutputBox: @unchecked Sendable {
 /// deadline, then asked to stop, then made to stop, and the output is collected
 /// with a ceiling of its own because a grandchild holding the pipe would keep it
 /// open after the child is gone.
+///
+/// **The child gets the user's real `PATH`, exactly as the engine does — #272,
+/// ADR 0022.** The reconcile has to resolve the one codex the user has, and it
+/// cannot: launchd gives a Finder-opened app `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// nothing sets this app's own `PATH`, and `which codex` on that finds nothing
+/// on a machine that has one. `ProcessLauncher` already solves this for the
+/// engine, through ``LoginShellPath``, and #272's ruling (option A) is that the
+/// shell hands the same reading to this subprocess rather than have Python read
+/// the login shell a second way. So there is **one** implementation of the
+/// login-and-interactive lesson on this machine, and it is the one that already
+/// learned it the hard way.
+///
+/// What that costs, stated rather than bounded: one extra login-shell read per
+/// app launch — ~0.45 s on the reference machine — because the reconcile runs
+/// once at launch and the engine's own read happens per spawn. It is inside the
+/// 30 s ``Installation/deadline`` and it happens before the engine starts. The
+/// alternative was caching the reading across the two, which is a copy of
+/// somebody's profile with a lifetime to reason about, and ``LoginShellPath``'s
+/// own ruling is against exactly that.
 public struct InstallationRunner: Sendable {
-    public init() {}
+    /// Where the `PATH` comes from. A seam for the same reason
+    /// ``ProcessLauncher``'s is: a suite that is not about the `PATH` may
+    /// decline to start a login shell (`#36`).
+    private let readPath: LoginShellPath.Reader
+
+    /// What the reading came to, handed to whoever owns a surface. The launcher
+    /// reports its own the same way, into the same sink, so the panel shows one
+    /// answer about this machine's `PATH` and not two that can disagree.
+    private let report: @Sendable (LoginShellPath.Outcome) -> Void
+
+    /// Where this runner's one sentence goes. Not the engine's log: ADR 0004
+    /// gives that to the engine, and this runs before there is one.
+    private let log: @Sendable (String) -> Void
+
+    private let environment: [String: String]
+
+    public init(
+        readPath: @escaping LoginShellPath.Reader = LoginShellPath.readFromLoginShell,
+        report: @escaping @Sendable (LoginShellPath.Outcome) -> Void = { _ in },
+        log: @escaping @Sendable (String) -> Void = ProcessLauncher.unifiedLog,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        self.readPath = readPath
+        self.report = report
+        self.log = log
+        self.environment = environment
+    }
 
     /// Waits on threads of its own, and never on a pooled one.
     ///
@@ -96,9 +141,21 @@ public struct InstallationRunner: Sendable {
     public func run(
         _ command: EngineCommand, deadline: TimeInterval = Installation.deadline
     ) async -> InstallationReport {
-        await withCheckedContinuation { continuation in
+        // Read here rather than on the waiting thread below: it is the caller's
+        // own await that this belongs inside, and a reading started on a thread
+        // this creates would put a login shell's whole profile inside the
+        // subprocess deadline it is not part of.
+        let path = LoginShellPath.apply(to: environment, read: readPath, log: log)
+        // Every run, including the ones that worked, for the reason the launcher
+        // reports every spawn: a surface clears its own warning by being told the
+        // next reading was fine.
+        report(path.outcome)
+        let childEnvironment = path.environment
+        return await withCheckedContinuation { continuation in
             let thread = Thread {
-                continuation.resume(returning: Self.runBlocking(command, deadline: deadline))
+                continuation.resume(
+                    returning: Self.runBlocking(
+                        command, environment: childEnvironment, deadline: deadline))
             }
             thread.name = "gpt-voicecoding.installation"
             thread.start()
@@ -106,18 +163,18 @@ public struct InstallationRunner: Sendable {
     }
 
     private static func runBlocking(
-        _ command: EngineCommand, deadline: TimeInterval
+        _ command: EngineCommand, environment: [String: String], deadline: TimeInterval
     ) -> InstallationReport {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = command.arguments
+        var childEnvironment = environment
         if command.source == .bundled {
             // Nothing may write into the bundle at runtime, and a `.pyc` beside a
             // signed file is a modification of a signed bundle.
-            var environment = ProcessInfo.processInfo.environment
-            environment["PYTHONDONTWRITEBYTECODE"] = "1"
-            process.environment = environment
+            childEnvironment["PYTHONDONTWRITEBYTECODE"] = "1"
         }
+        process.environment = childEnvironment
 
         let output = Pipe()
         process.standardOutput = output

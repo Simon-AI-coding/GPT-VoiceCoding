@@ -20,6 +20,8 @@ import pytest
 from fakes import PROGRESS_CAPTURE
 from gpt_voicecoding.adapters.agent.claude import ClaudeAgentAdapter
 from gpt_voicecoding.adapters.agent.codex import CodexAgentAdapter
+from gpt_voicecoding.adapters.agent.codex.shared_daemon import SharedDaemon
+from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
 from gpt_voicecoding.seams.agent import (
     LaneDiscovery,
     LaneUnavailable,
@@ -43,6 +45,23 @@ def answering(adapter: object, lane: LaneDiscovery) -> object:
     return adapter
 
 
+def no_shared_app_server() -> SharedDaemon:
+    """A shared app-server that is honestly not there.
+
+    Every test here answers `inspect` from a scripted `LaneDiscovery`, so none
+    of them wants the machine's own server — and `tests/conftest.py` refuses a
+    `SharedDaemon` that would reach it. This is the honest answer to put in its
+    place.
+    """
+
+    def not_running(_socket: Path) -> tuple[None, str]:
+        return None, "the shared Codex app-server is not answering: there is no socket"
+
+    return SharedDaemon(
+        settings=CodexSettings(executable="codex"), version="test", locate=not_running
+    )
+
+
 class TestALaneThatCouldNotLook:
     """Raising, on both lanes, and carrying the lane's own words."""
 
@@ -62,7 +81,7 @@ class TestALaneThatCouldNotLook:
 
     def test_the_codex_lane_does_the_same(self) -> None:
         adapter = answering(
-            CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE),
+            CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE, daemon=no_shared_app_server()),
             LaneDiscovery(error="the process table is shut"),
         )
 
@@ -89,7 +108,10 @@ class TestALaneThatLookedAndDidNotFindIt:
         assert row.lifecycle is SessionLifecycle.ENDED
 
     def test_the_codex_lane_calls_it_ended(self) -> None:
-        adapter = answering(CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE), LaneDiscovery())
+        adapter = answering(
+            CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE, daemon=no_shared_app_server()),
+            LaneDiscovery(),
+        )
 
         row = asyncio.run(adapter.inspect(CODEX))  # type: ignore[attr-defined]
 
@@ -99,7 +121,7 @@ class TestALaneThatLookedAndDidNotFindIt:
         """`degraded` says the rows came from a weaker source, not that they are doubtful."""
         row = SessionInspection(target=CODEX, workspace=WORKSPACE)
         adapter = answering(
-            CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE),
+            CodexAgentAdapter(progress_capture=PROGRESS_CAPTURE, daemon=no_shared_app_server()),
             LaneDiscovery(rows=(row,), degraded="shared daemon absent"),
         )
 

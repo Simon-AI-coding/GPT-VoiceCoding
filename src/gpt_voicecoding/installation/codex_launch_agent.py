@@ -1,13 +1,26 @@
-"""The login `LaunchAgent` that starts Codex's shared app-server daemon — #82, #83.
+"""The login `LaunchAgent` that starts the shared Codex app-server — #82, #83, #272.
 
-Codex's shared daemon has to be running **before** the user opens a `codex`, or
+The shared app-server has to be running **before** the user opens a `codex`, or
 that TUI settles on its own embedded app-server and can never be adopted
-afterwards (#82, proved: a daemon started later left its loaded-thread roster at
-zero). Engine start is too late and first Relay is later still, so the start is a
-macOS login item. `daemon bootstrap`'s own updater loop is documented as not
-reboot-persistent in Codex 0.149.1, which is why the job runs `daemon start`.
+afterwards (#82, proved again on #271's prototype: a server started later left
+its loaded-thread roster at zero). Engine start is too late and first Relay is
+later still, so the start is a macOS login item.
 
-**No wrapper.** This job starts a daemon beside the user's `codex`; it does not
+**It is the user's own codex, started as a plain server — #272, ADR 0022.** The
+job runs `<the user's codex> app-server --listen unix://<control socket>`. There
+is no `daemon` subcommand in it, no managed standalone tree, and nothing asks a
+running process where it is listening: the three facts this needs are
+`codex_runtime`'s, and the socket is derived. What replaced what, and why, is
+that module's note and ADR 0022's.
+
+**launchd owns the process now, and that is a change worth naming.** With
+`daemon start` the job waited for the server's initialize and exited, leaving a
+server that belonged to no job (`state = not running`); with `--listen` the job
+*is* the server (`state = running, active count = 1`). `KeepAlive` is still
+absent, so this is still not a supervisor — but `launchctl print` now answers
+"is the shared server up" truthfully.
+
+**No wrapper.** This job starts a server beside the user's `codex`; it does not
 stand in front of it, rename it, or own any Session it serves (#68, #71, #82).
 
 **One process action, and it is `bootstrap`.** ADR 0012's principle is *act, read
@@ -18,12 +31,21 @@ read-back is `launchctl print`, not the exit code: "already loaded" is not a
 failure and launchd says so with a status nobody should have to interpret.
 
 **Nothing here ever runs `bootout`, and that asymmetry is the rule.** *The
-product starts a daemon the user's TUIs will join; it never stops one they are
+product starts a server the user's TUIs will join; it never stops one they are
 attached to.* By the time an uninstall runs, the user's own `codex` sessions are
-thin clients of this daemon, and a `bootout` would take every one of them down —
+thin clients of this server, and a `bootout` would take every one of them down —
 which is exactly what #83 forbids in the words "without stopping or deleting user
-Sessions". So an uninstall removes the plist and lets the running daemon live out
+Sessions". So an uninstall removes the plist and lets the running server live out
 the login session, and a changed render is written but not reloaded.
+
+**That rule is also this ticket's migration, and it needs no branch.** A machine
+that ran #82's job carries the same label with the managed standalone and
+`daemon start` in it, and a live server under it. The reconcile re-renders *that
+label* — one job, so two `RunAtLoad` plists can never race for one socket — and
+does not stop what is running. The changed render is reported and takes effect
+at the next login, which is already what a changed render does here. Codex's own
+`~/.codex/packages/standalone/` is left alone: it is codex's directory, not this
+product's.
 
 **A reconcile is not a supervisor.** #83's scope forbids a polling supervisor, and
 this is not one: `KeepAlive` is absent from the job, and the only thing that ever
@@ -41,27 +63,26 @@ proves no reload at all. Missing evidence is an unknown render, never `current`.
 Legacy has no equivalent: `legacy@1d32845:install.sh:174-195` loaded its job and
 never recorded or read back the loaded render, so this behavior is **not ported**.
 
-**Nothing in the rendered job is hard-coded.** The user, their home, `CODEX_HOME`
-and the Codex version all come from the environment this runs in — the binary is
-reached through the `current` symlink Codex's own updater moves, so the job
-follows the version rather than pinning it. A rendered artifact naming a path
-that was true only on the machine that rendered it is #38.
+**Nothing in the rendered job is hard-coded.** The user, their home,
+`CODEX_HOME`, the executable and the `PATH` all come from the environment this
+runs in. The updater the job follows is the user's own package manager: nothing
+here pins a version, and nothing here names a path that was true only on the
+machine that rendered it, which is #38.
 
 **Legacy: adapted.** `legacy@1d32845:scripts/launch-agent.py:53-70` is the job
 render (`plistlib`, `RunAtLoad`, `StandardOutPath`/`StandardErrorPath`) and
 `legacy@1d32845:install.sh:174-195` is the launchd handling (`bootout` /
 `bootstrap` in the per-login `gui/<uid>` domain). Two things are dropped on the
 way across: legacy's `KeepAlive`, because that job was a supervised daemon and
-this one is a one-shot start, and legacy's whole `stop_launch_agent` path, for
-the reason above. The **shared Codex daemon itself is dropped from porting,
-because** gen 1 had no such daemon — `legacy@1d32845:bridge/codex.py` drove a
+this one is not supervised, and legacy's whole `stop_launch_agent` path, for the
+reason above. The **shared Codex app-server itself is dropped from porting,
+because** gen 1 had no such server — `legacy@1d32845:bridge/codex.py` drove a
 launched, wrapped, per-Session app-server, and its launch marker is not adapted.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import plistlib
 import re
@@ -81,6 +102,7 @@ from gpt_voicecoding.installation import (
     replace_text,
     write_bootstrapped_render,
 )
+from gpt_voicecoding.installation.codex_runtime import CodexRuntime, Resolution
 
 #: How this item is named in a report.
 NAME: Final = "codex-launch-agent"
@@ -96,30 +118,8 @@ LABEL: Final = "com.gpt-voicecoding.codex-daemon"
 #: Claude config directory its absence is something to fix rather than to report.
 LAUNCH_AGENTS_PARTS: Final = ("Library", "LaunchAgents")
 
-#: Codex's own home, and the variable that moves it.
-CODEX_HOME_VARIABLE: Final = "CODEX_HOME"
-DEFAULT_CODEX_HOME_NAME: Final = ".codex"
-
-#: The standalone managed binary, under the symlink Codex's updater moves. #82
-#: chose this over the user's `PATH` deliberately, so both this LaunchAgent and
-#: the Codex adapter derive the same file from the same ``CODEX_HOME``. What
-#: `codex` resolves to in an interactive shell is whatever the user's shell says,
-#: which on this product's own author's machine was a gen-1 wrapper function.
-MANAGED_BINARY_PARTS: Final = ("packages", "standalone", "current", "codex")
-
-#: What the job runs. `start` waits until the daemon's initialize is ready and
-#: exits; `bootstrap` is the one whose updater does not survive a reboot (#82).
-DAEMON_ARGUMENTS: Final = ("app-server", "daemon", "start")
-
-#: What says the running daemon's versions, as JSON. It needs a live daemon: with
-#: none running it fails on the control socket, which is a fact worth reporting
-#: and not an error to raise.
-VERSION_ARGUMENTS: Final = ("app-server", "daemon", "version")
-CLI_VERSION_FIELD: Final = "cliVersion"
-APP_SERVER_VERSION_FIELD: Final = "appServerVersion"
-
 #: #129 measured launchd's soft default at 256 and its hard limit as unlimited;
-#: the shared daemon held 271 descriptors after two days.  This is an install
+#: the shared app-server held 271 descriptors after two days. This is an install
 #: invariant rather than a user setting, and both plist limits use this value.
 OPEN_FILE_LIMIT: Final = 65_536
 
@@ -143,20 +143,8 @@ SHELL_RECONCILE_DEADLINE_SECONDS: Final = 30.0
 COMMAND_TIMEOUT_SECONDS: Final = SHELL_RECONCILE_DEADLINE_SECONDS / COMMANDS_PER_RUN
 
 
-def default_codex_home(environ: Mapping[str, str], home: Path | None = None) -> Path:
-    """The Codex home this run installs for."""
-    stated = environ.get(CODEX_HOME_VARIABLE)
-    if stated and stated.strip():
-        return Path(stated.strip()).expanduser()
-    return (home or Path.home()) / DEFAULT_CODEX_HOME_NAME
-
-
 def default_launch_agents_directory(home: Path | None = None) -> Path:
     return (home or Path.home()).joinpath(*LAUNCH_AGENTS_PARTS)
-
-
-def managed_binary(codex_home: Path) -> Path:
-    return codex_home.joinpath(*MANAGED_BINARY_PARTS)
 
 
 def plist_path(launch_agents_directory: Path) -> Path:
@@ -194,14 +182,14 @@ class Launchd:
 
     A per-login-session `gui/<uid>` domain rather than the system one, ported from
     `legacy@1d32845:install.sh:207-208`: this job belongs to whoever is logged in,
-    because the Codex daemon it starts is theirs and serves their terminals.
+    because the Codex app-server it starts is theirs and serves their terminals.
 
     Every entry point below takes a `Launchd` it cannot default, and `run` is
     resolved when it is *called* rather than when this class is defined. Both are
     guards against the same accident, which is not hypothetical: two drafts of
     this module reached the launchd of the machine running the tests — the first
     loaded a job naming a plist pytest deleted a second later, and the second
-    installed the real login job and started the real shared daemon. So there is
+    installed the real login job and started the real shared server. So there is
     no default `Launchd` for the same reason `base_dir` runs through
     `locations`, and `_run` is late-bound so `tests/conftest.py` can take the
     real `launchctl` away from the whole suite at once.
@@ -257,23 +245,25 @@ def default_launchd() -> Launchd:
     return Launchd(domain=f"gui/{os.getuid()}")
 
 
-def job(binary: Path, codex_home: Path, log_path: Path) -> dict[str, Any]:
+def job(runtime: CodexRuntime, log_path: Path) -> dict[str, Any]:
     """The launchd job description, as a plist document.
 
-    `RunAtLoad` and no `KeepAlive`: this starts the daemon once and exits, and a
-    `KeepAlive` would have launchd restart `daemon start` forever the moment it
-    finishes doing the one thing it exists to do.
+    `RunAtLoad` and no `KeepAlive`: the job *is* the shared app-server now
+    (#272), and a `KeepAlive` would make this a supervisor, which #83's scope
+    forbids. What that costs is stated rather than hidden — a server that dies
+    stays dead until the next login or the next app launch — and what it buys is
+    that launchd never restarts a server the user's TUIs have just left.
 
-    `CODEX_HOME` is written even when it is the default, because launchd hands a
-    job none of the user's shell environment. Without it, a user who moved their
-    Codex home would get a daemon on one home and TUIs on another, and an empty
-    roster that nothing explains.
+    The environment is `codex_runtime`'s whole `launch_environment` and nothing
+    composed here: `CODEX_HOME` because launchd hands a job none of the user's
+    shell environment, and `PATH` because without one an npm codex cannot start
+    under launchd at all. Both are that module's to explain.
     """
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(binary), *DAEMON_ARGUMENTS],
+        "ProgramArguments": [str(runtime.executable), *runtime.server_arguments],
         "RunAtLoad": True,
-        "EnvironmentVariables": {CODEX_HOME_VARIABLE: str(codex_home)},
+        "EnvironmentVariables": dict(runtime.launch_environment),
         "SoftResourceLimits": {"NumberOfFiles": OPEN_FILE_LIMIT},
         "HardResourceLimits": {"NumberOfFiles": OPEN_FILE_LIMIT},
         "StandardOutPath": str(log_path),
@@ -320,61 +310,15 @@ def _read(path: Path) -> JobFile | None | str:
     return JobFile(document=document, sha256=hashlib.sha256(contents).hexdigest())
 
 
-def daemon_versions(
-    codex_home: Path, run: Callable[[Sequence[str]], tuple[int, str]] | None = None
-) -> str:
-    """One sentence about the running daemon, for a status run to print.
+def _no_codex(reason: str) -> Outcome:
+    """The Codex lane reporting itself absent, with the reason — never an error.
 
-    Never called on the install path: a subprocess to a socket that is usually
-    absent belongs in the verb a person typed, not in the reconcile that runs
-    before the engine at every launch.
+    A machine with no codex on it is a machine this product has nothing to start
+    and nothing to install. That is a fact about the machine, so it is said and
+    the run carries on: `ok` stays true, and the next reconcile after the user
+    installs one puts the job there.
     """
-    binary = managed_binary(codex_home)
-    status, said = (run or _run)([str(binary), *VERSION_ARGUMENTS])
-    if status != 0:
-        # The last line, because a `codex` refusal is a short reason under a
-        # longer "Error:" banner and the reason is the part worth printing.
-        reason = said.splitlines()[-1] if said else "it gave no reason"
-        return f"the shared daemon is not answering: {reason}"
-    try:
-        reported: Any = json.loads(said)
-    except json.JSONDecodeError:
-        return f"the shared daemon answered, and not with JSON: {said[:120]}"
-    if not isinstance(reported, dict):
-        return "the shared daemon answered with something that is not a version document"
-    cli = reported.get(CLI_VERSION_FIELD)
-    app_server = reported.get(APP_SERVER_VERSION_FIELD)
-    # Checked before they are compared, because a document with neither field
-    # makes both of them `None` and `None == None` would report a daemon that
-    # said nothing at all as a daemon whose versions agree.
-    if not isinstance(cli, str) or not isinstance(app_server, str):
-        return (
-            "the shared daemon answered without saying its versions: "
-            f"{CLI_VERSION_FIELD}={cli!r}, {APP_SERVER_VERSION_FIELD}={app_server!r}"
-        )
-    # A disagreement, reported as a disagreement (#233). This said "a Session
-    # started by this CLI will not speak to that daemon", which is a prediction
-    # and a wrong one: measured on 2026-09-05, a plain `codex --sandbox
-    # workspace-write` from CLI 0.153.0 joins the 0.149.1 daemon and its thread
-    # appears in `thread/loaded/list`. What keeps a TUI out is a `-c` override,
-    # which makes it run its own core, and that is not a fact about versions.
-    # The engine's own copy of this sentence is `codex/shared_daemon.py`'s
-    # `DaemonAddress.note`, corrected in the same ticket — the two are the same
-    # claim to a reader and were wrong in the same way.
-    if cli != app_server:
-        return f"the CLI is {cli!r} and the running app-server is {app_server!r}, so they disagree"
-    return f"the shared daemon is answering, CLI and app-server both {cli!r}"
-
-
-def _no_managed_binary(codex_home: Path) -> Outcome:
-    return Outcome(
-        NAME,
-        State.ABSENT,
-        note=(
-            f"no managed Codex binary at {managed_binary(codex_home)} — nothing to start, "
-            "so nothing to install"
-        ),
-    )
+    return Outcome(NAME, State.ABSENT, note=f"{reason} — nothing to start, so nothing to install")
 
 
 def _previous_render_note(path: Path) -> str:
@@ -401,7 +345,7 @@ def _program_in(standing: JobFile | None) -> str | None:
 def _program_mismatch_note(path: Path, actual: str, expected: str) -> str:
     return (
         f"{path} is current, and the job launchd holds runs {actual}, not {expected}. "
-        "It is not reloaded, because that would stop the daemon live Sessions are on; "
+        "It is not reloaded, because that would stop the app-server live Sessions are on; "
         "the file applies at the next login."
     )
 
@@ -418,7 +362,7 @@ def _loaded_identity_problem(path: Path, held: HeldJob | None, expected_program:
 
 def inspect(
     launch_agents_directory: Path,
-    codex_home: Path,
+    codex: Resolution,
     log_path: Path,
     record_path: Path,
     launchd: Launchd,
@@ -430,8 +374,9 @@ def inspect(
     loaded-render SHA matches the file. A plist that is current with no job, or
     whose loaded SHA differs, is a machine that is not current now.
     """
-    if not managed_binary(codex_home).exists():
-        return _no_managed_binary(codex_home)
+    if codex.runtime is None:
+        return _no_codex(codex.reason)
+    runtime = codex.runtime
 
     path = plist_path(launch_agents_directory)
     standing = _read(path)
@@ -442,19 +387,18 @@ def inspect(
     # thing — and the report would then carry a `state` decided by one reading
     # and a sentence describing the other.
     running = launchd.held_job()
-    binary = managed_binary(codex_home)
     held = "the job is not loaded" if running is None else "the job is loaded"
     if standing is None:
         if running is not None:
             return Outcome(NAME, State.STALE, note=_unknown_render_note(path))
         return Outcome(NAME, State.ABSENT, note=f"no login job at {path} — {held}")
-    if standing.document != job(binary, codex_home, log_path):
+    if standing.document != job(runtime, log_path):
         return Outcome(
             NAME, State.STALE, note=f"{path} is a job this build would write differently"
         )
     if running is None:
         return Outcome(NAME, State.STALE, note=f"{path} is current, and {held}")
-    identity_problem = _loaded_identity_problem(path, running, str(binary))
+    identity_problem = _loaded_identity_problem(path, running, str(runtime.executable))
     if identity_problem:
         return Outcome(NAME, State.STALE, note=identity_problem)
     loaded = read_bootstrapped_render(record_path)
@@ -473,21 +417,22 @@ def inspect(
 
 def install(
     launch_agents_directory: Path,
-    codex_home: Path,
+    codex: Resolution,
     log_path: Path,
     record_path: Path,
     launchd: Launchd,
 ) -> Outcome:
     """Put the job where launchd finds it, and have launchd hold it now. Idempotent."""
-    if not managed_binary(codex_home).exists():
-        return _no_managed_binary(codex_home)
+    if codex.runtime is None:
+        return _no_codex(codex.reason)
+    runtime = codex.runtime
 
     path = plist_path(launch_agents_directory)
     standing = _read(path)
     if isinstance(standing, str):
         return Outcome(NAME, State.ABSENT, ok=False, note=standing)
 
-    wanted = job(managed_binary(codex_home), codex_home, log_path)
+    wanted = job(runtime, log_path)
     wanted_text = render(wanted)
     wanted_sha256 = hashlib.sha256(wanted_text.encode("utf-8")).hexdigest()
     held = launchd.held_job()  # asked before the write, so the note below is true of it
@@ -539,7 +484,7 @@ def install(
         rewritten = True
 
     if held is not None:
-        identity_problem = _loaded_identity_problem(path, held, str(managed_binary(codex_home)))
+        identity_problem = _loaded_identity_problem(path, held, str(runtime.executable))
         if identity_problem:
             return Outcome(NAME, State.STALE, changed=rewritten, note=identity_problem)
         if rewritten:
@@ -560,16 +505,18 @@ def install(
                         "applies at the next login"
                     ),
                 )
-            # Reloading it means `bootout`, and `bootout` stops the daemon the
-            # user's own TUIs are attached to. The job the user has is the one
-            # that was already right for them; the new render is for next login.
+            # Reloading it means `bootout`, and `bootout` stops the app-server
+            # the user's own TUIs are attached to. The job the user has is the
+            # one that was already right for them; the new render is next
+            # login's. This is also #272's migration of a machine that ran #82's
+            # job: same label, new program, and nothing stopped.
             return Outcome(
                 NAME,
                 State.STALE,
                 changed=True,
                 note=(
                     f"{path} written — the loaded job is the previous render and was not "
-                    "reloaded, because that would stop the daemon live Sessions are on. "
+                    "reloaded, because that would stop the app-server live Sessions are on. "
                     "It applies at the next login."
                 ),
             )
@@ -588,7 +535,7 @@ def install(
     bootstrapped, refusal = launchd.bootstrap(path)
     if refusal:
         return Outcome(NAME, State.STALE, changed=rewritten, ok=False, note=refusal)
-    identity_problem = _loaded_identity_problem(path, bootstrapped, str(managed_binary(codex_home)))
+    identity_problem = _loaded_identity_problem(path, bootstrapped, str(runtime.executable))
     bootstrapped_asid = bootstrapped.login_asid if bootstrapped is not None else None
     loaded = BootstrappedRender(
         render_sha256=(wanted_sha256 if rewritten or standing is None else standing.sha256)
@@ -605,11 +552,11 @@ def install(
 
 
 def uninstall(launch_agents_directory: Path) -> Outcome:
-    """Take the job's file back, and leave the running daemon alone.
+    """Take the job's file back, and leave the running app-server alone.
 
     No `bootout`. See the module note: by now the user's own Codex Sessions are
-    thin clients of the daemon this job started, and stopping it would take every
-    one of them down. Without the file, launchd does not load it again.
+    thin clients of the server this job started, and stopping it would take
+    every one of them down. Without the file, launchd does not load it again.
     """
     path = plist_path(launch_agents_directory)
     standing = _read(path)
@@ -626,7 +573,7 @@ def uninstall(launch_agents_directory: Path) -> Outcome:
         State.ABSENT,
         changed=True,
         note=(
-            f"{path} removed — a daemon that is already running was left alone and "
-            "lives until logout"
+            f"{path} removed — an app-server that is already running was left alone "
+            "and lives until logout"
         ),
     )

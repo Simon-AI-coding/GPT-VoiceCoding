@@ -171,7 +171,16 @@ final class ShellModel {
         // task doing that holds a cooperative-pool thread — one of about as many
         // as this machine has cores — for the whole run. The runner owns its own
         // threads and hands this one back; see its note.
-        installationFailure = await InstallationRunner().run(command).failure
+        //
+        // It reports into the *same* `PathOutcomes` box the launcher writes to,
+        // so the panel shows one answer about this machine's `PATH`. The
+        // reconcile needs that reading for a reason the engine does not: it has
+        // to find the user's own codex, and it cannot do that on the `PATH`
+        // launchd hands an app opened from Finder (#272, ADR 0022).
+        let outcomes = pathOutcomes
+        installationFailure = await InstallationRunner(
+            report: { outcomes.record($0) }
+        ).run(command).failure
     }
 
     private func healthChanged(_ health: EngineHealth) async {

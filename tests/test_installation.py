@@ -26,6 +26,7 @@ from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.installation import (
     Outcome,
     State,
+    codex_runtime,
     read_bootstrapped_render,
     read_intent,
     replace_text,
@@ -35,7 +36,7 @@ from gpt_voicecoding.installation import claude_hooks as hooks
 from gpt_voicecoding.installation import codex_launch_agent as codex
 from gpt_voicecoding.installation.__main__ import EXIT_FAILED, EXIT_OK, main
 from gpt_voicecoding.locations import codex_daemon_log_path, installation_path
-from launchd_fake import FakeLaunchd, codex_home
+from launchd_fake import FakeLaunchd, codex_home, codex_on_path
 
 INTERPRETER = Path("/Applications/GPT-VoiceCoding.app/Contents/Resources/engine/bin/python3")
 OTHER_INTERPRETER = Path("/opt/homebrew/bin/python3.12")
@@ -68,6 +69,18 @@ def config_directory(root: Path, document: dict | None = None) -> Path:
 
 def settings(directory: Path) -> str:
     return (directory / "settings.json").read_text(encoding="utf-8")
+
+
+def with_codex(root: Path, environ: dict) -> dict:
+    """One environment, with a `PATH` this machine's codex is on.
+
+    Since #272 the boundary resolves the Codex item's executable with an
+    ordinary `which` over the `PATH` it was given — which in the shipping shape
+    is the user's own login `PATH`, handed down by the shell. So a test that
+    wants the Codex item to be a real participant states one, and a test that
+    wants a machine with no codex simply does not.
+    """
+    return {**environ, "PATH": str(codex_on_path(root))}
 
 
 def _run(verb: str, environ: dict, base: Path, launchd: FakeLaunchd, home: Path) -> int:
@@ -404,10 +417,9 @@ def test_a_clean_install_lands_both_items(tmp_path: Path, launchd: FakeLaunchd) 
     directory = config_directory(tmp_path, FOREIGN)
     codex_home(tmp_path)
     base = tmp_path / "support"
+    environ = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
 
-    assert (
-        _run("install", {"CLAUDE_CONFIG_DIR": str(directory)}, base, launchd, tmp_path) == EXIT_OK
-    )
+    assert _run("install", environ, base, launchd, tmp_path) == EXIT_OK
 
     assert hooks.APPROVAL_MODULE in settings(directory)
     assert codex.plist_path(tmp_path / "Library" / "LaunchAgents").exists()
@@ -420,7 +432,8 @@ def test_a_clean_install_lands_both_items(tmp_path: Path, launchd: FakeLaunchd) 
 def test_an_uninstall_takes_both_items_back(tmp_path: Path, launchd: FakeLaunchd) -> None:
     directory = config_directory(tmp_path, FOREIGN)
     codex_home(tmp_path)
-    base, environ = tmp_path / "support", {"CLAUDE_CONFIG_DIR": str(directory)}
+    base = tmp_path / "support"
+    environ = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
     before = settings(directory)
 
     _run("install", environ, base, launchd, tmp_path)
@@ -438,7 +451,8 @@ def test_a_reconcile_that_agrees_writes_nothing_and_asks_launchd_for_nothing(
 ) -> None:
     directory = config_directory(tmp_path, FOREIGN)
     codex_home(tmp_path)
-    base, environ = tmp_path / "support", {"CLAUDE_CONFIG_DIR": str(directory)}
+    base = tmp_path / "support"
+    environ = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
     _run("install", environ, base, launchd, tmp_path)
     settled = settings(directory)
     plist = codex.plist_path(tmp_path / "Library" / "LaunchAgents").read_bytes()
@@ -463,23 +477,29 @@ def test_one_item_refusing_does_not_take_the_other_back_out(
     launchd.refuses = True
 
     code = _run(
-        "install", {"CLAUDE_CONFIG_DIR": str(directory)}, tmp_path / "support", launchd, tmp_path
+        "install",
+        with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)}),
+        tmp_path / "support",
+        launchd,
+        tmp_path,
     )
 
     assert code == EXIT_FAILED
     assert hooks.APPROVAL_MODULE in settings(directory), "a refused item took a landed one with it"
 
 
-def test_a_user_with_no_codex_package_is_not_a_failed_install(
-    tmp_path: Path, launchd: FakeLaunchd
-) -> None:
+def test_a_user_with_no_codex_is_not_a_failed_install(tmp_path: Path, launchd: FakeLaunchd) -> None:
     """The mirror of "no Claude config directory": a machine with only one of the
     two agents on it is a machine this product installs onto successfully."""
     directory = config_directory(tmp_path, FOREIGN)
-    codex_home(tmp_path, managed=False)
+    codex_home(tmp_path)
 
     code = _run(
-        "install", {"CLAUDE_CONFIG_DIR": str(directory)}, tmp_path / "support", launchd, tmp_path
+        "install",
+        {"CLAUDE_CONFIG_DIR": str(directory), "PATH": str(tmp_path / "nothing-on-it")},
+        tmp_path / "support",
+        launchd,
+        tmp_path,
     )
 
     assert code == EXIT_OK
@@ -487,22 +507,51 @@ def test_a_user_with_no_codex_package_is_not_a_failed_install(
     assert not codex.plist_path(tmp_path / "Library" / "LaunchAgents").exists()
 
 
-def test_status_reports_both_items_and_the_daemon(
+def test_status_reports_both_items_and_the_app_server(
     tmp_path: Path, launchd: FakeLaunchd, capsys
 ) -> None:
-    """#83: start and version errors surface through the existing vocabulary."""
+    """#83: install and app-server failures surface through the one vocabulary."""
     directory = config_directory(tmp_path, FOREIGN)
-    codex_home(tmp_path, managed=False)
+    codex_home(tmp_path)
 
-    assert _run("status", {"CLAUDE_CONFIG_DIR": str(directory)}, tmp_path, launchd, tmp_path) == (
-        EXIT_OK
-    )
+    assert _run(
+        "status",
+        {"CLAUDE_CONFIG_DIR": str(directory), "PATH": str(tmp_path / "nothing-on-it")},
+        tmp_path,
+        launchd,
+        tmp_path,
+    ) == (EXIT_OK)
 
     said = capsys.readouterr()
     printed = said.out + said.err
     assert hooks.NAME in printed
-    assert printed.count(codex.NAME) >= 2, "the item's line, and the daemon's own"
-    assert "no managed Codex binary" in printed
+    assert printed.count(codex.NAME) >= 2, "the item's line, and the app-server's own"
+    assert "there is no codex" in printed
+
+
+def test_status_says_when_the_shared_app_server_is_not_answering(
+    tmp_path: Path, launchd: FakeLaunchd, capsys
+) -> None:
+    """What replaced `daemon version` — #272.
+
+    A control socket that is not there is the ordinary case: the server runs
+    only when the user has logged in since the job was installed. It is a fact
+    to report, never an exception out of the verb a person typed to find out.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    home = codex_home(tmp_path)
+
+    assert _run(
+        "status",
+        with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory), "CODEX_HOME": str(home)}),
+        tmp_path,
+        launchd,
+        tmp_path,
+    ) == (EXIT_OK)
+
+    printed = capsys.readouterr().out
+    assert "the shared app-server is not answering" in printed
+    assert "app-server-control.sock" in printed
 
 
 def test_status_tracks_a_same_program_render_across_the_next_login(
@@ -512,32 +561,31 @@ def test_status_tracks_a_same_program_render_across_the_next_login(
     directory = config_directory(tmp_path, FOREIGN)
     home = codex_home(tmp_path)
     base = tmp_path / "support"
+    environ = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
     launch_agents = tmp_path / "Library" / "LaunchAgents"
     old_log = codex_daemon_log_path(base).with_name("previous-codex-daemon.log")
     record = installation_path(base)
-    codex.install(launch_agents, home, old_log, record, launchd.launchd)
-    monkeypatch.setattr(codex, "daemon_versions", lambda _: "daemon evidence")
+    codex.install(
+        launch_agents,
+        codex_runtime.resolve({"PATH": environ["PATH"], "CODEX_HOME": str(home)}),
+        old_log,
+        record,
+        launchd.launchd,
+    )
+    monkeypatch.setattr(codex_runtime, "answering", lambda _: "app-server evidence")
 
-    assert _run("install", {"CLAUDE_CONFIG_DIR": str(directory)}, base, launchd, tmp_path) == (
-        EXIT_OK
-    )
+    assert _run("install", environ, base, launchd, tmp_path) == (EXIT_OK)
     capsys.readouterr()
-    assert _run("status", {"CLAUDE_CONFIG_DIR": str(directory)}, base, launchd, tmp_path) == (
-        EXIT_OK
-    )
+    assert _run("status", environ, base, launchd, tmp_path) == (EXIT_OK)
     before_login = capsys.readouterr().out
 
     assert f"{codex.NAME}: stale" in before_login
     assert "loaded job is a previous render; applies at the next login" in before_login
 
     launchd.begin_login(codex.plist_path(launch_agents))
-    assert _run("reconcile", {"CLAUDE_CONFIG_DIR": str(directory)}, base, launchd, tmp_path) == (
-        EXIT_OK
-    )
+    assert _run("reconcile", environ, base, launchd, tmp_path) == (EXIT_OK)
     capsys.readouterr()
-    assert _run("status", {"CLAUDE_CONFIG_DIR": str(directory)}, base, launchd, tmp_path) == (
-        EXIT_OK
-    )
+    assert _run("status", environ, base, launchd, tmp_path) == (EXIT_OK)
     after_login = capsys.readouterr().out
 
     assert f"{codex.NAME}: current" in after_login

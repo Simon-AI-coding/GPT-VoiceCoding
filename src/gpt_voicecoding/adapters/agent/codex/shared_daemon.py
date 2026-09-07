@@ -268,7 +268,12 @@ class SharedDaemon:
                     on_closed=self._on_closed,
                 )
             except (WireError, AppServerError, OSError) as unreachable:
-                self._note = (
+                # Through `_also_no_codex` as well, because a stale socket file
+                # is the other way a machine with no codex looks: the file is
+                # there, `locate` accepts it, and the dial is refused. Without
+                # this the note is a bare `Connection refused` and the reader
+                # goes looking for a server that was never going to be there.
+                self._note = self._also_no_codex(
                     f"the shared Codex app-server at {address.socket_path} did not "
                     f"accept a connection: {unreachable}"
                 )
@@ -286,13 +291,19 @@ class SharedDaemon:
             return connection
 
     def _also_no_codex(self, reason: str) -> str:
-        """The socket reason, and — when it is the deeper fact — the missing codex.
+        """The dial's own reason, and — when it is the deeper fact — no codex.
 
-        Ordered that way round on purpose: the reason the dial actually
-        produced comes first, because it is what this build observed, and the
+        Ordered that way round on purpose: the reason this build actually
+        produced comes first, because it is what was observed, and the
         resolution is the explanation behind it. Never the other way, and never
         instead: a machine that has a codex and no running server needs the
         first sentence and would be misled by the second.
+
+        **Both ways of having no server go through here**, and the second is
+        the one the first fix missed. No socket at all is the obvious shape; a
+        socket file a killed server left behind is the other, and there
+        `locate` accepts the path and the dial is refused. The two reasons
+        differ and the clause behind them is the same.
         """
         # Resolved when it is *asked*, not when this class was defined: the
         # module attribute is the one `tests/conftest.py` takes away, and a

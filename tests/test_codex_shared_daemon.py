@@ -150,6 +150,39 @@ class TestSayingThereIsNoCodexAtAll:
         assert "there is no socket" in daemon.note
         assert "no codex" not in daemon.note
 
+    def test_a_stale_socket_on_a_machine_with_no_codex_says_so_too(self, socket_path: Path) -> None:
+        """The other way a machine with no codex looks, and the one first missed.
+
+        A socket file a killed server left behind is accepted by `locate` — only
+        connecting can tell — so the absence has to be said on the dial's
+        failure as well, or the note is a bare `Connection refused` and the
+        reader goes looking for a server that was never going to be there.
+        """
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=socket_path,
+            resolve_executable=lambda: None,
+        )
+
+        assert asyncio.run(daemon.client()) is None
+        assert "did not accept a connection" in daemon.note
+        assert "there is no codex on this machine" in daemon.note
+
+    def test_a_stale_socket_on_a_machine_that_has_codex_says_only_that(
+        self, socket_path: Path
+    ) -> None:
+        daemon = SharedDaemon(
+            settings=CodexSettings(executable="codex"),
+            version="test",
+            control_socket=socket_path,
+            resolve_executable=lambda: Path("/opt/bin/codex"),
+        )
+
+        assert asyncio.run(daemon.client()) is None
+        assert "did not accept a connection" in daemon.note
+        assert "no codex" not in daemon.note
+
     def test_the_socket_reason_comes_first(self, tmp_path: Path) -> None:
         """What this build observed leads; the resolution explains it.
 

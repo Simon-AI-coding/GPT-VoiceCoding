@@ -22,6 +22,8 @@
 | [0020](0020-a-codex-session-is-a-daemon-thread-a-terminal-vouches-for.md) | A Codex Session is a daemon-held user root that a live terminal vouches for — **vocabulary amended 2026-09-07**: "daemon" means the shared app-server (ADR 0022) |
 | [0021](0021-the-companion-channel-is-a-surface-the-user-replies-on.md) | The Companion Channel is a surface the user replies on: an Anchor names the target, a numeral picks the option |
 | [0022](0022-the-shared-app-server-is-the-users-own-codex.md) | The shared app-server is the user's own codex, on a derived control socket — **supersedes #82's managed standalone and `daemon start`** |
+| [0023](0023-the-engine-decides-when-the-voice-speaks.md) | The engine decides whether and when the Voice speaks; prose decides how |
+| [0024](0024-the-task-half-of-a-session-name-is-descriptive-and-climbs.md) | The task half of a Session Name describes the Session, climbs to a better source, and never addresses — **amends #78's frozen name; the `@<name>:` relay form is retired** |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67), [#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

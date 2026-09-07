@@ -141,10 +141,13 @@ _Avoid_: child Session, subagent and teammate (the agent's mechanism words), cre
 **Session Name**:
 What the user and the system call one Session: `<project> · <task>`, where the project is the
 Git repository the Session is working in — its own directory when it is in none — and the task
-is the agent's own name for the Session. Composed by the lane that first saw the Session and
-changed only when its official source renames it — the user says it back to address the
-Session, so there is one name at a time and nothing else may move it.
-_Avoid_: label, title
+says what the Session is doing, in words the user can understand. The task is read from the
+best source the agent has already written (a name the user gave it, the agent's own generated
+title, the user's first words to it, the agent's derived name as the floor), so every main
+Session has one and none is asked to supply one. It climbs to a better source as one appears
+and never falls back; a change is not announced. A Session Name is for recognising a Session,
+never for addressing it — that is the address's job (ADR 0024).
+_Avoid_: label, title, session label
 
 **Relay**:
 Carrying words *into* a Session — the agent-ward direction.

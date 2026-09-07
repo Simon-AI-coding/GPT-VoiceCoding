@@ -88,13 +88,17 @@ WITHHELD_ACTIONS: tuple[Action, ...] = (
 #: two wordings free to drift apart, which is the finding that shortened these.
 AGENT_GIST: dict[Action, str] = {
     Action.BRIEF: (
-        "what the sessions are doing — all of them with no address, one of them "
-        "whole with an address"
+        "the session now: what it is waiting on — the question with its options, or "
+        "the permission — and the newest thing it said; with no address, one line per "
+        "session"
     ),
-    Action.HISTORY: "one page of what an exact session said and was told, newest first",
+    Action.HISTORY: (
+        "the record behind that: a page of what the session said and was told, newest "
+        "first, for when the newest is not enough"
+    ),
     Action.RELAY: "put words into one exact session",
     Action.APPROVE: "answer one pending permission request",
-    Action.LIVE: "ends the call that is up",
+    Action.LIVE: "end the call that is up",
 }
 
 
@@ -167,6 +171,24 @@ def _sections(context: InstructionContext) -> tuple[Section, ...]:
                         "Read now, every time, and report what came back and nothing more. "
                         "An answer from earlier in this call is not this answer, and a "
                         "reading reaches no session and changes nothing."
+                    ),
+                ),
+                # **Two reads, told apart by what the user asked.** #277: asked
+                # what a Session needed decided, the Call Agent ran `history`
+                # twice and reported no options, while `brief <address>` held
+                # the question and all four. A pending question reaches the
+                # engine by hook before the transcript holds it, so the record
+                # cannot answer that ask by design — and nothing on the card
+                # said so. The gist above names the two facts; this is the
+                # "which, when", which the gist rule keeps out of the card.
+                Block(
+                    covers=("agent.brief.is-the-session-now",),
+                    text=(
+                        "Asked what a session is waiting on, what it needs decided, or how "
+                        "it is doing, read `brief <address>`: that is the session now, and "
+                        "when it holds a question, the options are in it. Asked what it said "
+                        "before that, or for more than its newest message, read "
+                        "`history <address>`: the record, a page at a time."
                     ),
                 ),
                 Block(

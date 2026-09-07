@@ -551,6 +551,16 @@ def _rules() -> tuple[Rule, ...]:
             ),
         ),
         Rule(
+            id="agent.brief.is-the-session-now",
+            audience=Audience.AGENT,
+            source="issue/277",
+            gist=(
+                "Asked what a Session is waiting on or needs decided, read its Session "
+                "Brief — the question and its options are there; History is the record "
+                "behind it, for what came before the newest message."
+            ),
+        ),
+        Rule(
             id="agent.history.pages-older-on-request",
             audience=Audience.AGENT,
             source="issue/151",

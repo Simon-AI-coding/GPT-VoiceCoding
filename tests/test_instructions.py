@@ -217,6 +217,7 @@ class TestTheTableIsSettled:
             "delegated.relay.takes-the-route-as-given",
             "delegated.retry.only-a-retryable-notice",
             "delegated.start.distinguishes-empty-from-unread",
+            "agent.brief.is-the-session-now",
             "agent.cli.one-generated-command",
             "agent.history.pages-older-on-request",
             "agent.identity.copies-the-address-unchanged",
@@ -778,6 +779,30 @@ class TestTheAgentSetIsTheActingHalf:
         assert "/opt/homebrew/bin/bridgectl" in elsewhere.text
         assert str(CLI.command) not in elsewhere.text
         assert elsewhere.text != instructions.agent.text
+
+    def test_the_card_puts_the_decision_in_brief_and_the_record_in_history(
+        self, instructions
+    ) -> None:
+        """#277: asked what needed deciding, the Call Agent ran `history` twice.
+
+        `brief <address>` held the parked question and its four options
+        throughout; `history` cannot, because a pending question reaches the
+        engine by hook before the transcript holds it. So the card names the
+        decision on the `brief` line and the record on the `history` line, and
+        a paragraph says which read answers which ask. Graded on the rendered
+        text, because that is what the Call Agent hears.
+        """
+        lines = instructions.agent.text.splitlines()
+        brief = next(line for line in lines if USAGE[Action.BRIEF] in line)
+        history = next(line for line in lines if USAGE[Action.HISTORY] in line)
+        live = next(line for line in lines if line.strip().startswith(USAGE[Action.LIVE]))
+        assert "now" in brief and "options" in brief, brief
+        assert "record" in history, history
+        assert live.strip().endswith("end the call that is up"), live
+        assert "agent.brief.is-the-session-now" in instructions.agent.covers
+        assert re.search(
+            r"what it needs decided[^\n]*`brief <address>`", instructions.agent.text
+        ), instructions.agent.text
 
     def test_it_says_which_verb_ends_the_call(self, instructions) -> None:
         """#179, 3 of 3: told this, the Call Agent ran it on every spoken request."""

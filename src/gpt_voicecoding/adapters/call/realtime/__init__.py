@@ -21,6 +21,7 @@ from gpt_voicecoding.adapters.call.realtime.adapter import (
     DELEGATION_ACK_FILLER,
     INCLUDE_STARTUP_CONTEXT,
     SANDBOX,
+    TURN_FAILED,
     TURN_NOT_STARTED,
     USER_QUIET_POLL_FRACTION,
     DelegatedTurnError,
@@ -46,6 +47,7 @@ __all__ = [
     "DELEGATION_ACK_FILLER",
     "INCLUDE_STARTUP_CONTEXT",
     "SANDBOX",
+    "TURN_FAILED",
     "TURN_NOT_STARTED",
     "USER_QUIET_POLL_FRACTION",
     "CallTransport",
@@ -62,13 +64,23 @@ __all__ = [
 
 def realtime_call(
     *,
+    delegated_turn_model: str,
     sink: Any = None,
     settings: dict[str, Any] | None = None,
     transport_factory: TransportFactory | None = None,
 ) -> RealtimeCallAdapter:
-    """Build the adapter from an opaque settings table, refusing keys it lacks."""
+    """Build the adapter from an opaque settings table, refusing keys it lacks.
+
+    `delegated_turn_model` arrives beside the table rather than inside it, and
+    the difference is the point (#270): it is `[delegate] model`, the engine's
+    own setting, and the Call Agent is given the same value every Delegated Turn
+    is given. A key in `[adapters.settings.call]` would be that one value stated
+    twice, free to drift; it has no default here for the same reason it has none
+    in `config.py`.
+    """
     read = RealtimeCallSettings.of(settings)
     return RealtimeCallAdapter(
+        delegated_turn_model=delegated_turn_model,
         sink=sink,
         settings=read,
         transport_factory=transport_factory or _audio_from(read),

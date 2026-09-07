@@ -83,6 +83,10 @@ async def main(arguments: argparse.Namespace) -> int:
         version=__version__,
     )
     adapter = RealtimeCallAdapter(
+        # The Call Agent's model *is* the live thread's, and it is the same
+        # value the Delegated Turn below runs on (#270). One flag for both, so
+        # a smoke run cannot prove the call and the turn on different models.
+        delegated_turn_model=arguments.model,
         sink=Printing(),
         settings=settings,
         transport_factory=lambda: webrtc_transport(
@@ -139,8 +143,8 @@ def parsed() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="gpt-5",
-        help="the delegated turn's model — the cost lever, so it is stated, never defaulted "
-        "by the engine",
+        help="the delegated turn's model, and the Call Agent's — the cost lever, so it is "
+        "stated, never defaulted by the engine",
     )
     parser.add_argument("--cwd", default=str(Path.home()), help="where the threads run")
     parser.add_argument("--socket", default="/tmp/gpt-voicecoding-smoke/app-server.sock")

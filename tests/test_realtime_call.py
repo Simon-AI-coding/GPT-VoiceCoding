@@ -42,6 +42,7 @@ from gpt_voicecoding.adapters.call.realtime import (
     DELEGATION_ACK_FILLER,
     INCLUDE_STARTUP_CONTEXT,
     SANDBOX,
+    TURN_FAILED,
     TURN_NOT_STARTED,
     DelegatedTurnError,
     RealtimeCallAdapter,
@@ -88,6 +89,10 @@ THREAD = "01a02110-d18f-74a0-916d-de1208e9977a"
 CALL_AGENT_INSTRUCTIONS = "speak the Session Name; never invent a detail"
 CALL_VOICE_PROSE = "Speak in short sentences. Wait to be asked before giving detail."
 DELEGATED_RULES = "act only through the control-plane CLI"
+
+#: `[delegate] model` as this suite states it. One value for the Call Agent and
+#: for every Delegated Turn (#270), so the two assertions read the same name.
+DELEGATED_MODEL = "a-model-the-user-chose"
 
 
 def dial(*hand_over: object) -> Dial:
@@ -184,10 +189,12 @@ async def riding(
     transport: FakeTransport | None = None,
     settings: RealtimeCallSettings | None = None,
     cue_player: FakeCueOutput | None = None,
+    delegated_turn_model: str = DELEGATED_MODEL,
 ) -> tuple[RealtimeCallAdapter, FakeTransport]:
     """An adapter wired to a scripted app-server, exactly as the root wires it."""
     audio = transport or FakeTransport()
     adapter = RealtimeCallAdapter(
+        delegated_turn_model=delegated_turn_model,
         sink=sink,
         settings=settings or quick(),
         transport_factory=lambda: audio,
@@ -469,6 +476,60 @@ class TestBringingACallUp:
                 start = server.calls_to("thread/realtime/start")[0]
                 assert start["model"] == DEFAULT_REALTIME_MODEL == "gpt-live-1-codex"
                 assert "session" not in start, "the model rides at the top level"
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_the_live_thread_is_started_on_the_delegated_turns_model(
+        self, socket_path: Path
+    ) -> None:
+        """The Call Agent's model is the live thread's, and it is `[delegate] model` (#270).
+
+        There is no Call Agent model field anywhere on this wire: the acting
+        half of a call runs on whatever backs the thread the call is on. A
+        `thread/start` that named none handed it to `~/.codex/config.toml`, a
+        file this product does not write — and on 2026-09-07 that file said
+        `gpt-6-astra`, which the running daemon refused on all seventeen turns.
+        So the model is stated, and it is the one value the user already sets
+        for a Delegated Turn.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+
+                await adapter.ensure_call(dial())
+
+                started = server.calls_to("thread/start")[0]
+                assert started["model"] == DELEGATED_MODEL
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_the_voices_model_and_the_call_agents_are_two_different_models(
+        self, socket_path: Path
+    ) -> None:
+        """One call, two models, and neither slot may be filled with the other's.
+
+        `thread/realtime/start`'s `model` overrides the *realtime* model for the
+        session — that is the Voice. `thread/start`'s is the thread's backing
+        model — that is the Call Agent. They are set from different settings and
+        this asserts both at once, because the failure that cost the user a
+        whole call was one of them being left unsaid.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(
+                    server, Sink(), settings=quick(realtime_model="gpt-live-2-later")
+                )
+
+                await adapter.ensure_call(dial())
+
+                assert server.calls_to("thread/start")[0]["model"] == DELEGATED_MODEL
+                assert server.calls_to("thread/realtime/start")[0]["model"] == "gpt-live-2-later"
                 await adapter.aclose()
 
         asyncio.run(scenario())
@@ -1450,6 +1511,341 @@ class TestWhatTheCallRaisesUpward:
         asyncio.run(scenario())
 
 
+class TestWhenTheCallAgentsTurnFails:
+    """#270: a hand-off that dies is answered, and the answer says why.
+
+    The Voice-to-Call-Agent hop happens inside codex, so the only trace of it on
+    this side is a `turn/completed` on the *live* thread. It used to reach
+    nobody: `_turn_heard` routes only for threads the adapter is delegating on,
+    and the live thread is never one. Seventeen turns refused with a 400 left no
+    log line and no word, the Voice invented a Session to fill the gap, and the
+    call died on the Silence Ceiling.
+    """
+
+    @staticmethod
+    async def failed(server: FakeAppServer, *, message: str, turn_id: str = "turn-1") -> None:
+        """One Call Agent turn, dead the way the recorded one was."""
+        await server.notify_all(
+            "turn/completed",
+            {
+                "threadId": THREAD,
+                "turn": {
+                    "id": turn_id,
+                    "status": "failed",
+                    "error": {"type": "invalid_request_error", "message": message},
+                },
+            },
+        )
+        await asyncio.sleep(0.05)
+
+    def test_a_failed_turn_is_logged_and_told_to_the_voice_with_its_reason(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The user learns *why*, not only that. The reason is codex's own words.
+
+        It goes out on `appendSpeech` — the wire call `speak` uses, not `speak`
+        itself: this sentence is the adapter's own and not a `SpokenBrief`
+        anybody assembled, so there is no brief to build and no receipt to
+        classify. Nothing is raised upward: the seam's event set is closed, the
+        same way it is for the hand-off going out (ADR 0018).
+        """
+        refusal = "The 'gpt-6-astra' model requires a newer version of Codex."
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                sink = Sink()
+                adapter, _ = await riding(server, sink)
+                await adapter.ensure_call(dial())
+
+                with caplog.at_level(logging.INFO):
+                    await self.failed(server, message=refusal)
+
+                said = [call["text"] for call in server.calls_to("thread/realtime/appendSpeech")]
+                assert len(said) == 1
+                assert said[0].startswith(TURN_FAILED)
+                assert refusal in said[0]
+
+                warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+                assert len(warnings) == 1
+                assert refusal in warnings[0].getMessage()
+                assert "turn-1" in warnings[0].getMessage()
+
+                assert sink.events == [CallStarted(call_id=THREAD)]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_turn_that_did_not_fail_is_written_down_and_nothing_is_said(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The answer to a working hand-off reaches the Voice inside codex.
+
+        Saying anything here would be this side narrating a turn it never saw
+        the content of. What the log gets is the proof that the acting half is
+        answering at all, which is the thing no other record on this machine
+        carries.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                with caplog.at_level(logging.INFO):
+                    await server.notify_all(
+                        "turn/completed",
+                        {"threadId": THREAD, "turn": {"id": "turn-9", "status": "completed"}},
+                    )
+                    await asyncio.sleep(0.05)
+
+                assert server.calls_to("thread/realtime/appendSpeech") == []
+                written = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+                assert [line for line in written if "turn-9" in line and "completed" in line]
+                assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_every_failure_is_told_because_there_is_no_retry_to_wait_for(
+        self, socket_path: Path
+    ) -> None:
+        """No dedupe. This engine cannot re-hand-off — only the user can, by asking again.
+
+        So each failure is already final, and Simon's rule 6.1 says a final
+        failure reaches the user with its reason. Coalescing the second one
+        would leave a user who asked twice hearing about it once.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                await self.failed(server, message="the same 400 again", turn_id="turn-1")
+                await self.failed(server, message="the same 400 again", turn_id="turn-2")
+
+                said = [call["text"] for call in server.calls_to("thread/realtime/appendSpeech")]
+                assert len(said) == 2
+                assert said[0] == said[1]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_failure_with_no_message_in_it_still_reaches_the_user(
+        self, socket_path: Path
+    ) -> None:
+        """A reason nobody gave is said as one, rather than swallowing the failure.
+
+        The shape of an `error` is the far side's to decide, so this side reads
+        it defensively and still speaks: silence is the defect being fixed.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                await server.notify_all(
+                    "turn/completed",
+                    {"threadId": THREAD, "turn": {"status": "failed", "error": "went wrong"}},
+                )
+                await asyncio.sleep(0.05)
+
+                said = [call["text"] for call in server.calls_to("thread/realtime/appendSpeech")]
+                assert said == [f"{TURN_FAILED}: no reason given"]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_delegated_turns_completion_is_untouched_by_any_of_this(
+        self, socket_path: Path
+    ) -> None:
+        """The other `turn/completed` path, still classified where it always was.
+
+        A Delegated Turn's failure is already answered — it becomes a
+        `DelegatedTurnError` the caller reads — so routing it through the live
+        thread's branch as well would say it twice, once into a call the user
+        may not even be on.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+                delegated_script(server, thread_id="delegated-1", says="the answer")
+
+                reply = await adapter.delegate(
+                    "read the roster",
+                    model=DELEGATED_MODEL,
+                    instructions=DELEGATED_RULES,
+                    request_id=rid(),
+                )
+
+                assert reply.text == "the answer"
+                assert server.calls_to("thread/realtime/appendSpeech") == []
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_failure_after_the_call_is_over_is_written_down_and_not_spoken(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nothing left to tell, and nothing raised — but still written down (#270).
+
+        A call hung up while its last hand-off was still running produces
+        exactly this, and the line is the only trace that turn leaves anywhere
+        on this machine. It is not routed to the failure branch, because the
+        thread it names is nobody's now: there is no call to speak into and no
+        Delegated Turn waiting on it.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+                await adapter.end_call()
+                spoken_before = len(server.calls_to("thread/realtime/appendSpeech"))
+
+                with caplog.at_level(logging.INFO):
+                    await self.failed(server, message="too late to matter")
+
+                assert len(server.calls_to("thread/realtime/appendSpeech")) == spoken_before
+                written = [r.getMessage() for r in caplog.records]
+                assert [line for line in written if THREAD in line and "after its call was" in line]
+
+        asyncio.run(scenario())
+
+    def test_a_retired_delegated_turns_late_completion_is_left_exactly_as_it_was(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The other unmatched `turn/completed`, and this ticket does not touch it.
+
+        A Delegated Turn that timed out is dropped from `_delegating` by
+        `_retire`, so a completion arriving afterwards matches nothing — the
+        same shape as the ended call's above, and a different thread. The
+        after-the-call line is narrowed to the call's own thread precisely so
+        this one keeps its old silence; whether it deserves a line of its own is
+        a question for a ticket that asks it.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                with caplog.at_level(logging.INFO):
+                    await server.notify_all(
+                        "turn/completed",
+                        {
+                            "threadId": "delegated-and-long-gone",
+                            "turn": {"id": "turn-8", "status": "failed"},
+                        },
+                    )
+                    await asyncio.sleep(0.05)
+
+                assert server.calls_to("thread/realtime/appendSpeech") == []
+                assert not [line for line in caplog.messages if "turn-8" in line]
+                assert not [line for line in caplog.messages if "delegated-and-long-gone" in line]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_failed_status_carrying_no_error_payload_is_still_a_failure(
+        self, socket_path: Path
+    ) -> None:
+        """Either field is enough, because neither is this side's to guarantee.
+
+        Reading only `error` would let a turn codex called `failed` pass as an
+        answer and leave the user in the silence this ticket exists to end.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                await server.notify_all(
+                    "turn/completed",
+                    {"threadId": THREAD, "turn": {"id": "turn-3", "status": "failed"}},
+                )
+                await asyncio.sleep(0.05)
+
+                said = [call["text"] for call in server.calls_to("thread/realtime/appendSpeech")]
+                assert said == [f"{TURN_FAILED}: no reason given"]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_completion_this_side_cannot_read_is_written_down_and_not_spoken(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A shape with no status and no error is neither, and is not guessed at.
+
+        Speaking about a failure that may not be one would put words in the
+        user's ear that no record supports — the exact habit ADR 0018 forbids
+        the Voice. The line in the log is what a reader follows instead.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial())
+
+                with caplog.at_level(logging.INFO):
+                    await server.notify_all(
+                        "turn/completed", {"threadId": THREAD, "turn": {"id": "turn-4"}}
+                    )
+                    await asyncio.sleep(0.05)
+
+                assert server.calls_to("thread/realtime/appendSpeech") == []
+                assert [line for line in caplog.messages if "turn-4" in line]
+                assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_a_refused_appendSpeech_does_not_take_the_call_down(
+        self, socket_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failure to say the failure is written down and goes no further (#270).
+
+        The user is already being let down once. Letting this raise on the
+        notification path would turn that into a dropped call, which is the
+        larger of the two harms and the one they did not ask for.
+        """
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server, thread_id=THREAD)
+                sink = Sink()
+                adapter, _ = await riding(server, sink)
+                await adapter.ensure_call(dial())
+
+                def refuse(_params: dict[str, Any]) -> dict[str, Any]:
+                    raise FakeRemoteError("this session takes no speech")
+
+                server.answers("thread/realtime/appendSpeech", refuse)
+
+                with caplog.at_level(logging.INFO):
+                    await self.failed(server, message="a 400 nobody will hear about")
+
+                assert adapter.snapshot().state is CallState.UP
+                assert sink.of(CallDropped) == []
+                assert "could not be told" in caplog.text
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+
 class TestTheDelegatedTurn:
     def test_the_callers_model_and_instructions_reach_the_thread(self, socket_path: Path) -> None:
         async def scenario() -> None:
@@ -1988,7 +2384,9 @@ class TestTheDelegatedTurn:
 
 class TestTheTransportItIsLent:
     def test_it_refuses_to_open_without_an_app_server(self) -> None:
-        adapter = RealtimeCallAdapter(transport_factory=FakeTransport)
+        adapter = RealtimeCallAdapter(
+            delegated_turn_model=DELEGATED_MODEL, transport_factory=FakeTransport
+        )
 
         with pytest.raises(AppServerError) as refusal:
             asyncio.run(adapter.connect())
@@ -1996,7 +2394,9 @@ class TestTheTransportItIsLent:
         assert "never handed" in str(refusal.value)
 
     def test_it_takes_an_app_server_once(self) -> None:
-        adapter = RealtimeCallAdapter(transport_factory=FakeTransport)
+        adapter = RealtimeCallAdapter(
+            delegated_turn_model=DELEGATED_MODEL, transport_factory=FakeTransport
+        )
         adapter.use_app_server(SharedAppServer(connection=None))  # type: ignore[arg-type]
 
         with pytest.raises(AppServerError):
@@ -2020,7 +2420,9 @@ class TestTheTransportItIsLent:
         asyncio.run(scenario())
 
     def test_verify_fails_when_there_is_no_app_server_to_ask(self) -> None:
-        adapter = RealtimeCallAdapter(transport_factory=FakeTransport)
+        adapter = RealtimeCallAdapter(
+            delegated_turn_model=DELEGATED_MODEL, transport_factory=FakeTransport
+        )
 
         result = asyncio.run(adapter.verify())
 
@@ -2091,7 +2493,9 @@ class TestWhatThisSpokeMayBeTold:
 
     def test_the_factory_builds_the_adapter_from_the_table(self) -> None:
         adapter = realtime_call(
-            settings={"connect_timeout_seconds": 5.0}, transport_factory=FakeTransport
+            delegated_turn_model=DELEGATED_MODEL,
+            settings={"connect_timeout_seconds": 5.0},
+            transport_factory=FakeTransport,
         )
 
         assert isinstance(adapter, RealtimeCallAdapter)
@@ -2147,11 +2551,15 @@ class TestTheCuesItPlays:
         still has one, on the machine's own default output.
         """
         stated = RealtimeCallAdapter(
-            settings=quick(output_device=4), transport_factory=FakeTransport
+            delegated_turn_model=DELEGATED_MODEL,
+            settings=quick(output_device=4),
+            transport_factory=FakeTransport,
         )
         assert stated.cue_output.device == 4
 
-        default = RealtimeCallAdapter(settings=quick(), transport_factory=FakeTransport)
+        default = RealtimeCallAdapter(
+            delegated_turn_model=DELEGATED_MODEL, settings=quick(), transport_factory=FakeTransport
+        )
         assert default.cue_output.device is None
 
     def test_the_ended_cue_plays_after_the_calls_own_audio_has_closed(

@@ -108,6 +108,12 @@ stripped_environment_prefixes = ["Malloc"]
 [delegate]
 # Required: the Delegated Turn's model is the cost lever, and a default here
 # would be a decision this project does not get to make for you.
+#
+# This is also the model the Call Agent runs on — the acting half of a Live
+# Call, which has no model field of its own and is simply what backs the call's
+# thread. Stated in one place so the two cannot diverge; left unstated, codex
+# fell back to whatever `~/.codex/config.toml` said and every hand-off on a call
+# was refused, in silence (#270).
 model = "the-model-you-chose"
 
 # Required *for the bundle*, and only for the bundle. Left out, the engine uses

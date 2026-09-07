@@ -22,15 +22,25 @@ slot addresses which half of it**: the `Dial` Bridge Core hands over names its
 audiences — prose for the Voice, rules for the Call Agent, and the Briefing's
 dial-time hand-over — and `_realtime_start_parameters` is where those become
 `prompt`, `realtimeStartInstructions` and `initialItems` (ADR 0018, proved by
-slot-swap in #175 Q4). A Delegated Turn runs on a thread of its own,
-started with the caller's model — the cost lever, which is a user-facing setting
-and is never defaulted here — and with the delegated action discipline as its
-developer instructions. Both run `approvalPolicy: "never"` in
-`danger-full-access`, which is the trade recorded in legacy issue #19: the
-threads act only through the control-plane CLI, and that CLI needs an `AF_UNIX`
-connect that no narrower sandbox permits. The user's own coding Sessions are
-untouched by any of this — they keep their approval rules, and this adapter
-never goes near them.
+slot-swap in #175 Q4). A Delegated Turn runs on a thread of its own, started
+with the caller's model — the cost lever, which is a user-facing setting and is
+never defaulted here — and with the delegated action discipline as its developer
+instructions.
+
+**Both of those threads state their model, and it is the same one** (#270). The
+Call Agent has no model field of its own: it is the *backing model of the live
+thread*, so a `thread/start` that names none hands the acting half of a call to
+whatever `~/.codex/config.toml` says, which nothing in this product sets, tests
+or can see. That is not a second setting — it is `[delegate] model` read once
+and given to both, so the model the user pays for on a Delegated Turn is the
+model they pay for on a call. `thread/realtime/start`'s own `model` field is a
+different thing entirely and stays the Voice's (`realtime_model`).
+
+Both threads run `approvalPolicy: "never"` in `danger-full-access`, which is
+the trade recorded in legacy issue #19: the threads act only through the
+control-plane CLI, and that CLI needs an `AF_UNIX` connect that no narrower
+sandbox permits. The user's own coding Sessions are untouched by any of this —
+they keep their approval rules, and this adapter never goes near them.
 
 **A one-shot Delegated Turn's thread does not outlive it; an Assistant
 Conversation's does** (ADR 0021 §7). The top-level `>` is unchanged — fresh
@@ -173,6 +183,15 @@ INCLUDE_STARTUP_CONTEXT = False
 #: already turns into the answer the user reads (ADR 0021 §7).
 TURN_NOT_STARTED = "I could not start a turn with the coding model just now"
 
+#: What the Voice is handed when a hand-off it made to the Call Agent died
+#: (#270). The prefix is this adapter's, in the shape `TURN_NOT_STARTED` uses;
+#: what follows it is the reason codex itself gave, in the shape `_delegated`
+#: already uses for a Delegated Turn — because here, unlike a turn that never
+#: got a thread, something *did* run and its refusal is the only thing that says
+#: why. The user hears the Voice's own re-telling of this sentence, so it is
+#: written as one, and it carries no wire detail beyond codex's own message.
+TURN_FAILED = "I could not get an answer from the coding model just now"
+
 #: The item type a hand-off from the Voice to the Call Agent arrives as, on
 #: `thread/realtime/itemAdded`. Logged and raised to nobody: the seam's event set
 #: is closed, and a voice hang-up is the Call Agent running `bridgectl live` off
@@ -286,6 +305,7 @@ class RealtimeCallAdapter:
     def __init__(
         self,
         *,
+        delegated_turn_model: str,
         sink: EventSink | None = None,
         settings: RealtimeCallSettings | None = None,
         transport_factory: TransportFactory,
@@ -293,6 +313,15 @@ class RealtimeCallAdapter:
     ) -> None:
         self._sink = sink
         self._settings = settings or RealtimeCallSettings()
+        #: The model the Call Agent runs on, and the same value every Delegated
+        #: Turn is given (#270). Constructor-shaped and not a settings key,
+        #: because it is `[delegate] model` — the cost lever, stated once — and
+        #: the composition root knows it before it builds this adapter. Required
+        #: for the same reason the config key is: there is no default here, and
+        #: a Call Agent with no model stated falls through to whatever
+        #: `~/.codex/config.toml` happens to say, which is how seventeen turns
+        #: on this machine were refused by the backend with nobody the wiser.
+        self._delegated_turn_model = delegated_turn_model
         self._new_transport = transport_factory
         #: Where cues go. One per adapter and not one per call, because `ENDED`
         #: plays after the call's own audio has closed. Handed in only by tests,
@@ -308,12 +337,21 @@ class RealtimeCallAdapter:
         self._cue_worker_lock = threading.Lock()
         self._server: OwnedAppServer | None = None
         self._call: _LiveCall | None = None
+        #: Which thread the most recent call ran on, kept after that call is
+        #: gone so a turn that ends late still has a name (#270). One string,
+        #: overwritten per call, and deliberately not a ledger: what it exists
+        #: to tell apart is *this call's* late completion from every other
+        #: thread's, and a second call is a second answer to that question.
+        self._last_call_thread: str | None = None
         self._state = CallState.DOWN
         self._delegating: dict[str, _DelegatedTurn] = {}
-        #: Teardowns started from a notification callback, so none outlives this
-        #: adapter. The sink is non-blocking by contract; closing a transport is
-        #: not, so it cannot happen inline.
-        self._closing: set[asyncio.Task[None]] = set()
+        #: Work started from a notification callback, so none of it outlives
+        #: this adapter. The notification path must not block — the sink is
+        #: non-blocking by contract, and the reader has to keep draining — so
+        #: anything that waits runs beside it: closing a transport, watching the
+        #: user's quiet, waiting out a playout, and telling the Voice that a
+        #: hand-off died. `aclose` cancels whatever is still in here.
+        self._offloaded: set[asyncio.Task[None]] = set()
         #: One attempt at a time. `ensure_call` is idempotent, and two callers
         #: racing through it is exactly how one becomes two.
         self._opening = asyncio.Lock()
@@ -350,9 +388,9 @@ class RealtimeCallAdapter:
 
     async def aclose(self) -> None:
         """End the call, drop the delegated threads, leave the server alone."""
-        for task in list(self._closing):
+        for task in list(self._offloaded):
             task.cancel()
-        self._closing.clear()
+        self._offloaded.clear()
         await self.end_call()
         for thread_id in list(self._delegating):
             await self._retire(thread_id)
@@ -732,12 +770,13 @@ class RealtimeCallAdapter:
         try:
             started = await self._request(
                 "thread/start",
-                self._thread_parameters(),
+                self._thread_parameters(model=self._delegated_turn_model),
                 timeout=self._settings.request_timeout_seconds,
             )
             # Recorded before the abandonment check, so a hang-up that raced
             # `thread/start` still has a thread to name when it cleans up.
             live.thread_id = _thread_id_in(started)
+            self._last_call_thread = live.thread_id
             self._still_wanted(live)
 
             offer = await live.transport.offer()
@@ -924,11 +963,26 @@ class RealtimeCallAdapter:
         thread_id = params.get("threadId")
 
         live = self._call
+        matched = False
         if live is not None and thread_id == live.thread_id:
+            matched = True
             self._call_heard(live, str(method), params)
         turn = self._delegating.get(thread_id) if isinstance(thread_id, str) else None
         if turn is not None:
+            matched = True
             self._turn_heard(turn, str(method), params)
+        if not matched and method == "turn/completed" and thread_id == self._last_call_thread:
+            # **A Call Agent turn that outlived its own call** (#270). Hanging
+            # up while the last hand-off is still running produces exactly this,
+            # and the line is the only trace that turn leaves anywhere — but
+            # there is nobody left to tell, so it is written down and no more.
+            #
+            # **Narrowed to the call's own thread on purpose.** A Delegated
+            # Turn's thread reaches here too once `_retire` has dropped it — a
+            # turn that timed out and finished afterwards — and that path is one
+            # this ticket leaves exactly as it was. Whether *those* deserve a
+            # line is a separate question and not this one's to answer.
+            _log.info("a Call Agent turn ended after its call was over: %s", thread_id)
 
     def _call_heard(self, live: _LiveCall, method: str, params: Message) -> None:
         match method:
@@ -951,6 +1005,83 @@ class RealtimeCallAdapter:
                 self._drop(live, f"the realtime session closed: {reason}")
             case "thread/realtime/itemAdded":
                 self._item_added(live, params)
+            case "turn/completed":
+                self._call_turn_completed(live, params)
+
+    def _call_turn_completed(self, live: _LiveCall, params: Message) -> None:
+        """A hand-off that died is answered by this adapter, and raised to nobody (#270).
+
+        **This is the only place in the system that can see a Call Agent turn
+        fail.** The Voice-to-Call-Agent hop happens inside codex — no request of
+        ours starts it and no reply of ours carries its answer — so the sole
+        trace it leaves on this side is a `turn/completed` on the *live* thread.
+        `_turn_heard` cannot take it: that path routes only for threads in
+        `_delegating`, and the live thread is never one. Until this branch
+        existed, seventeen consecutive turns refused with a 400 produced no log
+        line, no event and no word, and the Voice — handed no answer to a
+        question it had asked — invented a Session and then went quiet until the
+        Silence Ceiling (#270, ADR 0018's "a Voice asked a question the engine
+        did not hand it an answer to will produce one").
+
+        Every completion is written down, because the successful ones are the
+        only proof the acting half is answering at all. A failed one is *also*
+        spoken, with codex's own reason in it: the user learns why and not only
+        that. It is `appendSpeech`'s wire call and not `speak`, because the
+        sentence is this adapter's own and not a `SpokenBrief` Briefing wrote.
+
+        **Raised to nobody, and never retried.** The seam's event set is closed,
+        the same way it is for the hand-off going out (ADR 0018, "No
+        `HandoffRequested` event"): this engine cannot drive the Call Agent, so
+        a re-hand-off is the user speaking again and not something to schedule.
+        Every failure is therefore final, and a final failure is told at once,
+        with no dedupe — a user who asks twice and fails twice is told twice,
+        which is the truth.
+        """
+        completed = params.get("turn")
+        if not isinstance(completed, dict):
+            return
+        status = completed.get("status")
+        turn_id = completed.get("id") or "no id given"
+        error = completed.get("error")
+        # **Two independent ways to be a failure, and either one is enough.**
+        # The recorded turns carried both a `failed` status and an `error`, but
+        # neither field is this side's to guarantee: reading only the payload
+        # would let a `failed` that carried none pass as an answer, and reading
+        # only the status would do the same to a shape that reports the reason
+        # and nothing else. A status this side does not recognise at all — a
+        # missing one, or a word codex has not used yet — is read as neither,
+        # and written down, rather than spoken about as a failure it may not be.
+        if not error and status in (None, "completed"):
+            _log.info("a Call Agent turn ended %s: %s", status or "with no status", turn_id)
+            return
+        # The whole payload, not a field of it: what a failure carries is the
+        # far side's to shape, and the log is where the detail belongs.
+        _log.warning(
+            "a Call Agent turn ended %s: %s — %r", status or "with no status", turn_id, error
+        )
+        detail = error.get("message") if isinstance(error, dict) else None
+        self._spawn(self._told(live, f"{TURN_FAILED}: {detail or 'no reason given'}"))
+
+    async def _told(self, live: _LiveCall, text: str) -> None:
+        """Hand the Voice one sentence of this adapter's own. Never raises.
+
+        A failure to say the failure must not take the call down, so everything
+        here is swallowed into the log: the user is already being let down once,
+        and a raised exception on the notification path would turn that into a
+        dropped call. A call that ended between the turn failing and this
+        running is not an error either — there is nobody left to tell.
+        """
+        if self._call is not live or self._state is not CallState.UP:
+            _log.info("the call was already gone, so the Voice was not told: %s", text)
+            return
+        try:
+            await self._request(
+                "thread/realtime/appendSpeech",
+                {"threadId": live.thread_id, "text": text},
+                timeout=self._settings.request_timeout_seconds,
+            )
+        except (WireError, AppServerError) as unsaid:
+            _log.warning("the Voice could not be told %r: %s", text, unsaid)
 
     def _item_added(self, live: _LiveCall, params: Message) -> None:
         """Write down the Voice handing work to the Call Agent, and raise no *event* for it.
@@ -1248,10 +1379,15 @@ class RealtimeCallAdapter:
         return server.connection
 
     def _spawn(self, work: Any) -> None:
-        """Run a teardown without letting it outlive the adapter that started it."""
+        """Run one thing beside the notification path, and not past this adapter's life.
+
+        Every caller is a callback that may not block. What is held is the task,
+        so `aclose` can cancel it: work started from a notification and then
+        forgotten would run on over an adapter that is gone.
+        """
         task = asyncio.ensure_future(work)
-        self._closing.add(task)
-        task.add_done_callback(self._closing.discard)
+        self._offloaded.add(task)
+        task.add_done_callback(self._offloaded.discard)
 
     def _emit(self, event: Any) -> None:
         if self._sink is not None:

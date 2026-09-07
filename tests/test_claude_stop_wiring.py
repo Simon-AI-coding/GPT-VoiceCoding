@@ -466,15 +466,25 @@ class TestTheRosterRow:
             "feature",
         ]
 
-    def test_a_session_mid_turn_reads_names_without_inventing_a_stop(
-        self, tmp_path: Path, roster
-    ) -> None:
-        """Naming reads running transcripts, but pending tools are not stops (#290)."""
+    def test_a_session_mid_turn_is_not_read_at_all(self, tmp_path: Path, roster) -> None:
+        """A Session that is working is not stopped on anything, so no file is opened.
+
+        This is what keeps the five-second cadence off the hot path: on a machine
+        of busy Sessions it costs one roster command and no reads.
+        """
         path = transcript(tmp_path, [*turn(), called("Bash", "b1", {"description": "push"})])
         adapter = adapter_holding(path)
+        opened: list[Path | None] = []
+        original = adapter._transcripts.records  # noqa: SLF001
+
+        def watched(argument: Path | None) -> Any:
+            opened.append(argument)
+            return original(argument)
+
+        adapter._transcripts.records = watched  # type: ignore[method-assign]  # noqa: SLF001
         roster(LaneDiscovery(rows=(self.row(SessionState.RUNNING, WaitingFor()),)))
         lane = asyncio.run(adapter.discover())
-        assert lane.rows[0].first_prompt == "do the thing"
+        assert opened == []
         assert lane.rows[0].waiting_for.kind is WaitingKind.NONE
 
     def test_a_lane_that_could_not_look_is_passed_through_whole(self, roster) -> None:

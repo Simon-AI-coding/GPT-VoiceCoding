@@ -342,7 +342,7 @@ class TestThePerTargetRead:
         assert found.progress is not None
 
 
-def test_running_discovery_and_inspection_carry_raw_naming_records(tmp_path, roster):
+def test_stopped_discovery_and_inspection_carry_raw_naming_records(tmp_path, roster):
     raw = "<command-name>/build</command-name><command-args>[Image #1]  a\n shell</command-args>"
     path = transcript(
         tmp_path,
@@ -354,9 +354,8 @@ def test_running_discovery_and_inspection_carry_raw_naming_records(tmp_path, ros
         ],
     )
     adapter = adapter_holding(path)
-    roster(LaneDiscovery(rows=(row(SessionState.RUNNING),)))
+    roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
     for found in (asyncio.run(adapter.discover()).rows[0], asyncio.run(adapter.inspect(TARGET))):
-        assert found.name is None
         assert found.first_prompt == raw
         assert found.ai_title == "  New\n title  "
 
@@ -368,7 +367,8 @@ def test_missing_transcript_has_no_naming_candidates(tmp_path, roster):
     assert found.first_prompt is None and found.ai_title is None
 
 
-def test_registry_name_source_is_carried_on_discovery(tmp_path, roster):
+@pytest.mark.parametrize("source", ["derived", "", "   ", None])
+def test_registry_name_source_is_carried_on_discovery(tmp_path, roster, source):
     import json
 
     from gpt_voicecoding.adapters.agent.claude.registry import PEER_PROTOCOL
@@ -386,7 +386,7 @@ def test_registry_name_source_is_carried_on_discovery(tmp_path, roster):
         "peerProtocol": PEER_PROTOCOL,
         "messagingSocketPath": str(tmp_path / "claude.sock"),
         "name": "  untouched\n name ",
-        "nameSource": "derived",
+        "nameSource": source,
     }
     path.write_text(json.dumps(record))
     found = asyncio.run(adapter.discover()).rows[0]
@@ -394,4 +394,10 @@ def test_registry_name_source_is_carried_on_discovery(tmp_path, roster):
     path.write_text(json.dumps(record | {"nameSource": "custom"}))
     found = asyncio.run(adapter.inspect(TARGET))
     assert found.user_name == record["name"] and found.derived_name is None
-    assert found.name is None
+
+
+def test_running_inspect_reads_naming_candidates_when_explicitly_asked(tmp_path, roster):
+    adapter = adapter_holding(transcript(tmp_path, [said("first words", role="user")]))
+    roster(LaneDiscovery(rows=(row(SessionState.RUNNING),)))
+    assert asyncio.run(adapter.discover()).rows[0].first_prompt is None
+    assert asyncio.run(adapter.inspect(TARGET)).first_prompt == "first words"

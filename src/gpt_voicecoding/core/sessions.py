@@ -54,7 +54,7 @@ from gpt_voicecoding.core.errors import (
 )
 from gpt_voicecoding.core.lifecycle import RelayReason
 from gpt_voicecoding.core.naming import NameChoice, NameRung, choose_task, compose
-from gpt_voicecoding.core.policy import DEFAULT_FIRST_PROMPT_CHARACTERS
+from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.seams.agent import (
     MAIN_SESSION,
     ChildClassification,
@@ -154,7 +154,7 @@ class Session:
         row: SessionInspection,
         *,
         target: SessionTarget,
-        first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS,
+        first_prompt_characters: int,
     ) -> Session:
         """This same Session, as a lane has just seen it again.
 
@@ -274,7 +274,7 @@ class Session:
             short_thread_id=row.short_thread_id,
         )
         for reason in result.refusals:
-            _log.info("refused Session Name candidate for %s: %s", target, reason)
+            _log.debug("refused Session Name candidate for %s: %s", target, reason)
         choice = result.choice
         if choice is None:
             return None, None
@@ -319,19 +319,21 @@ def session_from(
     row: SessionInspection,
     *,
     first_seen: float,
-    first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS,
+    policy: CorePolicy | None = None,
 ) -> Session:
     """A first observation uses the same naming step as every later reading."""
     return Session(target=row.target, workspace=row.workspace, first_seen=first_seen).observed(
-        row, target=row.target, first_prompt_characters=first_prompt_characters
+        row,
+        target=row.target,
+        first_prompt_characters=(policy or CorePolicy()).first_prompt_characters,
     )
 
 
 class SessionRegistry:
     """What Sessions exist. Holds state; decides no policy about them."""
 
-    def __init__(self, *, first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS) -> None:
-        self._first_prompt_characters = first_prompt_characters
+    def __init__(self, *, policy: CorePolicy | None = None) -> None:
+        self._policy = policy or CorePolicy()
         self._sessions: dict[SessionTarget, Session] = {}
         #: Why a lane could not enumerate, per agent. `status` shows it; nothing
         #: else reads it, because it is news about the lane and not about a row.
@@ -522,15 +524,13 @@ class SessionRegistry:
         """
         held = self._same_row(row)
         if held is None:
-            fresh = session_from(
-                row, first_seen=now, first_prompt_characters=self._first_prompt_characters
-            )
+            fresh = session_from(row, first_seen=now, policy=self._policy)
             self._sessions[fresh.target] = fresh
             return fresh
 
         target = _better_known(held.target, row.target)
         updated = held.observed(
-            row, target=target, first_prompt_characters=self._first_prompt_characters
+            row, target=target, first_prompt_characters=self._policy.first_prompt_characters
         )
         if target != held.target:
             updated = self._rekeyed(held.target, target, updated)

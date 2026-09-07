@@ -45,7 +45,7 @@ from gpt_voicecoding.seams.agent import (
     SessionInspection,
     SessionState,
 )
-from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
+from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from test_claude_stop_wiring import adapter_holding, roster
 
 __all__ = ["roster"]  # the fixture is imported, and ruff must see it used
@@ -348,7 +348,8 @@ def parent_row(state: SessionState = SessionState.RUNNING) -> SessionInspection:
         target=SessionTarget(agent=AgentKind.CLAUDE, session_id=PARENT_SESSION_ID, pid=PARENT_PID),
         workspace=WORKSPACE,
         state=state,
-        name=SessionName(project="workspace", task="workspace-1c"),
+        project_name="workspace",
+        derived_name="workspace-1c",
     )
 
 
@@ -455,7 +456,7 @@ class TestAChildIsSeen:
         """#78: a name is what the user says to reach a Session, and this is unreachable."""
         transcript = transcript_for(tmp_path, [STARTED])
         write_child(transcript)
-        assert found(transcript)[0].name is None
+        assert found(transcript)[0].derived_name is None
 
     def test_it_claims_no_progress_and_no_stop(self, tmp_path: Path) -> None:
         """The child was not read; #76's progress reader belongs to the parent."""
@@ -782,7 +783,7 @@ class TestATeammateIsAChildToo:
         transcript = transcript_for(tmp_path, [SPAWNED, SPAWN_ANSWERED])
         teammate_on_disk(transcript)
         row = found(transcript, state=SessionState.IDLE)[0]
-        assert row.name is None
+        assert row.derived_name is None and row.user_name is None
         assert row.target.session_id == TEAMMATE_AGENT_ID
 
     def test_the_answer_to_the_spawn_is_not_the_teammate_finishing(self, tmp_path: Path) -> None:

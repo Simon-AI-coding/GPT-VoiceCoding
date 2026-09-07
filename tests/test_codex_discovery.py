@@ -226,7 +226,6 @@ class TestTheDaemonIsTheAuthorityWhenItIsUp:
         row = lane.rows[0]
         assert row.target.session_id == THREAD
         assert row.workspace == Path("/tmp/w")
-        assert row.name is None
         assert row.thread_name == "a-thread"
 
     def test_rows_from_the_daemon_are_not_degraded(self) -> None:
@@ -635,13 +634,11 @@ class TestWhatEachRowIsCalled:
         lane = found_with_tuis(
             FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w", name="port the log")})
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "port the log"
 
     def test_a_thread_the_daemon_did_not_name_is_called_by_its_short_id(self) -> None:
         """Eight characters of the thread id: short enough to say out loud."""
         lane = found_with_tuis(FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w")}))
-        assert lane.rows[0].name is None
         assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_row_read_off_the_process_table_is_named_the_same_way(self, tmp_path: Path) -> None:
@@ -651,7 +648,6 @@ class TestWhatEachRowIsCalled:
         write_live_user_rollout(tmp_path, THREAD, workspace)
 
         lane = found(None, running(101, workspace, session_id=THREAD), home=tmp_path)
-        assert lane.rows[0].name is None
         assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_tui_with_no_thread_id_has_no_roster_name(self) -> None:
@@ -667,13 +663,12 @@ class TestWhatEachRowIsCalled:
             FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w", name="port the log")}),
             git=inside_a_repository,
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "port the log"
 
     def test_a_thread_named_with_the_separator_is_left_unnamed(self) -> None:
         """A name with a `·` in it cannot be read back as two halves, so it is not one."""
         lane = found_with_tuis(FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w", name="a · b")}))
-        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "a · b"
 
 
 #: The thread the acceptance run of record drove, **as the shared daemon
@@ -722,14 +717,12 @@ class TestANameThatIsOnlyThePromptReadBack:
     def test_the_recorded_provisional_title_is_carried_raw(self) -> None:
         """The whole ticket, on the run of record's own document."""
         lane = found_with_tuis(daemon_holding(PROVISIONAL_SESSION))
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == PROVISIONAL_SESSION["name"]
         assert lane.rows[0].preview == PROVISIONAL_SESSION["preview"]
 
     def test_the_title_the_daemon_settled_on_is_carried_raw(self) -> None:
         """And the good one is kept, which is what makes this a filter and not a ban."""
         lane = found_with_tuis(daemon_holding(SETTLED_SESSION))
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "回复 READY"
 
     def test_a_prompt_short_enough_to_become_the_whole_name_is_still_not_a_name(self) -> None:
@@ -739,7 +732,6 @@ class TestANameThatIsOnlyThePromptReadBack:
                 thread(THREAD, cwd="/tmp/w", name="fix the login bug", preview="fix the login bug")
             )
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_the_prompt_is_matched_the_way_codex_collapsed_and_cut_it(self) -> None:
@@ -754,7 +746,6 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_generated_title_that_merely_opens_the_prompt_is_kept(self) -> None:
@@ -775,7 +766,6 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "Fix the login bug"
 
     def test_a_name_the_prompt_does_not_begin_with_is_kept(self) -> None:
@@ -790,7 +780,6 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "Port the discovery log"
 
     def test_a_name_longer_than_the_prompt_is_kept(self) -> None:
@@ -798,13 +787,11 @@ class TestANameThatIsOnlyThePromptReadBack:
         lane = found_with_tuis(
             daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log now", preview="port"))
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "port the log now"
 
     def test_a_daemon_that_states_no_preview_keeps_the_name(self) -> None:
         """Absent is not a claim — the same reading `threadSource` already gets (#112)."""
         lane = found_with_tuis(daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log")))
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "port the log"
 
     def test_an_empty_preview_keeps_the_name_too(self) -> None:
@@ -812,7 +799,6 @@ class TestANameThatIsOnlyThePromptReadBack:
         lane = found_with_tuis(
             daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log", preview=""))
         )
-        assert lane.rows[0].name is None
         assert lane.rows[0].thread_name == "port the log"
 
 
@@ -943,7 +929,6 @@ class TestThreadsTheDaemonRunsForItself:
         """It was named `<project> · 01a0403a`, and that name is what made it a Session."""
         lane = found_with_tuis(daemon_holding(RECORDED_SESSION, RECORDED_PHANTOM))
         assert [row.thread_name for row in lane.rows] == [RECORDED_SESSION["name"]]
-        assert all(row.name is None for row in lane.rows)
 
     def test_the_session_keeps_its_process_even_when_the_phantom_is_listed_first(
         self, tmp_path: Path
@@ -1172,7 +1157,7 @@ class TestTheChildProcessRule:
             in_native_tree(dict(sourced(THREAD, "subagent"), name="tidy the tests"))
         )
         child = next(row for row in lane.rows if row.target.session_id == THREAD)
-        assert child.name is None
+        assert child.thread_name is None and child.short_thread_id is None
 
     def test_the_child_list_is_the_keep_list_without_the_user(self) -> None:
         """Derived, not written out beside it, so the two cannot disagree (#112, #79).
@@ -1436,7 +1421,6 @@ def test_discovery_carries_raw_title_preview_and_floor_without_composing():
         )
     )
     row = lane.rows[0]
-    assert row.name is None
     assert row.project_name == "w"
     assert row.thread_name == "  raw\n title "
     assert row.preview == "[Image #1] raw\n preview"

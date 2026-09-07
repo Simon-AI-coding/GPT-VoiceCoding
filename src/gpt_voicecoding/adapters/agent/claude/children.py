@@ -990,5 +990,4 @@ def _row(parent: SessionInspection, child: _Child) -> SessionInspection:
         # `meta.json`'s `name`, the handle its Session reaches it by — and that
         # is not a Session Name (`CONTEXT.md`), so here the rule is applied
         # rather than merely inherited.
-        name=None,
     )

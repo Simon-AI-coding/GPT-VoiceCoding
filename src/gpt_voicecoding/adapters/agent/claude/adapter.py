@@ -564,16 +564,17 @@ class ClaudeAgentAdapter:
         )
 
     def _with_naming(self, row: SessionInspection) -> SessionInspection:
-        """Carry raw registry and transcript facts, including while a turn runs."""
+        """Carry the registry name under the source the registry actually states."""
         try:
             record = read_record(self._settings.registry_directory, row.target.pid)
         except RegistryError:
             record = None
         if record is not None and record.session_id == row.target.session_id:
+            user_named = bool(record.name_source) and record.name_source != "derived"
             row = replace(
                 row,
-                user_name=record.name if record.name_source != "derived" else None,
-                derived_name=record.name if record.name_source == "derived" else None,
+                user_name=record.name if user_named else None,
+                derived_name=record.name if not user_named else None,
             )
         return row
 
@@ -581,17 +582,15 @@ class ClaudeAgentAdapter:
         """One roster row, with everything its own transcript says about it.
 
         **A Session mid-turn is not stopped on anything**, so a `RUNNING` row is
-        not analysed for stops or progress. Its transcript still supplies naming
-        candidates (#290), through the same file-identity cache. `inspect`
-        remains the verb that asks for a running Session's progress.
+        returned untouched and its transcript is never opened. That is what keeps
+        this off the hot path: on a machine of busy Sessions, the five-second
+        cadence costs one roster command and no file reads at all. #76 rides on
+        the same gate rather than a wider one of its own — a roster row is the
+        cheap projection, and the `progress` verb is where a running Session can
+        still be asked (`inspect`).
         """
         if row.state is SessionState.RUNNING:
-            try:
-                records = self._transcripts.records(self._transcript_path(row.target))
-            except TranscriptUnavailable:
-                records = None
-            title, prompt = naming_records(records or ())
-            return replace(row, ai_title=title, first_prompt=prompt)
+            return row
         return self._read_into(row)
 
     def _read_into(self, row: SessionInspection) -> SessionInspection:

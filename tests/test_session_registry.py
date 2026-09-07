@@ -426,8 +426,9 @@ class TestTheFocusSession:
 
 def test_observation_names_climb_follow_and_survive_missing_sources(caplog):
     from gpt_voicecoding.core.naming import NameRung
+    from gpt_voicecoding.core.policy import CorePolicy
 
-    registry = SessionRegistry(first_prompt_characters=5)
+    registry = SessionRegistry(policy=CorePolicy(first_prompt_characters=5))
     target = SessionTarget(agent=AgentKind.CLAUDE, session_id="naming", pid=100)
 
     def see(**fields):
@@ -442,7 +443,7 @@ def test_observation_names_climb_follow_and_survive_missing_sources(caplog):
     assert see(user_name="My title").name.task == "My title"
     assert see(user_name="New title").name.task == "New title"
     assert see(first_prompt="lesser").name.task == "New title"
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         assert see(user_name="bad · name").name.task == "New title"
     assert any("carrying" in record.message for record in caplog.records)
     assert registry.resolve(target).name.task == "New title"

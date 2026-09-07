@@ -57,12 +57,6 @@ def choose_task(
     short_thread_id: str | None = None,
 ) -> NamingResult:
     """The best available task, or the previous task if all sources fell away."""
-    candidates = (
-        (NameRung.USER_NAME, user_name),
-        (NameRung.AI_TITLE, ai_title),
-        (NameRung.FIRST_PROMPT, first_prompt),
-        (NameRung.DERIVED, derived_name),
-    )
     if agent is AgentKind.CODEX:
         prompt = " ".join((preview or "").split())
         provisional = bool(prompt) and " ".join((thread_name or "").split()) == " ".join(
@@ -72,6 +66,13 @@ def choose_task(
             (NameRung.AI_TITLE, None if provisional else thread_name),
             (NameRung.FIRST_PROMPT, preview),
             (NameRung.DERIVED, short_thread_id),
+        )
+    else:
+        candidates = (
+            (NameRung.USER_NAME, user_name),
+            (NameRung.AI_TITLE, ai_title),
+            (NameRung.FIRST_PROMPT, first_prompt),
+            (NameRung.DERIVED, derived_name),
         )
     refusals: list[str] = []
     for rung, raw in candidates:

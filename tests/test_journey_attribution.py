@@ -677,7 +677,8 @@ class TestTwoSessionsTheChatCannotTellApart:
             workspace=Path("/tmp/workspace"),
             # The lane offering exactly its parent's name is the collision this
             # would be, if the product let a child keep one.
-            name=SessionName("workspace-claude", "port the log"),
+            project_name="workspace-claude",
+            user_name="port the log",
             child=ChildClassification(kind=ChildKind.CHILD, parent=parent.target),
         )
 
@@ -789,7 +790,6 @@ class TestTheChildStepGradesItsOwnLanesChild:
                 SessionInspection(
                     target=SessionTarget(agent=parent.target.agent, session_id=session_id, pid=pid),
                     workspace=Path("/tmp/workspace"),
-                    name=None,
                     child=ChildClassification(kind=ChildKind.CHILD, parent=parent.target),
                 ),
                 first_seen=0.0,

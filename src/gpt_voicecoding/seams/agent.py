@@ -70,7 +70,6 @@ from gpt_voicecoding.seams.events import Event
 from gpt_voicecoding.seams.identity import (
     AgentKind,
     RequestId,
-    SessionName,
     SessionTarget,
 )
 from gpt_voicecoding.seams.verify import VerifyResult
@@ -612,8 +611,6 @@ class SessionInspection:
     #: having said anything a reader would show, and #76 consumes both.
     last_activity: datetime | None = None
     child: ChildClassification = MAIN_SESSION
-    #: Reserved composed value; lanes leave it empty. Core owns naming (#290).
-    name: SessionName | None = None
     #: Project resolution is unchanged; candidate strings cross untouched.
     project_name: str | None = None
     user_name: str | None = None

@@ -58,6 +58,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
+    is_pipeline_noise,
+    is_visible,
+    visible_text,
+)
+
 _log = logging.getLogger(__name__)
 
 #: One parsed transcript record, as Claude Code wrote it. Deliberately the raw
@@ -149,12 +155,6 @@ def _parse(text: str) -> tuple[Record, ...]:
 
 def naming_records(records: tuple[Record, ...]) -> tuple[str | None, str | None]:
     """Newest AI title and first user prompt, with their text left untouched."""
-    from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
-        is_pipeline_noise,
-        is_visible,
-        visible_text,
-    )
-
     title = prompt = None
     for record in records:
         if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):

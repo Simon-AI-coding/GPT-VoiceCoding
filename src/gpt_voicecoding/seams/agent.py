@@ -612,15 +612,17 @@ class SessionInspection:
     #: having said anything a reader would show, and #76 consumes both.
     last_activity: datetime | None = None
     child: ChildClassification = MAIN_SESSION
-    #: What this Session is called — `<project> · <title>`, composed by the lane
-    #: from the agent's own name for it and the workspace it runs in
-    #: (`adapters/agent/_naming.py`). `None` is ordinary: a Codex thread that has
-    #: not taken its first turn has neither a name nor an id to make one from.
-    #: The registry takes the first one it is given and then follows this field
-    #: (#78 as amended on #113), so a lane may only ever compose this from the
-    #: agent's *official* name for the Session: a second, different name is read
-    #: as the agent having renamed it, and reaches the user as a rename.
+    #: Reserved composed value; lanes leave it empty. Core owns naming (#290).
     name: SessionName | None = None
+    #: Project resolution is unchanged; candidate strings cross untouched.
+    project_name: str | None = None
+    user_name: str | None = None
+    ai_title: str | None = None
+    first_prompt: str | None = None
+    derived_name: str | None = None
+    thread_name: str | None = None
+    preview: str | None = None
+    short_thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

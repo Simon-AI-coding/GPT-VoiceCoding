@@ -100,13 +100,12 @@ class AgentKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SessionName:
-    """``<project> · <task>`` — for matching and for speech only.
+    """``<project> · <task>`` — for recognition and speech only.
 
     The one name the user and the system have for a Session (`CONTEXT.md`,
     *Session Name*). Deliberately holds nothing a command could address: see
-    this module's docstring. Composed by the lane that observed the Session
-    (`adapters/agent/_naming.py`) and frozen by the Session registry, so what a
-    surface renders is what was true the first time the Session was seen.
+    this module's docstring. Core composes it from the lane's candidate records
+    (`core/naming.py`) and remembers the source's rung (ADR 0024).
     """
 
     project: str

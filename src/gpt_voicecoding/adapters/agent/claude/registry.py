@@ -159,6 +159,7 @@ class SessionRecord:
     #: `PROVEN_AGAINST_VERSION`.
     status: str
     name: str = ""
+    name_source: str = ""
     #: Which of `waiting`'s several causes this one is, in Claude Code's own
     #: word — `permission prompt`, `dialog open`, `input needed` and the rest
     #: (#150). Written into this record in the same write as `status`, and
@@ -254,6 +255,7 @@ def _record(path: Path, raw: str, *, expected_pid: int | None) -> SessionRecord:
         version=_text(document, "version", path, default=""),
         status=_text(document, "status", path, default=""),
         name=_text(document, "name", path, default=""),
+        name_source=_text(document, "nameSource", path, default=""),
         # Absent, blank or not a string all read as "this record said nothing",
         # because they are the same fact and none of them is a broken record.
         waiting_for_label=_text(document, "waitingFor", path, default=""),

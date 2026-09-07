@@ -69,6 +69,10 @@ DEFAULT_ANCHOR_ROWS_PER_SESSION = 100
 DEFAULT_ASSISTANT_CONVERSATIONS = 3
 
 
+#: First-words length, decided by the maintainer on #290.
+DEFAULT_FIRST_PROMPT_CHARACTERS = 40
+
+
 @dataclass(frozen=True, slots=True)
 class CorePolicy:
     """Every configurable dial the pipelines read. Passed in, never imported.
@@ -99,7 +103,16 @@ class CorePolicy:
     #: bounds the messages of one (ADR 0021 §7).
     assistant_conversations: int = DEFAULT_ASSISTANT_CONVERSATIONS
 
+    #: Maximum characters in the first-words rung of a Session Name.
+    first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS
+
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.first_prompt_characters, bool)
+            or not isinstance(self.first_prompt_characters, int)
+            or self.first_prompt_characters <= 0
+        ):
+            raise ValueError("first_prompt_characters must be a positive whole number")
         for name, seconds in (
             ("relay_ceiling_seconds", self.relay_ceiling_seconds),
             ("silence_end_seconds", self.silence_end_seconds),

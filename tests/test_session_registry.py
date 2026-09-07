@@ -13,10 +13,8 @@ from pathlib import Path
 import pytest
 
 from gpt_voicecoding.core.errors import (
-    AmbiguousNameError,
     ChildSessionError,
     DuplicateSessionError,
-    NoNameMatchError,
     StaleSessionError,
     UnknownSessionError,
 )
@@ -187,13 +185,6 @@ class TestRefusingAChildProcess:
         registry.register(self.spawned())
         assert len(registry.live()) == 1
 
-    def test_a_spoken_name_never_finds_one(self) -> None:
-        """It has no name to be found by, and the roster is searched anyway."""
-        registry = SessionRegistry()
-        registry.register(self.spawned())
-        with pytest.raises(NoNameMatchError):
-            registry.match_name("a891")
-
     def test_it_can_still_be_recorded_as_ended(self) -> None:
         """`resolve` guards addressing; `mark_ended` records what happened.
 
@@ -204,76 +195,6 @@ class TestRefusingAChildProcess:
         child = self.spawned()
         registry.register(child)
         assert registry.mark_ended(child.target).lifecycle is SessionLifecycle.ENDED
-
-
-class TestMatchingNames:
-    def test_a_name_matches_the_one_session_that_carries_it(self) -> None:
-        registry = SessionRegistry()
-        session = codex("abc", task="Implement the seam contracts")
-        registry.register(session)
-        assert registry.match_name("GPT-VoiceCoding · Implement the seam contracts") == session
-
-    def test_a_fragment_matches(self) -> None:
-        registry = SessionRegistry()
-        session = codex("abc", task="Implement the seam contracts")
-        registry.register(session)
-        assert registry.match_name("seam contracts") == session
-
-    def test_matching_ignores_case_and_extra_whitespace(self) -> None:
-        registry = SessionRegistry()
-        session = codex("abc", task="Implement the seam contracts")
-        registry.register(session)
-        assert registry.match_name("  SEAM   CONTRACTS ") == session
-
-    def test_two_candidates_refuse_rather_than_pick(self) -> None:
-        registry = SessionRegistry()
-        first = codex("abc", task="Implement the seam contracts")
-        second = claude("def", pid=100, task="Implement the seam contracts, part two")
-        registry.register(first)
-        registry.register(second)
-        with pytest.raises(AmbiguousNameError) as raised:
-            registry.match_name("seam contracts")
-        assert set(raised.value.candidates) == {first, second}
-
-    def test_a_whole_name_that_is_also_a_fragment_of_another_still_refuses(self) -> None:
-        """ "ship it" names both "ship it" and "ship it later". Ask, do not prefer."""
-        registry = SessionRegistry()
-        exact = codex("abc", task="ship it")
-        longer = claude("def", pid=100, task="ship it later")
-        registry.register(exact)
-        registry.register(longer)
-        with pytest.raises(AmbiguousNameError) as raised:
-            registry.match_name("GPT-VoiceCoding · ship it")
-        assert set(raised.value.candidates) == {exact, longer}
-
-    def test_a_name_shared_by_two_sessions_refuses_even_though_it_is_exact(self) -> None:
-        registry = SessionRegistry()
-        first = codex("abc", task="ship it")
-        second = claude("def", pid=100, task="ship it")
-        registry.register(first)
-        registry.register(second)
-        with pytest.raises(AmbiguousNameError):
-            registry.match_name("GPT-VoiceCoding · ship it")
-
-    def test_no_match_fails_closed(self) -> None:
-        registry = SessionRegistry()
-        registry.register(codex("abc"))
-        with pytest.raises(NoNameMatchError):
-            registry.match_name("something else entirely")
-
-    def test_an_ended_session_is_not_a_candidate(self) -> None:
-        registry = SessionRegistry()
-        ended = codex("abc", task="Implement the seam contracts")
-        registry.register(ended)
-        registry.mark_ended(ended.target)
-        with pytest.raises(NoNameMatchError):
-            registry.match_name("seam contracts")
-
-    def test_a_match_returns_a_session_never_a_target_built_from_the_name(self) -> None:
-        registry = SessionRegistry()
-        session = codex("abc", task="Implement the seam contracts")
-        registry.register(session)
-        assert registry.match_name("seam contracts").target == session.target
 
 
 class TestReplyWindow:
@@ -501,3 +422,27 @@ class TestTheFocusSession:
         registry.observed_one(SessionInspection(target=named, workspace=WORKSPACE), now=2_000.0)
 
         assert registry.focus == named
+
+
+def test_observation_names_climb_follow_and_survive_missing_sources(caplog):
+    from gpt_voicecoding.core.naming import NameRung
+
+    registry = SessionRegistry(first_prompt_characters=5)
+    target = SessionTarget(agent=AgentKind.CLAUDE, session_id="naming", pid=100)
+
+    def see(**fields):
+        return registry.observed_one(
+            SessionInspection(target=target, workspace=WORKSPACE, project_name="Project", **fields),
+            now=1.0,
+        )
+
+    assert see(derived_name="floor").name.task == "floor"
+    assert see(first_prompt="你好世界🙂 extra").name.task == "你好世界🙂"
+    assert see(ai_title="AI title").name_rung is NameRung.AI_TITLE
+    assert see(user_name="My title").name.task == "My title"
+    assert see(user_name="New title").name.task == "New title"
+    assert see(first_prompt="lesser").name.task == "New title"
+    with caplog.at_level("INFO"):
+        assert see(user_name="bad · name").name.task == "New title"
+    assert any("carrying" in record.message for record in caplog.records)
+    assert registry.resolve(target).name.task == "New title"

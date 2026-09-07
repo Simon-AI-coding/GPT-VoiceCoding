@@ -15,7 +15,7 @@ command by name and cannot grow one:
 
     /<command> …      a control-plane command
     ><prompt>         a Delegated Turn
-    @<name>: words    the user's own words, for the Session that name names
+    @<name>: words    retired; reply to an Anchor or use the menu
     words             the user's own words, for the target of the newest Anchor —
                       a Session or an Assistant Conversation — or, with no
                       Anchor held, for the one live Session
@@ -64,8 +64,7 @@ for words to be for, so words replying to it are words that replied to nothing.
 Bare text resolving to the newest Anchor's target, or to the single live Session,
 is not a guess in the forbidden sense: it classifies into the least dangerous
 class, and with exactly one candidate nothing is being picked *between*. Zero or
-several fails closed and asks, reusing the registry's locked "a Session Name
-disambiguates or asks" rule rather than minting a second disambiguation mechanism.
+several fails closed and directs the user to an Anchor or the menu.
 
 The one collision worth spelling out is a bare word that is also a registered
 command. It fails closed in **both** directions at top level: bare `stop` is
@@ -90,7 +89,7 @@ from gpt_voicecoding.core.briefing import (
     NUMERAL_PICKS_NOTHING_HINT,
     QUESTION_ALREADY_ANSWERED_HINT,
 )
-from gpt_voicecoding.core.errors import AmbiguousNameError, BridgeCoreError, NameMatchError
+from gpt_voicecoding.core.errors import BridgeCoreError
 from gpt_voicecoding.core.sessions import Session, SessionRegistry, spoken_name
 from gpt_voicecoding.seams.agent import ApprovalVerdict, WaitingKind
 from gpt_voicecoding.seams.identity import SessionTarget
@@ -254,7 +253,9 @@ class InboundRouter:
         if body.startswith(grammar.delegate_prefix):
             return self._as_delegation(body[len(grammar.delegate_prefix) :])
         if body.startswith(grammar.relay_marker):
-            return self._as_named_relay(body[len(grammar.relay_marker) :])
+            return self._refuse(
+                "Session names no longer address replies; reply to an Anchor or use the menu"
+            )
         if _numeral(body) is not None:
             # Unknown anchor or none at all: Core cannot say which message's
             # options the number was read against, so it picks nothing.
@@ -368,26 +369,6 @@ class InboundRouter:
             return self._refuse("that asked me to delegate, but did not say what")
         return Classification(kind=InboundClass.DELEGATION, text=prompt)
 
-    def _as_named_relay(self, rest: str) -> Classification:
-        name, separator, words = rest.partition(":")
-        if not separator:
-            return self._refuse(
-                f"name the session and then the words, like "
-                f"{self._grammar.relay_marker}<session>: your words"
-            )
-        try:
-            session = self._sessions.match_name(name.strip())
-        except AmbiguousNameError as ambiguous:
-            return self._refuse(self._which_one(ambiguous.candidates))
-        except NameMatchError:
-            return self._refuse(f"nothing running matches {name.strip()!r}")
-
-        if not words.strip():
-            return self._refuse(f"that named {spoken_name(session)} but carried no words")
-        return Classification(
-            kind=InboundClass.ANSWER_RELAY, text=words.strip(), target=session.target
-        )
-
     def _as_bare_text(self, body: str) -> Classification:
         # "Reply to the previous message" (ADR 0021 §2, generalised by §7): with
         # messages lying flat on this surface, the newest Anchor's target takes
@@ -444,9 +425,8 @@ class InboundRouter:
 
     def _which_one(self, candidates: tuple[Session, ...]) -> str:
         """Name every candidate and the form that picks one. Never picks itself."""
-        marker = self._grammar.relay_marker
-        named = ", ".join(f"{marker}{spoken_name(session)}" for session in candidates)
-        return f"say which one: {named}"
+        named = ", ".join(spoken_name(session) for session in candidates)
+        return f"reply to an Anchor or use the menu to pick: {named}"
 
     @staticmethod
     def _refuse(reply: str) -> Classification:

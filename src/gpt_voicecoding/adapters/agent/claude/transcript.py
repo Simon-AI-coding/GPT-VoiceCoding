@@ -145,3 +145,31 @@ def _parse(text: str) -> tuple[Record, ...]:
         if isinstance(record, dict):
             records.append(record)
     return tuple(records)
+
+
+def naming_records(records: tuple[Record, ...]) -> tuple[str | None, str | None]:
+    """Newest AI title and first user prompt, with their text left untouched."""
+    from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
+        is_pipeline_noise,
+        is_visible,
+        visible_text,
+    )
+
+    title = prompt = None
+    for record in records:
+        if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
+            title = record["aiTitle"]
+        if prompt is not None or record.get("type") != "user" or not is_visible(record):
+            continue
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if is_pipeline_noise(record, content):
+            continue
+        # Tool results are user-shaped records, but never the user's prompt.
+        if isinstance(content, str):
+            prompt = content
+        elif isinstance(content, list) and any(
+            isinstance(item, dict) and item.get("type") in {"text", "image"} for item in content
+        ):
+            prompt = visible_text(content)
+    return title, prompt

@@ -381,3 +381,15 @@ class TestWhereTheControlPlaneCliIs:
             load(written(tmp_path, with_cli(COMPLETE, "   ")))
 
         assert "cli" in str(refusal.value)
+
+
+def test_first_words_length_is_configured(tmp_path):
+    assert load(written(tmp_path, COMPLETE)).policy.first_prompt_characters == 40
+    config = load(written(tmp_path, COMPLETE + "\n[policy]\nfirst_prompt_characters = 17\n"))
+    assert config.policy.first_prompt_characters == 17
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "2.5"])
+def test_invalid_first_words_lengths_are_refused(tmp_path, value):
+    with pytest.raises(ConfigError, match="first_prompt_characters"):
+        load(written(tmp_path, COMPLETE + f"\n[policy]\nfirst_prompt_characters = {value}\n"))

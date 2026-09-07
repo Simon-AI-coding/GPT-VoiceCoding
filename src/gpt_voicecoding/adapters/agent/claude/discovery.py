@@ -38,7 +38,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from gpt_voicecoding.adapters.agent import _naming
 from gpt_voicecoding.adapters.agent._project import ProjectNames
 from gpt_voicecoding.adapters.agent.claude import waiting_labels
 from gpt_voicecoding.seams.agent import (
@@ -186,27 +185,10 @@ async def _rows(document: list[Any], projects: ProjectNames) -> list[SessionInsp
 async def _named(
     inspection: SessionInspection, row: dict[str, Any], projects: ProjectNames
 ) -> SessionInspection:
-    """The same row, carrying its Session Name.
-
-    **The task half is the roster's own `name`** — `workspace-claude-ed` and the
-    like — which is the official answer to "what is this Session called" and is
-    on every row from the moment the Session exists (#73). Nothing is asked of
-    the Session to get it and no transcript is opened for it, which is what makes
-    it stable enough to be the name the user speaks
-    (`legacy@1d32845:bridge/hook.py:215-253` had the Session report a task title
-    over the hook instead — *dropped, because* the amended #67 port table removed
-    that route on 2026-08-25).
-
-    The project half is the workspace's, resolved here because this is the lane
-    that knows the workspace. A row with neither half stays unnamed.
-    """
-    task = _naming.task_name(AgentKind.CLAUDE, name=_name(row))
-    if task is None:
-        return inspection
-    project = await projects.of(inspection.workspace)
-    if project is None:
-        return inspection
-    return replace(inspection, name=_naming.compose(project, task))
+    """Carry project resolution and the roster's raw name; Core composes."""
+    return replace(
+        inspection, project_name=await projects.of(inspection.workspace), derived_name=_name(row)
+    )
 
 
 def _inspection(row: dict[str, Any]) -> SessionInspection | None:
@@ -270,4 +252,4 @@ def _waiting_for(state: SessionState, label: Any) -> WaitingFor:
 def _name(row: dict[str, Any]) -> str | None:
     """The task half of this Session's name, straight off the official roster."""
     name = row.get("name")
-    return name.strip() if isinstance(name, str) and name.strip() else None
+    return name if isinstance(name, str) else None

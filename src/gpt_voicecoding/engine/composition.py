@@ -187,7 +187,7 @@ class Engine:
 
         state = BridgeState(
             switches=Switchboard(),
-            sessions=SessionRegistry(),
+            sessions=SessionRegistry(first_prompt_characters=config.policy.first_prompt_characters),
             relays=RelayQueue(),
             store=StateStore(config.state_path),
         )

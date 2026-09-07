@@ -10,7 +10,7 @@ command set belongs to the control-plane surface and not to this module:
 
     /<command> …      a control-plane command
     ><prompt>         a Delegated Turn
-    @<name>: words    the user's own words, for the Session that name names
+    @<name>: words    retired; reply to an Anchor or use the menu
     words             the user's own words, when exactly one Session is live
 
 The collision that has to be got right in both directions: a bare `stop` must
@@ -128,36 +128,31 @@ class TestDelegation:
         assert found.target is None
 
 
-class TestAddressingASessionByName:
-    def test_a_named_relay_resolves_to_that_session(self) -> None:
+class TestRetiredNameAddressing:
+    def test_a_matching_name_is_refused_with_surviving_routes(self) -> None:
         found = router((CODEX, "port the log"), (CLAUDE, "build the shell")).classify(
             "@shell: ship it"
         )
-
-        assert found.kind is InboundClass.ANSWER_RELAY
-        assert found.target == CLAUDE
-        assert found.text == "ship it"
-
-    def test_a_name_matching_nothing_fails_closed(self) -> None:
-        found = router((CODEX, "port the log")).classify("@nothing: ship it")
-
         assert found.kind is InboundClass.UNKNOWN
-        assert found.reply
+        assert found.target is None
+        assert "reply" in found.reply and "menu" in found.reply
 
-    def test_a_name_matching_two_sessions_refuses_and_names_both(self) -> None:
-        """A Session Name disambiguates or asks — never picks."""
+    def test_an_unknown_name_gets_the_same_hint(self) -> None:
+        found = router((CODEX, "port the log")).classify("@nothing: ship it")
+        assert found.kind is InboundClass.UNKNOWN
+        assert "reply" in found.reply and "menu" in found.reply
+
+    def test_an_ambiguous_name_is_not_matched(self) -> None:
         found = router((CODEX, "port the log"), (CLAUDE, "port the shell")).classify(
             "@port: ship it"
         )
-
         assert found.kind is InboundClass.UNKNOWN
-        assert "port the log" in found.reply
-        assert "port the shell" in found.reply
+        assert "reply" in found.reply and "menu" in found.reply
 
-    def test_a_named_relay_with_no_words_fails_closed(self) -> None:
+    def test_a_name_without_words_is_also_retired(self) -> None:
         found = router((CODEX, "port the log")).classify("@log:   ")
-
         assert found.kind is InboundClass.UNKNOWN
+        assert "reply" in found.reply and "menu" in found.reply
 
 
 class TestBareText:
@@ -230,11 +225,11 @@ class TestTheCommandWordCollision:
         assert found.kind is InboundClass.ANSWER_RELAY
         assert found.text == "stop after the tests pass"
 
-    def test_a_named_command_word_is_unambiguous_and_goes_through(self) -> None:
+    def test_a_named_command_word_is_refused(self) -> None:
         found = router((CODEX, "port the log")).classify("@log: stop")
 
-        assert found.kind is InboundClass.ANSWER_RELAY
-        assert found.text == "stop"
+        assert found.kind is InboundClass.UNKNOWN
+        assert found.target is None
 
     def test_the_collision_only_exists_where_the_word_is_registered(self) -> None:
         found = router((CODEX, "port the log")).classify("continue")
@@ -256,7 +251,7 @@ class TestTheGrammarIsConfiguration:
 
         assert custom.classify("!status").kind is InboundClass.CONTROL
         assert custom.classify("~summarise").kind is InboundClass.DELEGATION
-        assert custom.classify("#log: ship it").kind is InboundClass.ANSWER_RELAY
+        assert custom.classify("#log: ship it").kind is InboundClass.UNKNOWN
         assert custom.classify("/status").kind is InboundClass.ANSWER_RELAY
 
 
@@ -372,12 +367,13 @@ class TestAReplyIsTargetedByTheMessageItAnswers:
 
         assert router.classify("yes").target == CODEX
 
-    def test_the_named_form_survives_as_a_fallback_at_top_level(self) -> None:
+    def test_the_named_form_is_refused_even_with_a_newest_anchor(self) -> None:
         router, _ = anchored(*TWO, rows=((("1",), question(CLAUDE, "main")),))
 
         found = router.classify("@port the log: yes")
 
-        assert found.target == CODEX
+        assert found.kind is InboundClass.UNKNOWN
+        assert found.target is None
 
     def test_a_row_that_fell_out_of_the_table_is_an_unknown_anchor(self) -> None:
         router, table = anchored(*TWO, rows=((("1",), question(CODEX, "main")),), cap=1)
@@ -791,7 +787,7 @@ class TestTheNewestAnchorMayBeAConversation:
 
         reply = router.classify("stop").reply
 
-        assert "@" in reply
+        assert "menu" in reply
 
     def test_a_top_level_marker_is_still_read_when_a_conversation_is_newest(self) -> None:
         """The newest-Anchor rule is for bare text; `/`, `>` and `@` are top-level forms."""

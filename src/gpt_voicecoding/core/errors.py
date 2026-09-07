@@ -10,12 +10,8 @@ the exception rather than having to parse a message.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from gpt_voicecoding.seams.identity import RequestId, SessionTarget
-
-if TYPE_CHECKING:  # a refusal names the Sessions it refused between
-    from gpt_voicecoding.core.sessions import Session
 
 
 class BridgeCoreError(Exception):
@@ -117,27 +113,6 @@ class DuplicateSessionError(SessionError):
     def __init__(self, target: SessionTarget) -> None:
         super().__init__(f"Session already registered: {target}")
         self.target = target
-
-
-class NameMatchError(BridgeCoreError):
-    """Base for a Session Name that did not resolve to exactly one Session."""
-
-
-class NoNameMatchError(NameMatchError):
-    """Nothing matched. Ask; do not guess."""
-
-    def __init__(self, query: str) -> None:
-        super().__init__(f"no live Session matches {query!r}")
-        self.query = query
-
-
-class AmbiguousNameError(NameMatchError):
-    """More than one matched. Refuse and name them, rather than picking one."""
-
-    def __init__(self, query: str, candidates: tuple[Session, ...]) -> None:
-        super().__init__(f"{len(candidates)} live Sessions match {query!r}")
-        self.query = query
-        self.candidates = candidates
 
 
 class RelayError(BridgeCoreError):

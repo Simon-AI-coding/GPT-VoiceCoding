@@ -88,10 +88,12 @@ from gpt_voicecoding.adapters.agent.claude.bootstrap import (
     withdraw_address,
 )
 from gpt_voicecoding.adapters.agent.claude.inbox import InboxError, ReplyInbox
+from gpt_voicecoding.adapters.agent.claude.registry import RegistryError, read_record
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import (
     TranscriptReader,
     TranscriptUnavailable,
+    naming_records,
 )
 from gpt_voicecoding.adapters.agent.claude.window import ReplyWindowWatcher, StopReading
 from gpt_voicecoding.installation import claude_hooks
@@ -210,6 +212,8 @@ class _SessionRead:
     progress: ProgressObservation
     last_activity: datetime | None = None
     source_read: bool = False
+    ai_title: str | None = None
+    first_prompt: str | None = None
 
 
 def _pid_in(payload: dict[str, object], field: str) -> int | None:
@@ -550,7 +554,7 @@ class ClaudeAgentAdapter:
             return lane
         rows: list[SessionInspection] = []
         for row in lane.rows:
-            rows.append(self._row_with_stop(row))
+            rows.append(self._row_with_stop(self._with_naming(row)))
             rows.extend(self._children.under(row, self._transcript_path(row.target)))
         projected = tuple(rows)
         return replace(
@@ -559,19 +563,35 @@ class ClaudeAgentAdapter:
             degraded=source_degradation(projected, lane.degraded),
         )
 
+    def _with_naming(self, row: SessionInspection) -> SessionInspection:
+        """Carry raw registry and transcript facts, including while a turn runs."""
+        try:
+            record = read_record(self._settings.registry_directory, row.target.pid)
+        except RegistryError:
+            record = None
+        if record is not None and record.session_id == row.target.session_id:
+            row = replace(
+                row,
+                user_name=record.name if record.name_source != "derived" else None,
+                derived_name=record.name if record.name_source == "derived" else None,
+            )
+        return row
+
     def _row_with_stop(self, row: SessionInspection) -> SessionInspection:
         """One roster row, with everything its own transcript says about it.
 
         **A Session mid-turn is not stopped on anything**, so a `RUNNING` row is
-        returned untouched and its transcript is never opened. That is what keeps
-        this off the hot path: on a machine of busy Sessions, the five-second
-        cadence costs one roster command and no file reads at all. #76 rides on
-        the same gate rather than a wider one of its own — a roster row is the
-        cheap projection, and the `progress` verb is where a running Session can
-        still be asked (`inspect`).
+        not analysed for stops or progress. Its transcript still supplies naming
+        candidates (#290), through the same file-identity cache. `inspect`
+        remains the verb that asks for a running Session's progress.
         """
         if row.state is SessionState.RUNNING:
-            return row
+            try:
+                records = self._transcripts.records(self._transcript_path(row.target))
+            except TranscriptUnavailable:
+                records = None
+            title, prompt = naming_records(records or ())
+            return replace(row, ai_title=title, first_prompt=prompt)
         return self._read_into(row)
 
     def _read_into(self, row: SessionInspection) -> SessionInspection:
@@ -601,6 +621,8 @@ class ClaudeAgentAdapter:
             row,
             waiting_for=reading.waiting_for,
             progress=reading.progress,
+            ai_title=reading.ai_title,
+            first_prompt=reading.first_prompt,
             last_activity=reading.last_activity if reading.source_read else row.last_activity,
         )
 
@@ -644,7 +666,10 @@ class ClaudeAgentAdapter:
                 question=anchored_question,
                 capture=self._progress_capture,
             )
+        title, prompt = naming_records(records)
         return _SessionRead(
+            ai_title=title,
+            first_prompt=prompt,
             waiting_for=waiting,
             progress=ProgressObservation.from_capture(
                 recent=entries,

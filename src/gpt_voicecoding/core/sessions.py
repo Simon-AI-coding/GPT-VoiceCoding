@@ -11,7 +11,7 @@ had it the other way round: a Session existed because a hook had announced it,
 so a Session started before the engine, or one whose hook failed, was invisible
 forever while its process ran.
 
-Four refusals are the point of this file, and each one is a defect the reference
+Four constraints are the point of this file, and each one is a defect the reference
 implementation carried:
 
 - **An unknown identity fails closed.** Nothing resolves to "probably that one".
@@ -23,9 +23,8 @@ implementation carried:
   refused as a Relay target, by the registry rather than by a caller's memory —
   and it is never named, whatever a lane composed for it (#78, #79). A name is
   what the user says to reach a Session, and there is nothing here to reach.
-- **A Session Name disambiguates or asks.** Names are for matching and for
-  speech; two candidates are answered by refusing and naming both, never by
-  picking.
+- **A Session Name never addresses.** Names are for recognition and speech;
+  only identities select a target (ADR 0024).
 
 There is one registry and one Reply Window per Session — and the Reply Window is
 **derived**, so there is no second copy to disagree with the first. The reference
@@ -48,14 +47,14 @@ from pathlib import Path
 from typing import Final
 
 from gpt_voicecoding.core.errors import (
-    AmbiguousNameError,
     ChildSessionError,
     DuplicateSessionError,
-    NoNameMatchError,
     StaleSessionError,
     UnknownSessionError,
 )
 from gpt_voicecoding.core.lifecycle import RelayReason
+from gpt_voicecoding.core.naming import NameChoice, NameRung, choose_task, compose
+from gpt_voicecoding.core.policy import DEFAULT_FIRST_PROMPT_CHARACTERS
 from gpt_voicecoding.seams.agent import (
     MAIN_SESSION,
     ChildClassification,
@@ -112,16 +111,9 @@ class UndeliveredRelay:
 class Session:
     """One coding-agent run the user started, as the roster holds it.
 
-    Every field but `first_seen` is a fact one lane observed, carried from
-    `SessionInspection` unchanged. `first_seen` is this registry's own — when
-    *we* first saw it, which no agent knows.
-
-    **There is one name, and it is `name`.** It used to be two — a `label` the
-    user's side composed and a `name` the agent reported — which is two fields
-    meaning almost the same thing and two answers to "what is this Session
-    called". #78 collapsed them into the glossary's single *Session Name*
-    (`CONTEXT.md`): `<project> · <task>`, composed by the lane that saw the
-    Session and frozen here.
+    Lane observations supply the facts. Core owns `first_seen` and the name's
+    chosen rung: it accepts better sources and follows changes within a rung
+    without falling back when a source disappears (ADR 0024).
     """
 
     target: SessionTarget
@@ -131,6 +123,7 @@ class Session:
     #: like any other, and a Codex thread has neither a name nor an id to make
     #: one from until it takes its first turn (#73).
     name: SessionName | None = None
+    name_rung: NameRung | None = None
     lifecycle: SessionLifecycle = SessionLifecycle.LIVE
     state: SessionState = SessionState.RUNNING
     waiting_for: WaitingFor = field(default_factory=WaitingFor)
@@ -156,7 +149,13 @@ class Session:
     def is_live(self) -> bool:
         return self.lifecycle is SessionLifecycle.LIVE
 
-    def observed(self, row: SessionInspection, *, target: SessionTarget) -> Session:
+    def observed(
+        self,
+        row: SessionInspection,
+        *,
+        target: SessionTarget,
+        first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS,
+    ) -> Session:
         """This same Session, as a lane has just seen it again.
 
         Keeps what the registry knows and the lane does not — `first_seen` and
@@ -171,11 +170,13 @@ class Session:
         process evidence names a Session it cannot see the id of. It is passed
         in rather than read off the row because the naming rule turns on it.
         """
+        name, rung = self._named_as(row, target, first_prompt_characters)
         updated = replace(
             self,
             target=target,
             workspace=row.workspace,
-            name=self._named_as(row, target),
+            name=name,
+            name_rung=rung,
             lifecycle=row.lifecycle,
             state=row.state,
             last_activity=row.last_activity,
@@ -251,81 +252,38 @@ class Session:
         )
         return self if unavailable or not_read_after_readable else replace(self, progress=progress)
 
-    def _named_as(self, row: SessionInspection, target: SessionTarget) -> SessionName | None:
-        """The Session Name this row keeps — **the one its official source states**.
-
-        A Child Process keeps none. It is listed and it is never a target, so a
-        name for it would be a name the user could say and nothing could answer
-        — the risk #78's own table names, held here rather than in each lane so
-        it holds however #79 comes to find children.
-
-        A name is composed once per exact `SessionTarget` and **changes only
-        when the source it was composed from renames the Session** (#78 as
-        amended by Simon on #113, 2026-08-27). Stability is still the point — the
-        user says the name to address it — and what makes a rename safe is where
-        it can come from: `SessionInspection.name` is composed by a lane from its
-        agent's *official* name for the Session and from nothing else (Claude's
-        roster `name`, Codex's daemon `Thread.name` — `adapters/agent/_naming.py`),
-        so a change here is the agent renaming its own Session and never this
-        product changing its mind. The routes that could have made a name drift
-        on their own were dropped from the #67 port table before #78 was written:
-        no self-report (`legacy@1d32845:bridge/hook.py:215-253`), no
-        transcript-derived `ai-title` (`bridge/labels.py:73-84`).
-
-        **Why the freeze could not simply stay.** codex 0.150.0 names a thread
-        the moment its first user message lands, with the first 36 characters of
-        that message, and then replaces it with a generated title (#113,
-        measured — the delay before the replacement is not measured and cannot
-        be read back from the daemon; it is observed on #80's run of record).
-        Frozen, the product kept the fragment for the
-        Session's whole life; the Codex lane now refuses that provisional name
-        (`adapters/agent/codex/discovery.py::_thread_name`) and this rule is what
-        lets the real title reach the roster when it arrives. On the Claude lane
-        the same rule is a no-op in practice: its roster names are `derived` and
-        steady, so they move only when somebody deliberately renames a Session,
-        which is the one case this is meant to follow.
-
-        Against legacy: `bridge/store.py:1875-1902` froze on first write and
-        refused a different one, **adapted** — the source is now a live official
-        name rather than a one-shot report, so a rename by that source is
-        followed instead of refused.
-
-        A **target change also re-composes**, and it is not a rename: it is a
-        different Session under the same row. Two ways it happens, both measured
-        — a Codex row takes its first turn and gains the thread id it had no name
-        to be built from (#73), and the user types `/new` in that TUI so the pid
-        stays and the thread does not (#77). The second is a new thread; naming
-        it after the old one is the failure this rule exists to prevent.
-        """
+    def _named_as(
+        self, row: SessionInspection, target: SessionTarget, limit: int
+    ) -> tuple[SessionName | None, NameRung | None]:
+        """Store the pure naming judgement beside the row's existing identity."""
         if not row.child.is_main:
-            return None
-        if target != self.target:
-            return row.name
-        if self.name is None:
-            return row.name
-        if row.name is None or row.name.task == self.name.task:
-            # A lane that has stopped stating a name states nothing about the
-            # name it already gave: `None` is "not read this tick", which is the
-            # reading a degraded Codex pass produces on every row it holds.
-            #
-            # **The task half alone decides**, because it is the only half the
-            # agent states. The project half is resolved on this side, by running
-            # `git` against the workspace (`adapters/agent/_project.py`), and it
-            # moves for reasons that are not renames: a `git` that answered once
-            # and failed the next tick, a workspace that becomes a repository
-            # under a Session already running in it. Following those would be
-            # this product changing its mind about a Session's name, which is
-            # the one thing CONTEXT.md says may not move it.
-            return self.name
-        # Info, and it is one line per rename rather than one per tick: the held
-        # name becomes this one, so the next pass compares equal and says nothing.
-        _log.info(
-            "%s is now called %s by its lane; it was %s",
-            target,
-            row.name,
-            self.name,
+            return None, None
+        previous = None
+        if target == self.target and self.name is not None and self.name_rung is not None:
+            previous = NameChoice(self.name.task, self.name_rung)
+        result = choose_task(
+            target.agent,
+            first_prompt_characters=limit,
+            previous=previous,
+            user_name=row.user_name,
+            ai_title=row.ai_title,
+            first_prompt=row.first_prompt,
+            derived_name=row.derived_name,
+            thread_name=row.thread_name,
+            preview=row.preview,
+            short_thread_id=row.short_thread_id,
         )
-        return row.name
+        for reason in result.refusals:
+            _log.info("refused Session Name candidate for %s: %s", target, reason)
+        choice = result.choice
+        if choice is None:
+            return None, None
+        if previous is not None and choice.task == previous.task:
+            return self.name, choice.rung
+        name = compose(row.project_name, choice.task) if row.project_name is not None else None
+        if name is None:
+            return (self.name, self.name_rung) if target == self.target else (None, None)
+        return name, choice.rung
 
 
 def _better_known(held: SessionTarget, seen: SessionTarget) -> SessionTarget:
@@ -357,35 +315,23 @@ def _better_known(held: SessionTarget, seen: SessionTarget) -> SessionTarget:
     return seen
 
 
-def _normalise(text: str) -> str:
-    """Case- and whitespace-insensitive form used for name matching only."""
-    return " ".join(text.split()).casefold()
-
-
-def session_from(row: SessionInspection, *, first_seen: float) -> Session:
-    """A row a lane just saw, as a roster entry seen for the first time.
-
-    A Child Process arrives unnamed for the reason `Session._named_as` gives:
-    the roster lists it and nothing can be said to it.
-    """
-    return Session(
-        target=row.target,
-        workspace=row.workspace,
-        first_seen=first_seen,
-        name=row.name if row.child.is_main else None,
-        lifecycle=row.lifecycle,
-        state=row.state,
-        waiting_for=row.waiting_for,
-        progress=row.progress,
-        last_activity=row.last_activity,
-        child=row.child,
+def session_from(
+    row: SessionInspection,
+    *,
+    first_seen: float,
+    first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS,
+) -> Session:
+    """A first observation uses the same naming step as every later reading."""
+    return Session(target=row.target, workspace=row.workspace, first_seen=first_seen).observed(
+        row, target=row.target, first_prompt_characters=first_prompt_characters
     )
 
 
 class SessionRegistry:
     """What Sessions exist. Holds state; decides no policy about them."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, first_prompt_characters: int = DEFAULT_FIRST_PROMPT_CHARACTERS) -> None:
+        self._first_prompt_characters = first_prompt_characters
         self._sessions: dict[SessionTarget, Session] = {}
         #: Why a lane could not enumerate, per agent. `status` shows it; nothing
         #: else reads it, because it is news about the lane and not about a row.
@@ -576,12 +522,16 @@ class SessionRegistry:
         """
         held = self._same_row(row)
         if held is None:
-            fresh = session_from(row, first_seen=now)
+            fresh = session_from(
+                row, first_seen=now, first_prompt_characters=self._first_prompt_characters
+            )
             self._sessions[fresh.target] = fresh
             return fresh
 
         target = _better_known(held.target, row.target)
-        updated = held.observed(row, target=target)
+        updated = held.observed(
+            row, target=target, first_prompt_characters=self._first_prompt_characters
+        )
         if target != held.target:
             updated = self._rekeyed(held.target, target, updated)
             del self._sessions[held.target]
@@ -670,52 +620,6 @@ class SessionRegistry:
         if not session.child.is_main:
             raise ChildSessionError(target, session.child.parent)
         return session
-
-    def match_name(self, query: str) -> Session:
-        """Find the one live Session a spoken name names, or refuse.
-
-        The query is matched as a fragment against the Session Name, and **more
-        than one match refuses**, with every candidate named. An exact name is
-        deliberately *not* given precedence, for three reasons:
-
-        - The costs are asymmetric. A refusal costs one spoken round trip; a
-          wrong pick delivers the user's own words into the wrong Session,
-          silently, carrying the user's authority.
-        - Exactness is only evidence when the text is trustworthy, and the
-          primary source here is a realtime voice transcript. "ship it" may be
-          the user meaning the short name, or the transcriber clipping "ship it
-          later". Exactness of lossy text says nothing about intent.
-        - "A Session Name is not a target" is locked. Letting an exact name win
-          promotes it to a target by right, which is the first step back toward
-          addressing by name.
-
-        The collision only exists while two live names stand in a fragment
-        relation. That is worth fixing where names are minted — by keeping a
-        fresh title word-level distinct from the live ones — rather than by
-        making matching cleverer here.
-        """
-        wanted = _normalise(query)
-        if not wanted:
-            # Every name contains the empty fragment, so an empty query would
-            # match the whole roster — and match a single Session *exactly*,
-            # which is a silent delivery into a Session the user never named.
-            # The reference implementation has no matching behaviour at all to
-            # cite here: gen-1 addressed a session by its id inside a tool call
-            # and its labels were only ever spoken (`legacy@1d32845` composes a
-            # label in `bridge/labels.py` and never looks one up), so spoken
-            # matching and every refusal in it are this generation's.
-            raise NoNameMatchError(query)
-        candidates = [
-            held
-            for held in self.live()
-            if held.child.is_main and held.name is not None and wanted in _normalise(str(held.name))
-        ]
-
-        if not candidates:
-            raise NoNameMatchError(query)
-        if len(candidates) > 1:
-            raise AmbiguousNameError(query, tuple(candidates))
-        return candidates[0]
 
     def set_state(self, target: SessionTarget, state: SessionState) -> Session:
         """Record what a lane observed this Session to be doing.
@@ -933,12 +837,8 @@ def stand_in(target: SessionTarget, *, first_seen: float) -> Session:
 def spoken_name(session: Session) -> str:
     """What to call one Session out loud: its Session Name, else its address.
 
-    **The one answer to "what is this called", so no two surfaces give two.**
-    Matching is deliberately not done through here — `match_name` matches names
-    and nothing else, because an address the user never heard is not something
-    they can have meant. This is for saying and for showing: a Session with no
-    name is still a Session the user has to be told about, and naming it by the
-    thing that does address it is the honest floor.
+    One answer for saying and showing. When no source has supplied a name,
+    the address remains the honest floor; no name is invented (ADR 0024).
     """
     if session.name is not None:
         return str(session.name)

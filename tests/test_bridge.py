@@ -2238,6 +2238,8 @@ class TestSwitchAdjudicationEndToEnd:
         pending = SessionInspection(
             target=CODEX,
             workspace=Path("/tmp/workspace"),
+            project_name="GPT-VoiceCoding",
+            thread_name="port the log",
             state=SessionState.RUNNING,
             waiting_for=WaitingFor(
                 kind=WaitingKind.PERMISSION,

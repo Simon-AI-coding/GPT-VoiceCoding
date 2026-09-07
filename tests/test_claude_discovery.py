@@ -93,12 +93,14 @@ class TestMappingOneRow:
 
     def test_the_row_is_named_for_its_project_and_the_agents_own_name(self) -> None:
         """#78: `<project> · <title>`, with the roster's own `name` as the title."""
-        named = found([IDLE_ROW], git=inside("/src/GPT-VoiceCoding")).rows[0].name
-        assert str(named) == "GPT-VoiceCoding · workspace-claude-ed"
+        row = found([IDLE_ROW], git=inside("/src/GPT-VoiceCoding")).rows[0]
+        assert row.name is None
+        assert row.project_name == "GPT-VoiceCoding"
+        assert row.derived_name == "workspace-claude-ed"
 
     def test_a_workspace_outside_a_repository_is_named_for_its_directory(self) -> None:
         """*Adapted*: legacy left such a Session unnamed and unspeakable."""
-        assert str(found([IDLE_ROW]).rows[0].name) == "workspace-claude · workspace-claude-ed"
+        assert found([IDLE_ROW]).rows[0].project_name == "workspace-claude"
 
     def test_a_row_the_roster_did_not_name_stays_unnamed(self) -> None:
         """No title, no name. An unnamed row is listed like any other."""
@@ -125,10 +127,8 @@ class TestMappingOneRow:
             discover(run=answering([IDLE_ROW, second]), projects=projects)  # type: ignore[arg-type]
         )
 
-        assert [str(row.name) for row in lane.rows] == [
-            "GPT-VoiceCoding · workspace-claude-ed",
-            "GPT-VoiceCoding · workspace-claude-ed",
-        ]
+        assert [row.project_name for row in lane.rows] == ["GPT-VoiceCoding"] * 2
+        assert all(row.name is None for row in lane.rows)
         assert len(asked) == 1
 
     def test_a_row_in_the_roster_is_live(self) -> None:

@@ -391,6 +391,11 @@ def _policy(section: dict[str, Any], where: str) -> CorePolicy:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ConfigError(f"[policy] {key}{where} must be a number of seconds")
         dials[key] = float(value)
+    characters = section.get("first_prompt_characters")
+    if characters is not None:
+        if isinstance(characters, bool) or not isinstance(characters, int):
+            raise ConfigError(f"[policy] first_prompt_characters{where} must be a whole number")
+        dials["first_prompt_characters"] = characters
     entries = section.get("history_page_entries")
     if entries is not None:
         # A count, and read as one: `5.0` is a duration's spelling and would

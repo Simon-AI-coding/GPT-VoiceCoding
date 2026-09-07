@@ -340,3 +340,58 @@ class TestThePerTargetRead:
 
         assert found.waiting_for.kind is WaitingKind.NONE
         assert found.progress is not None
+
+
+def test_running_discovery_and_inspection_carry_raw_naming_records(tmp_path, roster):
+    raw = "<command-name>/build</command-name><command-args>[Image #1]  a\n shell</command-args>"
+    path = transcript(
+        tmp_path,
+        [
+            said(raw, role="user"),
+            {"type": "ai-title", "aiTitle": "old"},
+            said("later prompt", role="user"),
+            {"type": "ai-title", "aiTitle": "  New\n title  "},
+        ],
+    )
+    adapter = adapter_holding(path)
+    roster(LaneDiscovery(rows=(row(SessionState.RUNNING),)))
+    for found in (asyncio.run(adapter.discover()).rows[0], asyncio.run(adapter.inspect(TARGET))):
+        assert found.name is None
+        assert found.first_prompt == raw
+        assert found.ai_title == "  New\n title  "
+
+
+def test_missing_transcript_has_no_naming_candidates(tmp_path, roster):
+    adapter = adapter_holding(tmp_path / "not-written.jsonl")
+    roster(LaneDiscovery(rows=(row(SessionState.RUNNING),)))
+    found = asyncio.run(adapter.discover()).rows[0]
+    assert found.first_prompt is None and found.ai_title is None
+
+
+def test_registry_name_source_is_carried_on_discovery(tmp_path, roster):
+    import json
+
+    from gpt_voicecoding.adapters.agent.claude.registry import PEER_PROTOCOL
+    from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
+
+    adapter = ClaudeAgentAdapter(
+        settings=ClaudeSettings(registry_directory=tmp_path), progress_capture=capture_for(1024)
+    )
+    roster(LaneDiscovery(rows=(row(SessionState.RUNNING),)))
+    path = tmp_path / f"{TARGET.pid}.json"
+    record = {
+        "pid": TARGET.pid,
+        "sessionId": TARGET.session_id,
+        "cwd": str(tmp_path),
+        "peerProtocol": PEER_PROTOCOL,
+        "messagingSocketPath": str(tmp_path / "claude.sock"),
+        "name": "  untouched\n name ",
+        "nameSource": "derived",
+    }
+    path.write_text(json.dumps(record))
+    found = asyncio.run(adapter.discover()).rows[0]
+    assert found.derived_name == record["name"] and found.user_name is None
+    path.write_text(json.dumps(record | {"nameSource": "custom"}))
+    found = asyncio.run(adapter.inspect(TARGET))
+    assert found.user_name == record["name"] and found.derived_name is None
+    assert found.name is None

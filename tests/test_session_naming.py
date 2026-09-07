@@ -1,6 +1,6 @@
 """How a Session Name is made: the pure composition, and the project half.
 
-Two modules, one rule between them (#78). `_naming.compose` is where a project
+Two modules, one rule between them (#78). `core.naming.compose` is where a project
 and a title become a `SessionName` and is pure, so it is tested against strings.
 `_project.ProjectNames` is the one place either lane runs `git`, and the command
 is injected here for the reason the Claude lane injects its roster command: a
@@ -13,18 +13,29 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from gpt_voicecoding.adapters.agent._naming import compose, task_name
+import pytest
+
 from gpt_voicecoding.adapters.agent._project import ProjectNames, _project_in
+from gpt_voicecoding.core.naming import NameChoice, NameRung, choose_task, compose
 from gpt_voicecoding.seams.identity import AgentKind, SessionName
 
 
-def test_task_choice_preserves_each_lanes_facts():
-    assert task_name(AgentKind.CLAUDE, name="workspace-claude-ed") == "workspace-claude-ed"
-    assert task_name(AgentKind.CLAUDE, name=None, thread_id="abcdefghijk") is None
-    assert task_name(AgentKind.CODEX, name="Fix login", thread_id="abcdefghijk") == "Fix login"
-    assert task_name(AgentKind.CODEX, name=None, thread_id=" abcdefghijk ") == "abcdefgh"
-    assert task_name(AgentKind.CODEX, name=None, thread_id=None) is None
-    assert task_name(AgentKind.CODEX, name=None, thread_id="  ") is None
+def test_claude_name_climbs_and_follows_the_latest_source():
+    choice = choose_task(
+        AgentKind.CLAUDE, first_prompt_characters=80, derived_name="workspace-ed"
+    ).choice
+    assert choice == NameChoice("workspace-ed", NameRung.DERIVED)
+    for fields, task, rung in [
+        ({"first_prompt": "  build\n the shell "}, "build the shell", NameRung.FIRST_PROMPT),
+        ({"ai_title": "Shell integration"}, "Shell integration", NameRung.AI_TITLE),
+        ({"user_name": "My shell"}, "My shell", NameRung.USER_NAME),
+        ({"user_name": "Our shell"}, "Our shell", NameRung.USER_NAME),
+        ({"derived_name": "workspace-ed"}, "Our shell", NameRung.USER_NAME),
+    ]:
+        choice = choose_task(
+            AgentKind.CLAUDE, previous=choice, first_prompt_characters=80, **fields
+        ).choice
+        assert choice == NameChoice(task, rung)
 
 
 def answering(*answers: str | None) -> ProjectNames:
@@ -124,3 +135,73 @@ class TestReadingWhatGitSaid:
 
     def test_nothing_is_refused(self) -> None:
         assert _project_in("   ") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "length", "expected"),
+    [
+        (
+            "<command-message>review</command-message><command-name>/review</command-name>"
+            "<command-args>  #290\nplease </command-args>",
+            80,
+            "#290 please",
+        ),
+        ("<command-name>/review</command-name><command-args> </command-args>", 80, "/review"),
+        ("[Image #1] fix [Image #20] the shell", 80, "fix the shell"),
+        ("你好世界🙂 next", 5, "你好世界🙂"),
+        ("[Image #1]", 80, "floor"),
+        ("hello · world", 80, "floor"),
+    ],
+)
+def test_first_words_are_cleaned_before_validation(raw, length, expected):
+    result = choose_task(
+        AgentKind.CLAUDE, first_prompt_characters=length, first_prompt=raw, derived_name="floor"
+    )
+    assert result.choice.task == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "preview", "expected", "rung"),
+    [
+        ("Fix the bug", "Fix the bug", "Fix the bug", NameRung.FIRST_PROMPT),
+        ("Fix the bug", "Fix the bug in auth", "Fix the bug", NameRung.AI_TITLE),
+        ("Fix the bug", "fix the bug", "Fix the bug", NameRung.AI_TITLE),
+        (
+            "Reply with the single word READY. Do",
+            "Reply with the single word READY. Do not use tools.",
+            "Reply with the single word READY. Do not use tools.",
+            NameRung.FIRST_PROMPT,
+        ),
+        (" Port\n the log ", "Port the log", "Port the log", NameRung.FIRST_PROMPT),
+        ("Official name", None, "Official name", NameRung.AI_TITLE),
+        (None, "clean\n preview", "clean preview", NameRung.FIRST_PROMPT),
+        (None, None, "abcdefgh", NameRung.DERIVED),
+    ],
+)
+def test_codex_ladder_uses_the_exact_provisional_title_rule(name, preview, expected, rung):
+    result = choose_task(
+        AgentKind.CODEX,
+        first_prompt_characters=80,
+        thread_name=name,
+        preview=preview,
+        short_thread_id="abcdefgh",
+    )
+    assert result.choice == NameChoice(expected, rung)
+
+
+def test_invalid_candidates_return_reasons_without_logging(caplog):
+    result = choose_task(
+        AgentKind.CLAUDE,
+        first_prompt_characters=80,
+        user_name="a\nb",
+        ai_title="a · b",
+        first_prompt="[Image #1]",
+        derived_name="floor",
+    )
+    assert result.choice == NameChoice("floor", NameRung.DERIVED)
+    assert len(result.refusals) == 3
+    assert not caplog.records
+
+
+def test_no_source_does_not_invent_a_name():
+    assert choose_task(AgentKind.CODEX, first_prompt_characters=80).choice is None

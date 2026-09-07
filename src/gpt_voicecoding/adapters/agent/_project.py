@@ -1,6 +1,6 @@
 """What project a Session is working on, read from its workspace.
 
-The project half of every Session Name (`_naming.py`), and the **one place**
+The project half of every Session Name (`core/naming.py`), and the **one place**
 either lane runs a command to get it — a rule worth a module of its own, because
 this is asked once per row per discovery tick and a second copy of it in the
 other lane would be a second subprocess per row per tick.

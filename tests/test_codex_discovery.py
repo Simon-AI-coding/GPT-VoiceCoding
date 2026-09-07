@@ -226,7 +226,8 @@ class TestTheDaemonIsTheAuthorityWhenItIsUp:
         row = lane.rows[0]
         assert row.target.session_id == THREAD
         assert row.workspace == Path("/tmp/w")
-        assert str(row.name) == "w · a-thread"
+        assert row.name is None
+        assert row.thread_name == "a-thread"
 
     def test_rows_from_the_daemon_are_not_degraded(self) -> None:
         assert found_with_tuis(FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w")})).degraded is None
@@ -634,12 +635,14 @@ class TestWhatEachRowIsCalled:
         lane = found_with_tuis(
             FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w", name="port the log")})
         )
-        assert str(lane.rows[0].name) == "w · port the log"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "port the log"
 
     def test_a_thread_the_daemon_did_not_name_is_called_by_its_short_id(self) -> None:
         """Eight characters of the thread id: short enough to say out loud."""
         lane = found_with_tuis(FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w")}))
-        assert str(lane.rows[0].name) == f"w · {THREAD[:8]}"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_row_read_off_the_process_table_is_named_the_same_way(self, tmp_path: Path) -> None:
         """The daemon is where a thread name comes from, so these rows take the id."""
@@ -648,7 +651,8 @@ class TestWhatEachRowIsCalled:
         write_live_user_rollout(tmp_path, THREAD, workspace)
 
         lane = found(None, running(101, workspace, session_id=THREAD), home=tmp_path)
-        assert str(lane.rows[0].name) == f"workspace · {THREAD[:8]}"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_tui_with_no_thread_id_has_no_roster_name(self) -> None:
         """No identity means no Session row for the naming rule to decorate."""
@@ -663,7 +667,8 @@ class TestWhatEachRowIsCalled:
             FakeDaemon({THREAD: thread(THREAD, cwd="/tmp/w", name="port the log")}),
             git=inside_a_repository,
         )
-        assert str(lane.rows[0].name) == "GPT-VoiceCoding · port the log"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "port the log"
 
     def test_a_thread_named_with_the_separator_is_left_unnamed(self) -> None:
         """A name with a `·` in it cannot be read back as two halves, so it is not one."""
@@ -708,55 +713,24 @@ PROVISIONAL_SESSION = SETTLED_SESSION | {"name": "Reply with the single word REA
 
 
 class TestANameThatIsOnlyThePromptReadBack:
-    """#113: the daemon's first title is the user's own words, and it is not a name.
+    """Raw daemon names and previews cross the lane untouched (#290).
 
-    **What 0.150.0 does.** On the first `UserMessage` of an unnamed thread the
-    TUI whitespace-collapses that message, takes 36 characters of it, and calls
-    `thread/name/set` with the result (`rust-v0.150.0:codex-rs/tui/src/app/
-    thread_routing.rs:1800-1854`, `tui/src/app/thread_title.rs:22`). A generated
-    title then replaces it — see `SETTLED_SESSION` below, which is that swap
-    caught after the fact on the run of record's own thread. How long the first
-    name is live is *not* measured and is observed on #80's run of record; it
-    cannot be read back, because the thread that generates the title is
-    ephemeral and an ephemeral thread's timestamps are stamped when it is read
-    (`rust-v0.150.0:codex-rs/app-server/src/request_processors/
-    thread_processor.rs:5999-6016`).
-
-    #78 froze the first name per target, so the product kept the truncated
-    fragment for the Session's whole life — said back in every Stop Notice and
-    typed after every `@` (#79's run of record).
-
-    **The test is the daemon's own field, not a shape.** `Thread.preview` is
-    "usually the first user message in the thread" (`rust-v0.150.0:codex-rs/
-    app-server-protocol/src/protocol/v2/thread_data.rs:211`; present identically
-    at `@0.149.1:thread_data.rs:209`), written from that same first message
-    (`codex-rs/thread-store/src/thread_metadata_sync.rs:316-324`). It rides the
-    cheap `thread/read` this lane already makes, so the rule costs no round trip,
-    no `includeTurns` and no rollout — which matters, because the provisional
-    name is set mid-turn, exactly when `TurnCache` declines to read turns.
-
-    **Upstream draws the same line**: resuming a thread refuses a stored title
-    equal to its preview rather than showing it as a name
-    (`rust-v0.150.0:codex-rs/app-server/src/request_processors/
-    thread_processor.rs:5783-5788`).
-
-    **Legacy has no behaviour of this kind, and that is the citation.** Gen 1
-    never read a daemon `Thread.name` — its Codex titles came from a Session's
-    own self-report (`legacy@1d32845:bridge/labels.py:97-106`) and its transcript
-    `ai-title`, both *dropped* from the #67 port table — so there was no
-    product-composed name for codex to overwrite. The rule is new because the
-    behaviour it answers is new.
+    Provisional-title policy is exercised through core.naming in
+    test_session_naming.py; these recorded source documents stay lane fixtures.
     """
 
-    def test_the_recorded_provisional_title_is_not_a_name(self) -> None:
+    def test_the_recorded_provisional_title_is_carried_raw(self) -> None:
         """The whole ticket, on the run of record's own document."""
         lane = found_with_tuis(daemon_holding(PROVISIONAL_SESSION))
-        assert str(lane.rows[0].name) == "workspace-codex · 01a040ee"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == PROVISIONAL_SESSION["name"]
+        assert lane.rows[0].preview == PROVISIONAL_SESSION["preview"]
 
-    def test_the_title_the_daemon_settled_on_is_a_name(self) -> None:
+    def test_the_title_the_daemon_settled_on_is_carried_raw(self) -> None:
         """And the good one is kept, which is what makes this a filter and not a ban."""
         lane = found_with_tuis(daemon_holding(SETTLED_SESSION))
-        assert str(lane.rows[0].name) == "workspace-codex · 回复 READY"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "回复 READY"
 
     def test_a_prompt_short_enough_to_become_the_whole_name_is_still_not_a_name(self) -> None:
         """Under 36 characters nothing is truncated, and it is the same provisional title."""
@@ -765,7 +739,8 @@ class TestANameThatIsOnlyThePromptReadBack:
                 thread(THREAD, cwd="/tmp/w", name="fix the login bug", preview="fix the login bug")
             )
         )
-        assert str(lane.rows[0].name) == f"w · {THREAD[:8]}"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_the_prompt_is_matched_the_way_codex_collapsed_and_cut_it(self) -> None:
         """`split_whitespace().join(" ")` then 36 characters, over a prompt that had both."""
@@ -779,7 +754,8 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert str(lane.rows[0].name) == f"w · {THREAD[:8]}"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].short_thread_id == THREAD[:8]
 
     def test_a_generated_title_that_merely_opens_the_prompt_is_kept(self) -> None:
         """The rule catches codex's own cut, not everything the prompt begins with.
@@ -799,7 +775,8 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert str(lane.rows[0].name) == "w · Fix the login bug"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "Fix the login bug"
 
     def test_a_name_the_prompt_does_not_begin_with_is_kept(self) -> None:
         """A title generated from the conversation is not a slice of the first message."""
@@ -813,26 +790,30 @@ class TestANameThatIsOnlyThePromptReadBack:
                 )
             )
         )
-        assert str(lane.rows[0].name) == "w · Port the discovery log"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "Port the discovery log"
 
     def test_a_name_longer_than_the_prompt_is_kept(self) -> None:
         """The provisional title is a *slice*, so it can never outrun what it was cut from."""
         lane = found_with_tuis(
             daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log now", preview="port"))
         )
-        assert str(lane.rows[0].name) == "w · port the log now"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "port the log now"
 
     def test_a_daemon_that_states_no_preview_keeps_the_name(self) -> None:
         """Absent is not a claim — the same reading `threadSource` already gets (#112)."""
         lane = found_with_tuis(daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log")))
-        assert str(lane.rows[0].name) == "w · port the log"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "port the log"
 
     def test_an_empty_preview_keeps_the_name_too(self) -> None:
         """`""` is how the daemon spells "no first message recorded", not "it matched"."""
         lane = found_with_tuis(
             daemon_holding(thread(THREAD, cwd="/tmp/w", name="port the log", preview=""))
         )
-        assert str(lane.rows[0].name) == "w · port the log"
+        assert lane.rows[0].name is None
+        assert lane.rows[0].thread_name == "port the log"
 
 
 class TestWhenTheLaneCannotLookAtAll:
@@ -961,9 +942,8 @@ class TestThreadsTheDaemonRunsForItself:
     def test_the_phantom_never_reaches_the_naming_rule(self) -> None:
         """It was named `<project> · 01a0403a`, and that name is what made it a Session."""
         lane = found_with_tuis(daemon_holding(RECORDED_SESSION, RECORDED_PHANTOM))
-        assert [str(row.name) for row in lane.rows] == [
-            "gvc-110-probe.c45yj3u_ · Reply with the single word READY. Do"
-        ]
+        assert [row.thread_name for row in lane.rows] == [RECORDED_SESSION["name"]]
+        assert all(row.name is None for row in lane.rows)
 
     def test_the_session_keeps_its_process_even_when_the_phantom_is_listed_first(
         self, tmp_path: Path
@@ -1447,3 +1427,17 @@ class TestSayingSoWithoutSayingItTwelveTimesAMinute:
         assert not [line for line in caplog.messages if roster.NOTHING_TO_VOUCH_FOR in line]
         assert lane.degraded
         assert seen == set()
+
+
+def test_discovery_carries_raw_title_preview_and_floor_without_composing():
+    lane = found_with_tuis(
+        daemon_holding(
+            thread(THREAD, cwd="/tmp/w", name="  raw\n title ", preview="[Image #1] raw\n preview")
+        )
+    )
+    row = lane.rows[0]
+    assert row.name is None
+    assert row.project_name == "w"
+    assert row.thread_name == "  raw\n title "
+    assert row.preview == "[Image #1] raw\n preview"
+    assert row.short_thread_id == THREAD[:8]

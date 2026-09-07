@@ -437,6 +437,53 @@ def test_no_codex_on_the_machine_is_not_a_failure(tmp_path: Path, launchd: FakeL
     assert launchd.commands == []
 
 
+def test_the_no_codex_note_says_where_that_path_came_from(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """#276's second finding: "no codex" and "could not see the codex" read alike.
+
+    A login-shell read that fails leaves the subprocess on launchd's own
+    `PATH`, and `which codex` on that finds nothing on a machine that has one —
+    so this line, which is what `status` prints and what a person reads when
+    asking why there is no LaunchAgent, has to say which `PATH` it searched
+    *and* that a failed read is the usual way that `PATH` arrives.
+
+    Simon's ruling on the product line: the installation is still `ok` and
+    nothing is written. Only the sentence changes.
+    """
+    directory, missing = launch_agents(tmp_path), no_codex(tmp_path)
+    outcome = agent.install(
+        directory, missing, log_in(tmp_path), record_in(tmp_path), launchd.launchd
+    )
+
+    assert (outcome.ok, outcome.state) == (True, State.ABSENT)
+    # The searched PATH, named — a reader can check it against their own.
+    assert str(tmp_path / "empty-bin") in outcome.note
+    assert "login-shell read" in outcome.note
+    assert "menu bar" in outcome.note
+
+
+def test_the_provenance_sentence_reads_after_either_reason() -> None:
+    """`resolve` composes two reasons, and the sentence follows both.
+
+    The second is "this process was given no PATH", after which a sentence
+    opening "that PATH" would point at something the clause before it had just
+    said does not exist. Unconditional was the ruling (#276), so the way to keep
+    it unconditional is to state the rule rather than the value — which is a
+    claim about the wording, and is pinned as one.
+    """
+    on_a_path = codex_runtime.resolve({"PATH": "/nowhere-at-all"})
+    with_no_path = codex_runtime.resolve({})
+
+    assert "on PATH (/nowhere-at-all)" in agent._no_codex(on_a_path.reason).note
+    assert "given no PATH" in agent._no_codex(with_no_path.reason).note
+    for outcome in (agent._no_codex(on_a_path.reason), agent._no_codex(with_no_path.reason)):
+        assert agent._PATH_PROVENANCE in outcome.note
+        # The sentence points at no value, so neither reason leaves it dangling.
+        assert "That PATH" not in outcome.note
+        assert (outcome.ok, outcome.state) == (True, State.ABSENT)
+
+
 def test_a_codex_without_the_executable_bit_is_no_codex(
     tmp_path: Path, launchd: FakeLaunchd
 ) -> None:

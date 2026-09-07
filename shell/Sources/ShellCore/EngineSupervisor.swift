@@ -46,8 +46,17 @@ extension EngineProcess {
 
 /// How the engine is spawned. A protocol so the supervision rules can be tested
 /// without a Python interpreter, the same reason every seam here has a fake.
+///
+/// **`async` for the same reason ``InstallationRunner/run(_:deadline:)`` is**
+/// (#276): the real launcher reads the user's login shell before it spawns, and
+/// this protocol's one caller is an `actor`'s loop, so a synchronous
+/// requirement here made every spawn block a cooperative-pool thread for the
+/// length of somebody's profile. A fake with nothing to wait for still writes
+/// an ordinary synchronous `launch` — Swift lets a non-`async` function satisfy
+/// an `async` requirement — so the cost of saying this falls only on the
+/// implementation that actually waits.
 public protocol EngineLaunching: Sendable {
-    func launch(_ command: EngineCommand) throws -> EngineProcess
+    func launch(_ command: EngineCommand) async throws -> EngineProcess
 }
 
 /// Time, injected, so the backoff ladder is tested rather than waited out.
@@ -134,6 +143,15 @@ public actor EngineSupervisor {
     /// can consume this intent and launch its successor.
     private var replacementRequested = false
     private var replacementDeadline: Task<Void, Never>?
+    /// Whether the loop is inside `await launcher.launch` right now.
+    ///
+    /// `child == nil` is two different states and #276 made the difference
+    /// matter: between children — a backoff sleep — there is nothing to stop
+    /// and nothing to remember, but inside a launch there is a child on its way
+    /// that `shutDown` and `retry` cannot reach yet, and their decision has to
+    /// survive until it arrives. Nothing else can tell those two apart:
+    /// `childHasExited` is false in both before the first spawn.
+    private var launching = false
 
     public init(
         launcher: EngineLaunching,
@@ -189,7 +207,19 @@ public actor EngineSupervisor {
             start()
             return
         }
-        guard let replacing = child else { return }
+        guard let replacing = child else {
+            // Supervising with no child is two states, and Retry means a
+            // different thing in each (#276). Inside a launch there is a child
+            // on its way that this cannot reach: the request is recorded and
+            // the loop stops the one it is about to adopt, because dropping it
+            // would swallow a press that has already cleared the failure count
+            // and the ring above. In a backoff sleep there is nothing on its
+            // way and nothing to stop — forgiving those two is the whole of
+            // what Retry means there, and asking for a replacement would spend
+            // the spawn that the sleep is about to make anyway.
+            if launching { replacementRequested = true }
+            return
+        }
         replacementRequested = true
         replacementDeadline = stoppingDeadline(for: replacing)
     }
@@ -260,8 +290,9 @@ public actor EngineSupervisor {
             childHasExited = false
             let startedAt = clock.now
             let process: EngineProcess
+            launching = true
             do {
-                process = try launcher.launch(command)
+                process = try await launcher.launch(command)
             } catch let failure as TelegramCredentialPreflightFailure {
                 ending = .cannotSpawn(.credentials(failure.state))
                 break
@@ -269,7 +300,19 @@ public actor EngineSupervisor {
                 ending = .cannotSpawn(.launch("\(error)"))
                 break
             }
+            launching = false
             child = process
+            // A decision taken while this was inside the launch is carried out
+            // here — #276, and the reason is that `launch` became `await`.
+            // Every other suspension in this loop either holds a live `child`
+            // or is followed by the `while` re-check; the launch is neither, so
+            // for its whole length — a login shell, up to `LoginShellPath`'s
+            // ten seconds — `shutDown()` and `retry()` looked for something to
+            // stop and found `nil`. Shutdown then parked on this loop while the
+            // engine it had decided against started behind it and nobody ever
+            // asked it to stop. The child exists now; the ask happens now.
+            let stoppingCarried =
+                shuttingDown || replacementRequested ? stoppingDeadline(for: process) : nil
             // Read now, while the child is still here to be asked.
             let overhead = process.launchOverhead
             health = .running(pid: process.processIdentifier)
@@ -277,6 +320,7 @@ public actor EngineSupervisor {
             let code = await process.waitForExit { [weak self] chunk in
                 await self?.received(chunk)
             }
+            stoppingCarried?.cancel()
             childHasExited = true
             child = nil
             if shuttingDown { break }
@@ -308,6 +352,7 @@ public actor EngineSupervisor {
         }
 
         // Cleared first, published second. See the note above.
+        launching = false
         supervising = false
         if let ending, !shuttingDown { health = ending }
         if shuttingDown { health = .shutDown }

@@ -12,7 +12,7 @@ import Testing
         let collected = Collector()
         let command = EngineCommand(
             executable: "/bin/sh", arguments: ["-c", script], source: .developerPath)
-        let process = try! ProcessLauncher().launch(command)
+        let process = try! await ProcessLauncher().launch(command)
         let code = await process.waitForExit { collected.add($0) }
         return (code, collected.lines(), process.processIdentifier)
     }
@@ -42,7 +42,7 @@ import Testing
             source: .developerPath)
         let collected = ByteCollector()
 
-        let process = try ProcessLauncher(readPath: LoginShellPath.unasked).launch(command)
+        let process = try await ProcessLauncher(readPath: LoginShellPath.unasked).launch(command)
         let code = await process.waitForExit { collected.add($0) }
 
         #expect(code == EngineExitCode.couldNotStart)
@@ -82,7 +82,7 @@ import Testing
             executable: "/bin/sh", arguments: ["-c", "exit 0"], source: .developerPath)
         let collected = Collector()
 
-        let process = try! ProcessLauncher(log: { said.add($0) }).launch(command)
+        let process = try! await ProcessLauncher(log: { said.add($0) }).launch(command)
         _ = await process.waitForExit { collected.add($0) }
 
         // Exactly one, because a line per spawn is a diagnostic and two would be
@@ -103,7 +103,7 @@ import Testing
         let command = EngineCommand(
             executable: "/bin/sh", arguments: ["-c", "exit 0"], source: .developerPath)
 
-        let process = try! ProcessLauncher(
+        let process = try! await ProcessLauncher(
             readPath: { _, _ in .ranOutOfTime },
             report: { seen.add($0) }
         ).launch(command)
@@ -122,7 +122,7 @@ import Testing
         let command = EngineCommand(
             executable: "/bin/sh", arguments: ["-c", "exit 0"], source: .developerPath)
 
-        let process = try! ProcessLauncher(
+        let process = try! await ProcessLauncher(
             readPath: { _, _ in .said("/opt/homebrew/bin:/usr/bin") },
             report: { seen.add($0) }
         ).launch(command)
@@ -144,7 +144,7 @@ import Testing
             executable: "/bin/sh", arguments: ["-c", "printf '%s' \"$PATH\" 1>&2"],
             source: .developerPath)
 
-        let process = try! ProcessLauncher(
+        let process = try! await ProcessLauncher(
             readPath: { _, _ in .said("/opt/only-here") }
         ).launch(command)
         _ = await process.waitForExit { collected.add($0) }
@@ -161,7 +161,7 @@ import Testing
             executable: "/bin/sh",
             arguments: ["-c", "printf '%s' \"$GVC_LAUNCH_TEST_TOKEN\" 1>&2"],
             source: .developerPath)
-        let process = try ProcessLauncher(
+        let process = try await ProcessLauncher(
             readPath: LoginShellPath.unasked,
             environment: ["GVC_LAUNCH_TEST_TOKEN": "inherited-loses"],
             credentials: fixture.credentials
@@ -198,7 +198,7 @@ import Testing
             let credentials = TelegramCredentials(
                 configPath: config.path, environmentPath: file.path)
 
-            let process = try ProcessLauncher(
+            let process = try await ProcessLauncher(
                 readPath: LoginShellPath.unasked, credentials: credentials
             ).launch(command)
             _ = await process.waitForExit { collected.add($0) }
@@ -207,7 +207,29 @@ import Testing
         }
     }
 
-    @Test func aLaunchThatNeverSpawnsKeepsNoPipeAfterwards() {
+    @Test func theLoginShellReadIsOffTheCooperativePool() async {
+        // The other half of #276's third finding. This launcher's one caller is
+        // `EngineSupervisor`, which is an `actor`, so a synchronous `launch`
+        // blocked that actor's executor — a cooperative-pool thread — for the
+        // length of a login shell, on every spawn and on every rung of the
+        // restart ladder. Same rule as `InstallationRunner.run`, so the same
+        // assertion: the read runs on the thread the launch made for it.
+        let observed = ThreadName()
+        let command = EngineCommand(
+            executable: "/bin/sh", arguments: ["-c", "exit 0"], source: .developerPath)
+
+        let process = try! await ProcessLauncher(
+            readPath: { _, _ in
+                observed.record(Thread.current.name)
+                return .said("/opt/only-here")
+            }
+        ).launch(command)
+        _ = await process.waitForExit { _ in }
+
+        #expect(observed.name == "gpt-voicecoding.launch")
+    }
+
+    @Test func aLaunchThatNeverSpawnsKeepsNoPipeAfterwards() async {
         // A launch can fail before there is anything to wait for — the engine's
         // binary is missing or not executable, which is the case the supervisor
         // answers with "nothing to spawn". Nothing will ever end that launch's
@@ -228,8 +250,8 @@ import Testing
         let launcher = ProcessLauncher(readPath: LoginShellPath.unasked)
         let before = openDescriptors()
         for _ in 0..<attempts {
-            #expect(throws: (any Error).self) {
-                try launcher.launch(missing)
+            await #expect(throws: (any Error).self) {
+                try await launcher.launch(missing)
             }
         }
         let leaked = openDescriptors() - before
@@ -264,7 +286,7 @@ import Testing
         let collected = Collector()
         let command = EngineCommand(
             executable: "/bin/sh", arguments: ["-c", "sleep 30"], source: .developerPath)
-        let process = try! ProcessLauncher().launch(command)
+        let process = try! await ProcessLauncher().launch(command)
 
         process.requestStop()
 

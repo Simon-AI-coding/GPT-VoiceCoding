@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import socket as sockets
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -523,3 +524,81 @@ class TestWhatAStatusRunSaysAboutTheSharedServer:
             said = codex_runtime.answering(socket_path)
 
         assert "is not answering" in said
+
+
+class DribblingPeer:
+    """Something on the socket that keeps sending and never finishes — #276.
+
+    The peer the per-`recv` timeout could not bound. `FakeAppServer` cannot play
+    it: it answers a well-formed upgrade, and what is wanted here is a header
+    block that arrives for ever. One byte per interval, or one long block with
+    no terminator, are the two shapes of the same thing.
+    """
+
+    def __init__(self, path: Path, *, gap: float = 0.0, bytes_at_once: int = 1) -> None:
+        self._path = path
+        #: How long the peer waits between bytes. A budget-renewing dribble.
+        self._gap = gap
+        self._at_once = bytes_at_once
+        self._listener = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
+        self._listener.bind(str(path))
+        self._listener.listen(1)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self) -> DribblingPeer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._listener.close()
+        self._thread.join(timeout=5)
+
+    def _serve(self) -> None:
+        try:
+            client, _ = self._listener.accept()
+        except OSError:
+            return
+        with client:
+            # A header line that never carries the terminator, so this can run
+            # for as long as the peer is allowed to.
+            while not self._stop.is_set():
+                try:
+                    client.sendall(b"X" * self._at_once)
+                except OSError:
+                    return
+                if self._gap and self._stop.wait(self._gap):
+                    return
+
+
+class TestAPeerThatKeepsSendingIsBoundedToo:
+    """#276's first finding: the handshake's budget is end to end.
+
+    `settimeout` bounds each `recv`, so before this every byte a peer sent
+    bought it another whole timeout. A person typed `status` and is waiting at a
+    terminal, and what they are owed is one deadline.
+    """
+
+    def test_one_byte_at_a_time_forever_runs_out_of_the_budget(self, socket_path: Path) -> None:
+        """Gap under the per-`recv` timeout, so the old code renewed on every
+        byte and never came back. Timed, because "returns" is the claim."""
+        budget = 0.5
+        with DribblingPeer(socket_path, gap=budget / 5):
+            started = time.monotonic()
+            said = codex_runtime.answering(socket_path, budget=budget)
+        elapsed = time.monotonic() - started
+
+        assert "is not answering" in said
+        assert "did not finish the handshake" in said
+        assert elapsed < budget * 6
+
+    def test_a_header_block_over_the_ceiling_is_refused(self, socket_path: Path) -> None:
+        """The other half of the same bound: a peer sending as fast as it likes
+        is inside any deadline and still must not be buffered without end."""
+        with DribblingPeer(socket_path, bytes_at_once=4096):
+            said = codex_runtime.answering(socket_path, budget=5.0)
+
+        assert "is not answering" in said
+        assert str(codex_runtime.MAX_UPGRADE_HEADER_BYTES) in said
+        assert "without ending the header block" in said

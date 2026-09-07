@@ -460,6 +460,68 @@ import Testing
         #expect(launcher.lastChild()?.stopForced == true)
         #expect(EngineSupervisor.stopGraceSeconds == 5)
     }
+
+    // MARK: - The window a launch opens (#276)
+
+    @Test func aQuitDuringALaunchStopsTheEngineItWasAlreadyStarting() async {
+        // Making `launch` `await` gave this loop its one suspension with no
+        // child to point at, and it lasts as long as a login shell — up to
+        // `LoginShellPath.timeout`. `shutDown()` looked for something to stop,
+        // found `nil`, and parked on the loop; the engine it had decided
+        // against then came up behind it with nobody left to ask it to stop, so
+        // quitting waited for a healthy engine to exit on its own. It does not.
+        //
+        // Every other fake launcher in this suite is synchronous, which is why
+        // none of them could enter this window.
+        let clock = TestClock()
+        let launcher = GatedLaunchLauncher(clock: clock)
+        let supervisor = EngineSupervisor(
+            launcher: launcher, socketPath: "/tmp/gvc-test.sock",
+            resolveCommand: {
+                EngineCommand(executable: "/usr/bin/true", arguments: [], source: .developerPath)
+            },
+            clock: clock, socketAnswers: { _ in false })
+        await supervisor.start()
+        await launcher.waitUntilLaunching()
+
+        // Concurrent by necessity: `shutDown` waits for the loop, and the loop
+        // is inside the launch this releases.
+        let quitting = Task { await supervisor.shutDown() }
+        await launcher.releaseLaunch()
+        await quitting.value
+
+        #expect(await supervisor.health == .shutDown)
+        // Asked, and asked politely: the child that arrived after the decision
+        // is still a child that stops in order.
+        #expect(launcher.lastChild()?.stopRequested == true)
+        #expect(launcher.lastChild()?.stopForced == false)
+    }
+
+    @Test func aRetryDuringALaunchReplacesTheEngineItWasAlreadyStarting() async {
+        // The milder half of the same window. Retry has already forgiven the
+        // failure count and cleared the ring by the time it looks for a child,
+        // so a press dropped here is a press that looked like it worked.
+        let clock = TestClock()
+        let launcher = GatedLaunchLauncher(clock: clock)
+        let supervisor = EngineSupervisor(
+            launcher: launcher, socketPath: "/tmp/gvc-test.sock",
+            resolveCommand: {
+                EngineCommand(executable: "/usr/bin/true", arguments: [], source: .developerPath)
+            },
+            clock: clock, socketAnswers: { _ in false })
+        await supervisor.start()
+        await launcher.waitUntilLaunching()
+
+        await supervisor.retry()
+        await launcher.releaseLaunch()
+        await launcher.waitUntilSecondLaunch()
+
+        // The child of the launch that was in flight was stopped, and its
+        // replacement is the one running now.
+        #expect(launcher.firstChild()?.stopRequested == true)
+        #expect(launcher.launchCount() == 2)
+        await supervisor.shutDown()
+    }
 }
 
 private struct CredentialRefusingLauncher: EngineLaunching {
@@ -795,4 +857,38 @@ private final class GatedFastFailureProcess: EngineProcess, @unchecked Sendable 
 
     func requestStop() {}
     func forceStop() {}
+}
+
+/// A launcher that suspends inside `launch`, which is the window #276 opened.
+///
+/// Every other fake here answers synchronously — a synchronous function may
+/// satisfy the `async` requirement — so none of them can be inside a launch
+/// when `shutDown()` or `retry()` arrives. This one can, and holds there until
+/// the test lets it go.
+private final class GatedLaunchLauncher: EngineLaunching, @unchecked Sendable {
+    private let clock: TestClock
+    private let firstGate = ProcessGate()
+    private let secondLaunch = OneShot<Void>()
+    private let lock = NSLock()
+    private var children: [FakeProcess] = []
+
+    init(clock: TestClock) { self.clock = clock }
+
+    func launch(_ command: EngineCommand) async throws -> EngineProcess {
+        let attempt = lock.withLock { children.count + 1 }
+        if attempt == 1 { await firstGate.reachAndWait() }
+        // `run: nil` — a child that stays up until it is asked to stop, which is
+        // what makes "nobody asked it" a hang rather than a passing test.
+        let process = FakeProcess(pid: Int32(1000 + attempt), run: nil, clock: clock)
+        lock.withLock { children.append(process) }
+        if attempt == 2 { secondLaunch.resolve() }
+        return process
+    }
+
+    func waitUntilLaunching() async { await firstGate.waitUntilReached() }
+    func releaseLaunch() async { await firstGate.release() }
+    func waitUntilSecondLaunch() async { await secondLaunch.value() }
+    func launchCount() -> Int { lock.withLock { children.count } }
+    func firstChild() -> FakeProcess? { lock.withLock { children.first } }
+    func lastChild() -> FakeProcess? { lock.withLock { children.last } }
 }

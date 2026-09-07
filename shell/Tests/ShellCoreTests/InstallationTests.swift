@@ -162,6 +162,41 @@ import Testing
         #expect(recorded.latest == .adopted(shell: "/bin/zsh", path: "/opt/only-here"))
     }
 
+    @Test func theLoginShellReadIsOffThePoolAndOutsideTheSubprocessDeadline() async {
+        // #276's third finding. `run` promises it waits on threads of its own
+        // and never on a pooled one, and the login-shell read — a semaphore
+        // with a ten-second budget — used to happen above the hand-off, on
+        // whatever cooperative-pool thread the caller was on. One core out of
+        // about one per core, for as long as somebody's profile takes.
+        //
+        // Both halves of the move are pinned here because they pull opposite
+        // ways: the read has to be on the dedicated thread, *and* its time
+        // still must not be charged to the subprocess ceiling — which is the
+        // reason the read was above the hand-off in the first place. So the
+        // reader sleeps past the deadline and the child is expected to finish
+        // normally regardless.
+        let observed = ThreadName()
+        let slower = 1.5
+        let report = await InstallationRunner(
+            readPath: { _, _ in
+                observed.record(Thread.current.name)
+                Thread.sleep(forTimeInterval: slower)
+                return .said("/opt/only-here:/usr/bin:/bin")
+            },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh", arguments: ["-c", "printf '%s' \"$PATH\""],
+                source: .developerPath),
+            deadline: slower / 2)
+
+        // Not the caller's thread, and not any of the pool's: the one `run` made.
+        #expect(observed.name == "gpt-voicecoding.installation")
+        // The child ran to completion on a deadline shorter than the read.
+        #expect(report.ok)
+        #expect(report.lines == ["/opt/only-here:/usr/bin:/bin"])
+    }
+
     @Test func aBundledRunStillKeepsBytecodeOutOfTheBundle() async {
         // The PATH handover replaced the branch that built this environment, so
         // the rule it used to carry is pinned rather than assumed to have come

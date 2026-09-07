@@ -76,7 +76,32 @@ public struct ProcessLauncher: EngineLaunching {
         BrokenPipes.ignore()
     }
 
-    public func launch(_ command: EngineCommand) throws -> EngineProcess {
+    /// Spawns on a thread of its own, and never on a pooled one — #276.
+    ///
+    /// The waiting inside ``launchBlocking(_:)`` is ``LoginShellPath/apply(to:read:log:)``:
+    /// a `<shell> -lic` that reads somebody's whole profile, ~0.45 s measured
+    /// and up to ``LoginShellPath/timeout`` before it gives up. The one caller
+    /// is ``EngineSupervisor``'s loop, and an actor's executor is a
+    /// cooperative-pool thread, so a synchronous spawn parked one there for
+    /// every launch and every restart on the backoff ladder.
+    ///
+    /// The whole body moves rather than the read alone. Hopping out for the
+    /// read and back for the spawn would buy a `posix_spawn` and a small file
+    /// read on the pool at the price of two more suspensions, and split one
+    /// launch across two threads for no reason a reader could name.
+    /// `launchOverhead` is still measured across the same span, so the
+    /// supervisor discounts exactly what it did before.
+    public func launch(_ command: EngineCommand) async throws -> EngineProcess {
+        return try await withCheckedThrowingContinuation { continuation in
+            let thread = Thread {
+                continuation.resume(with: Result { try self.launchBlocking(command) })
+            }
+            thread.name = "gpt-voicecoding.launch"
+            thread.start()
+        }
+    }
+
+    private func launchBlocking(_ command: EngineCommand) throws -> EngineProcess {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = command.arguments

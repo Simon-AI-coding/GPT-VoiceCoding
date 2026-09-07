@@ -398,6 +398,34 @@ def _read(path: Path) -> JobFile | None | str:
     return JobFile(document=document, sha256=hashlib.sha256(contents).hexdigest())
 
 
+#: Why the `PATH` in a no-codex reason may not be the user's own — #276.
+#:
+#: The reason already names the `PATH` that was searched. What it did not say is
+#: where that `PATH` comes from, and the answer is the difference between "this
+#: machine has no codex" and "this reconcile could not see the one it has": the
+#: shell reads the user's login `PATH` and hands it to this subprocess, that read
+#: **fails open**, and what a failed read leaves behind is launchd's own
+#: `/usr/bin:/bin:/usr/sbin:/sbin`, on which `which codex` finds nothing on a
+#: machine that has one.
+#:
+#: **Unconditional, and it names no value.** Deciding this wording by comparing
+#: the searched `PATH` against a hard-coded launchd default is #38 exactly — a
+#: constant standing in for something the environment already states, and one
+#: that would go quietly wrong the day Apple changes it. So the sentence is
+#: always said, and it points at the surface that knows: the menu bar reports
+#: every login-shell read, failed or not (#118).
+#:
+#: **It points at nothing, which is what lets it be unconditional.**
+#: `codex_runtime.resolve` composes two reasons, and the second is "this process
+#: was given no PATH" — after which "that PATH" would refer to something the
+#: same sentence had just said does not exist. So this states the rule rather
+#: than the value, and reads as well after either.
+_PATH_PROVENANCE: Final = (
+    "A reconcile searches the PATH it was handed, and the login-shell read "
+    "behind that fails open to launchd's own; the menu bar reports the reading"
+)
+
+
 def _no_codex(reason: str) -> Outcome:
     """The Codex lane reporting itself absent, with the reason — never an error.
 
@@ -405,8 +433,19 @@ def _no_codex(reason: str) -> Outcome:
     and nothing to install. That is a fact about the machine, so it is said and
     the run carries on: `ok` stays true, and the next reconcile after the user
     installs one puts the job there.
+
+    **`ok` stays true even when the `PATH` is the reason** (Simon's ruling on
+    #276). The other candidate was to report `STALE, ok=False` when the read
+    failed, which is the honest state and costs the Python side an inherited
+    fact about the shell. This line was chosen instead: the installation is
+    still `ok`, nothing is written, and the note says the cause — see
+    `_PATH_PROVENANCE`.
     """
-    return Outcome(NAME, State.ABSENT, note=f"{reason} — nothing to start, so nothing to install")
+    return Outcome(
+        NAME,
+        State.ABSENT,
+        note=f"{reason} — nothing to start, so nothing to install. {_PATH_PROVENANCE}",
+    )
 
 
 def _previous_render_note(path: Path) -> str:

@@ -151,8 +151,16 @@ arguments = { … app-server --listen unix:///Users/simon/.codex/app-server-cont
   There is still no `KeepAlive`, so this is not a supervisor — but a `launchctl print`
   now answers "is the shared server up" truthfully, which it never did before.
 
-**Verdict: works with a change** — the job must carry `PATH` = `dirname(executable)` +
-launchd's default. Homebrew was **not** probed (no Homebrew codex on this machine).
+**Verdict: works with a change** — the job must carry a `PATH` that can find the
+executable's interpreter. Homebrew was **not** probed (no Homebrew codex on this machine).
+
+> **Superseded, and only in the rule — not in the finding (#276).** What this step
+> measured stands: without a `PATH` the npm codex dies under launchd with
+> `env: node: No such file or directory`. What the prototype *proposed* — compose
+> `dirname(executable)` and launchd's default — is not what shipped. ADR 0022 rules the
+> plist carries the **whole login `PATH`**, as the user's own shell states it, and #275
+> made that reading independent of the launch. Composing a value here would be #38: a
+> constant standing in for something the environment already says.
 
 ## Step 3 — Attach: a bare `codex` joins it
 
@@ -331,7 +339,7 @@ substring.
 | --- | --- |
 | `executable` | `$SHELL -l -i -c 'command -v codex'`, resolved once at first launch, written to `[adapters.codex_app_server] executable` |
 | `control_socket` | derived: `$CODEX_HOME/app-server-control/app-server-control.sock` |
-| `launch_environment` | `CODEX_HOME` + `PATH` = `dirname(executable)` : launchd's default — **without it an npm codex cannot start under launchd at all** |
+| `launch_environment` | `CODEX_HOME` + the whole login `PATH`, as read by `LoginShellPath.swift` and handed to the reconcile (ADR 0022, #275) — **without a `PATH` an npm codex cannot start under launchd at all**. The prototype proposed `dirname(executable)` : launchd's default here; the ADR chose the user's own reading instead (#276). |
 
 `managed_binary()` and `MANAGED_BINARY_PARTS` go. `shared_daemon.locate()` stops
 spawning `daemon version` and connects to `control_socket`. The LaunchAgent runs

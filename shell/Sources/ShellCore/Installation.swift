@@ -145,26 +145,32 @@ public struct InstallationRunner: Sendable {
     /// waiting happens on threads created for it and thrown away after, and the
     /// public entry point is `async` and gives its caller's thread back.
     ///
+    /// **The login-shell read is one of those waits** (#276). It used to happen
+    /// here, before the hand-off, for a reason that was about the *deadline* and
+    /// not about the thread: a reading started inside `runBlocking` would put a
+    /// login shell's whole profile inside a subprocess ceiling it is not part
+    /// of. But `LoginShellPath.apply` blocks on a semaphore for up to
+    /// ``LoginShellPath/timeout`` — ten seconds — so keeping it above the
+    /// continuation held a pooled thread for exactly as long as the sentence
+    /// above says it never does. It is on the dedicated thread now, and the
+    /// deadline is still not charged for it, because `runBlocking` starts its
+    /// clock when it is called and the read has already returned by then.
+    ///
     /// `deadline` is a parameter for one reason: a test that proved the ceiling
     /// by waiting out the real one would take longer than the whole suite.
     public func run(
         _ command: EngineCommand, deadline: TimeInterval = Installation.deadline
     ) async -> InstallationReport {
-        // Read here rather than on the waiting thread below: it is the caller's
-        // own await that this belongs inside, and a reading started on a thread
-        // this creates would put a login shell's whole profile inside the
-        // subprocess deadline it is not part of.
-        let path = LoginShellPath.apply(to: environment, read: readPath, log: log)
-        // Every run, including the ones that worked, for the reason the launcher
-        // reports every spawn: a surface clears its own warning by being told the
-        // next reading was fine.
-        report(path.outcome)
-        let childEnvironment = path.environment
         return await withCheckedContinuation { continuation in
             let thread = Thread {
+                let path = LoginShellPath.apply(to: environment, read: readPath, log: log)
+                // Every run, including the ones that worked, for the reason the
+                // launcher reports every spawn: a surface clears its own warning
+                // by being told the next reading was fine.
+                report(path.outcome)
                 continuation.resume(
                     returning: Self.runBlocking(
-                        command, environment: childEnvironment, deadline: deadline))
+                        command, environment: path.environment, deadline: deadline))
             }
             thread.name = "gpt-voicecoding.installation"
             thread.start()

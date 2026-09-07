@@ -103,13 +103,27 @@ LISTEN_SCHEME: Final = "unix://"
 #: forbids and which would make installation need an engine to be constructible.
 CLIENT_NAME: Final = "gpt-voicecoding"
 
-#: How long the status handshake gets, end to end. Measured at **1 ms** against
-#: a live server on the reference machine (#271 step 7), against 139 ms for the
-#: `daemon version` subprocess it replaces — so this is not a budget the
+#: How long the status handshake gets, end to end — one deadline from the moment
+#: the socket is opened, not a fresh one per `recv`. Measured at **1 ms**
+#: against a live server on the reference machine (#271 step 7), against 139 ms
+#: for the `daemon version` subprocess it replaces — so this is not a budget the
 #: ordinary case spends. It is the bound on the case that has no ordinary one: a
 #: socket something is listening on that never answers. A person typed `status`
 #: and is waiting at a terminal for it.
+#:
+#: **Per-`recv` was not that bound** (#276). `settimeout` bounds each call, so a
+#: peer that sent one byte every four seconds — or a header block with no
+#: terminator — renewed the budget for as long as it liked and held `status`
+#: open with it. What bounds such a peer is a start time and the remaining time
+#: armed before every read, which is what `_Budget` is.
 HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
+
+#: The most of an upgrade's header block this will hold. A `101 Switching
+#: Protocols` answer is a handful of headers; a few KiB is already generous, and
+#: the ceiling is what stops a peer that sends a valid-looking header block for
+#: ever from being bounded only by the clock. Exceeding it is a refusal, the
+#: same as any other peer that is not an app-server.
+MAX_UPGRADE_HEADER_BYTES: Final = 8 * 1024
 
 #: How much of an unreadable answer is quoted back in a reason. Long enough to
 #: recognise what came out, short enough that a peer answering megabytes cannot
@@ -246,7 +260,7 @@ def resolve(environ: Mapping[str, str], home: Path | None = None) -> Resolution:
     )
 
 
-def answering(socket_path: Path) -> str:
+def answering(socket_path: Path, *, budget: float = HANDSHAKE_TIMEOUT_SECONDS) -> str:
     """One sentence about the shared app-server, for a status run to print.
 
     **Never called on the install path.** A reconcile runs before the engine at
@@ -258,12 +272,16 @@ def answering(socket_path: Path) -> str:
     a codex `initialize`. The middle one is a stale file, which a server that
     was killed rather than stopped leaves behind, and it is worth telling apart
     from the first — the same path with two different reasons.
+
+    `budget` is a parameter for one reason, and it is ``deadline``'s in
+    ``InstallationRunner.run``: a test that proved the ceiling by waiting out the
+    real one would take five seconds per case. No shipping caller passes it.
     """
     started = time.monotonic()
     if not socket_path.exists():
         return f"the shared app-server is not answering: there is no socket at {socket_path}"
     try:
-        answer = _handshake(socket_path)
+        answer = _handshake(socket_path, budget)
     except OSError as unreachable:
         return (
             f"the shared app-server is not answering: {socket_path} is there and "
@@ -284,7 +302,40 @@ class _HandshakeRefused(Exception):
     """Something is listening on the socket, and it is not a codex app-server."""
 
 
-def _handshake(socket_path: Path) -> dict[str, Any]:
+class _Budget:
+    """The handshake's one deadline, armed before each read that can block.
+
+    A peer that never sends is bounded by any timeout at all. A peer that keeps
+    sending — one header byte every four seconds, a header block with no
+    terminator, a frame arriving a byte at a time — is bounded only by a
+    deadline that does not move, which is why the start time is taken once here
+    and every ``settimeout`` after it is the *remaining* time (#276).
+
+    Running out is the same ``_HandshakeRefused`` a hung peer produces, because
+    to the person who typed `status` they are one answer: whatever is on that
+    socket did not complete a handshake.
+    """
+
+    __slots__ = ("_seconds", "_started")
+
+    def __init__(self, seconds: float) -> None:
+        self._seconds = seconds
+        self._started = time.monotonic()
+
+    def arm(self, connection: socket.socket) -> None:
+        """Give the socket what is left, or refuse because nothing is."""
+        remaining = self._seconds - (time.monotonic() - self._started)
+        if remaining <= 0:
+            raise _HandshakeRefused(self.exhausted)
+        connection.settimeout(remaining)
+
+    @property
+    def exhausted(self) -> str:
+        """The one sentence for running out, wherever the read gave up."""
+        return f"it did not finish the handshake within {self._seconds:g} seconds"
+
+
+def _handshake(socket_path: Path, budget: float) -> dict[str, Any]:
     """Connect, upgrade, `initialize`, and give back what the server said.
 
     Blocking, and on a socket of its own, because this runs before any event
@@ -296,25 +347,36 @@ def _handshake(socket_path: Path) -> dict[str, Any]:
     `initialized` is sent after the answer because the protocol asks for it and
     a server told nothing would be entitled to wait. Nothing is read after it:
     this connection exists to prove the server is there, and it closes.
+
+    One ``_Budget`` covers all of it, from the socket being opened to the last
+    byte read, and a read that runs out of it refuses like any other peer that
+    is not an app-server. ``TimeoutError`` is caught here rather than left to
+    ``answering``'s ``OSError`` arm for the same reason: a socket that timed out
+    on the remaining budget *is* the budget running out, and saying so as an
+    unreachable-socket ``strerror`` would name the wrong thing.
     """
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
-        connection.connect(str(socket_path))
-        request, key = websocket.upgrade_request()
-        connection.sendall(request)
-        header = _read_until(connection, websocket.UPGRADE_TERMINATOR)
-        if not websocket.accepted(header, key):
-            status, _ = websocket.upgrade_answer(header)
-            raise _HandshakeRefused(
-                f"whatever is listening on {socket_path} is not a codex app-server "
-                f"(it answered {status!r} to a WebSocket upgrade)"
+    budgeted = _Budget(budget)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            budgeted.arm(connection)
+            connection.connect(str(socket_path))
+            request, key = websocket.upgrade_request()
+            connection.sendall(request)
+            header = _read_until(connection, websocket.UPGRADE_TERMINATOR, budgeted)
+            if not websocket.accepted(header, key):
+                status, _ = websocket.upgrade_answer(header)
+                raise _HandshakeRefused(
+                    f"whatever is listening on {socket_path} is not a codex app-server "
+                    f"(it answered {status!r} to a WebSocket upgrade)"
+                )
+            _send(
+                connection,
+                {"id": INITIALIZE_ID, "method": "initialize", "params": _initialize_params()},
             )
-        _send(
-            connection,
-            {"id": INITIALIZE_ID, "method": "initialize", "params": _initialize_params()},
-        )
-        answer = _await_initialize(connection, socket_path)
-        _send(connection, {"method": "initialized", "params": {}})
+            answer = _await_initialize(connection, socket_path, budgeted)
+            _send(connection, {"method": "initialized", "params": {}})
+    except TimeoutError:
+        raise _HandshakeRefused(budgeted.exhausted) from None
     error = answer.get("error")
     if error is not None:
         raise _HandshakeRefused(f"{socket_path} answered initialize with an error: {error}")
@@ -330,7 +392,9 @@ def _handshake(socket_path: Path) -> dict[str, Any]:
     return result
 
 
-def _await_initialize(connection: socket.socket, socket_path: Path) -> dict[str, Any]:
+def _await_initialize(
+    connection: socket.socket, socket_path: Path, budget: _Budget
+) -> dict[str, Any]:
     """The answer to *this* request, told apart from anything else on the wire.
 
     Matched on the id rather than taken as the first message to arrive. The
@@ -341,7 +405,7 @@ def _await_initialize(connection: socket.socket, socket_path: Path) -> dict[str,
     and no reason to want one.
     """
     for _ in range(MESSAGES_BEFORE_THE_ANSWER):
-        message = _receive(connection)
+        message = _receive(connection, budget)
         if message.get("id") == INITIALIZE_ID and message.get("method") is None:
             return message
     raise _HandshakeRefused(
@@ -362,7 +426,7 @@ def _send(connection: socket.socket, message: dict[str, Any]) -> None:
     connection.sendall(websocket.client_frame(payload, websocket.OPCODE_TEXT))
 
 
-def _receive(connection: socket.socket) -> dict[str, Any]:
+def _receive(connection: socket.socket, budget: _Budget) -> dict[str, Any]:
     """One whole JSON-RPC message, read a frame at a time and blocking.
 
     What each opcode means, and how fragments become a message, is
@@ -372,7 +436,7 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
     """
     gathering = websocket.Reassembly(MAX_MESSAGE_BYTES)
     while True:
-        step = gathering.take(*_read_frame(connection))
+        step = gathering.take(*_read_frame(connection, budget))
         if step.refuse is not None:
             raise _HandshakeRefused(f"it {step.refuse}")
         if step.pong_with is not None:
@@ -389,27 +453,35 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
     return message
 
 
-def _read_frame(connection: socket.socket) -> tuple[int, bool, bytes]:
-    first, second = _read_exactly(connection, 2)
+def _read_frame(connection: socket.socket, budget: _Budget) -> tuple[int, bool, bytes]:
+    first, second = _read_exactly(connection, 2, budget)
     prefix = websocket.frame_prefix(first, second)
     if prefix.reserved:
         raise _HandshakeRefused("it set reserved WebSocket bits")
     length = prefix.length
     if prefix.extended_length_bytes:
-        length = websocket.extended_length(_read_exactly(connection, prefix.extended_length_bytes))
+        length = websocket.extended_length(
+            _read_exactly(connection, prefix.extended_length_bytes, budget)
+        )
     if length > MAX_MESSAGE_BYTES:
         raise _HandshakeRefused("it sent a frame larger than this read will hold")
-    mask = _read_exactly(connection, websocket.MASK_BYTES) if prefix.masked else b""
-    payload = _read_exactly(connection, length) if length else b""
+    mask = _read_exactly(connection, websocket.MASK_BYTES, budget) if prefix.masked else b""
+    payload = _read_exactly(connection, length, budget) if length else b""
     if prefix.masked:
         payload = websocket.unmask(payload, mask)
     return prefix.opcode, prefix.final, payload
 
 
-def _read_exactly(connection: socket.socket, count: int) -> bytes:
-    """Exactly this many bytes, or the connection ended before they arrived."""
+def _read_exactly(connection: socket.socket, count: int, budget: _Budget) -> bytes:
+    """Exactly this many bytes, or the connection ended before they arrived.
+
+    Or the handshake's budget did: the count is a peer's own number, so a peer
+    that announces a long frame and then dribbles it is bounded by the deadline
+    and by nothing else.
+    """
     collected = bytearray()
     while len(collected) < count:
+        budget.arm(connection)
         chunk = connection.recv(count - len(collected))
         if not chunk:
             raise _HandshakeRefused("the shared app-server ended the connection mid-frame")
@@ -417,16 +489,27 @@ def _read_exactly(connection: socket.socket, count: int) -> bytes:
     return bytes(collected)
 
 
-def _read_until(connection: socket.socket, terminator: bytes) -> bytes:
-    """The upgrade's header block, bounded by the terminator and by the timeout.
+def _read_until(connection: socket.socket, terminator: bytes, budget: _Budget) -> bytes:
+    """The upgrade's header block, bounded three ways: terminator, budget, size.
 
     Byte at a time, and that is affordable exactly here: this reads one HTTP
     header block on a local socket, once, and reading in chunks would need a
-    buffer the frame reader after it would have to be handed. The socket's own
-    timeout bounds a peer that never sends the terminator.
+    buffer the frame reader after it would have to be handed.
+
+    **All three bounds are needed, and the timeout alone was none of them**
+    (#276). A socket timeout bounds a peer that sends *nothing*; a peer that
+    sends one byte at a time and no terminator was bounded by neither the clock
+    — each `recv` renewed its own timeout — nor by any count, because this loop
+    had none. So the deadline is armed per byte and the block has a ceiling.
     """
     collected = bytearray()
     while not collected.endswith(terminator):
+        if len(collected) >= MAX_UPGRADE_HEADER_BYTES:
+            raise _HandshakeRefused(
+                f"it sent more than {MAX_UPGRADE_HEADER_BYTES} bytes of WebSocket upgrade "
+                f"answer without ending the header block"
+            )
+        budget.arm(connection)
         chunk = connection.recv(1)
         if not chunk:
             raise _HandshakeRefused("the connection ended during the WebSocket upgrade")

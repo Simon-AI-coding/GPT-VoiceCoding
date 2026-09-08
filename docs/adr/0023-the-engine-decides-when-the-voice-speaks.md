@@ -1,6 +1,6 @@
 # 23. The engine decides whether and when the Voice speaks; prose decides how
 
-Date: 2026-09-07 · Status: Accepted · Source: #274
+Date: 2026-09-07 · Status: Accepted · Amended 2026-09-09 (below) · Source: #274
 
 System-dialled calls connected and then stayed silent: the dial-time hand-over
 is silent background (ADR 0018), while the Voice's prose said the person had
@@ -43,3 +43,30 @@ finished-turn reading to the common question rule. Legacy did not dial codex
 realtime (`bridge/livecall.py:77-109`, ADR 0018), so it has no opening act of
 this kind to port. This change leaves real-environment acceptance untouched;
 the user explicitly excluded running it from this implementation.
+
+## Amendment 2026-09-09: a roster of one has no other Session to ring about
+
+Source: `engine.log` 2026-09-09 09:54:18–09:56:23 on the reference machine; fixed in `f634d00`.
+
+"Mid-call the existing Focus-only speech and non-Focus EVENT Cue rules stand" held on one reading
+only. The rules are two and the flag that selects them is one boolean, so a roster with **no Focus
+Session at all** took the Cue branch exactly as a roster whose focus is some *other* Session does.
+On the reference machine that roster held one Session: it stopped at 09:54:18 waiting for a
+decision, the EVENT Cue played at 09:54:20, and the call stayed up until 09:56:23 without a word
+said into it. Neither an Answer Relay nor an Approval Relay ran that day — the user was answering
+by typing into that Session's own terminal, which no surface sees and which therefore never sets
+the focus. So the ring named a Session the user could not tell apart from the one in front of
+them, and the word owed waited on a reply they had no reason to send.
+
+Mid-call speech now reads the Session **spoken first**: the Focus Session when there is one, and
+otherwise the sole live Session — Child Processes not counted, because a Session that spawned a
+subagent has not become two Sessions to choose between (#68). A held focus still decides alone;
+the roster is read only for the empty case. The Focus Session itself is unchanged and settable by
+nothing but a reply (#165 Q2); what parted from it is what the voice *does* with that record. Both
+halves of the decision read the one notion — the Keeper's wake, which arms the word, and the
+Briefer, which pays it — because arming one without the other leaves the word owed and never said,
+which is the shape the first attempt at this fix had.
+
+One consequence, and it follows from the Silence Ceiling rather than from anything decided here:
+on a roster of one a Stop is now spoken, and a Session Brief handed to the voice starts the silent
+stretch afresh, so a call that used to hang up on that news is held open one stretch longer.

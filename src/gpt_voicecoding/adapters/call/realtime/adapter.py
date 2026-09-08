@@ -689,10 +689,8 @@ class RealtimeCallAdapter:
         """Synthesise and play one cue on *this* thread, and say what went out.
 
         The blocking half of `play_cue`, and the half that has an answer: the
-        span the cue occupied on the output device. Public because that span is
-        what a playback reference inherits (#145) — the seam verb returns
-        nothing, and this is where the answer is. `play_cue` reaches it through
-        the queue; a caller that wants the span calls it here and waits.
+        span the cue occupied on the output device. `play_cue` reaches it
+        through the queue; playback logging records this result.
 
         Never raises. A cue that could not be played is written down and
         swallowed: there is no recovery to attempt, and this runs on a thread
@@ -706,23 +704,12 @@ class RealtimeCallAdapter:
             frames=cues.frames_in(pcm),
         )
         try:
-            self._cues.play(pcm, span=span)
+            self._cues.play(pcm)
         except Exception as unplayable:  # noqa: BLE001 - a cue may not end a call
             _log.warning("the %s cue could not be played: %s", cue, unplayable)
             return None
         _log.info("%s", cues.played_line(span))
         return span
-
-    @property
-    def cue_output(self) -> CueOutput:
-        """Where this adapter's cues go, and what is going out right now.
-
-        Exposed rather than private because the span a cue occupies is read from
-        outside this class: #145 gates capture on it, since the microphone stays
-        open through a cue and the mid-call one is deliberately loud enough to
-        carry over speech.
-        """
-        return self._cues
 
     async def verify(self) -> VerifyResult:
         """Report what is loaded, and whether the app-server this rides answers."""

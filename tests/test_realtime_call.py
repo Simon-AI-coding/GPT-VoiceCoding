@@ -2540,10 +2540,10 @@ class TestTheCuesItPlays:
         """
         deadline = time.monotonic() + within
         while time.monotonic() < deadline:
-            if len(player.seen_playing) >= count:
+            if len(player.attempts) >= count:
                 return
             time.sleep(0.005)
-        raise AssertionError(f"only {len(player.seen_playing)} of {count} cues were played")
+        raise AssertionError(f"only {len(player.attempts)} of {count} cues were played")
 
     def test_each_moment_is_played_as_its_own_sound(self, socket_path: Path) -> None:
         async def scenario() -> FakeCueOutput:
@@ -2554,11 +2554,10 @@ class TestTheCuesItPlays:
                 for number, cue in enumerate(Cue, start=1):
                     await adapter.play_cue(cue)
                     self.played(player, number)
-                    assert player.spans[-1].cue is cue
+                    assert player.buffers[-1] == cues.render(cue)
                 return player
 
         player = asyncio.run(scenario())
-        assert [span.cue for span in player.spans] == list(Cue)
         assert player.buffers == [cues.render(cue) for cue in Cue]
 
     def test_a_cue_goes_to_the_output_device_the_call_was_configured_with(self) -> None:
@@ -2573,12 +2572,17 @@ class TestTheCuesItPlays:
             settings=quick(output_device=4),
             transport_factory=FakeTransport,
         )
-        assert stated.cue_output.device == 4
+        streams = _Streams(blocks_on=None)
+        with _sounddevice(streams):
+            stated.play_now(Cue.CONNECTED)
+        assert streams.opened[0]["device"] == 4
 
         default = RealtimeCallAdapter(
             delegated_turn_model=DELEGATED_MODEL, settings=quick(), transport_factory=FakeTransport
         )
-        assert default.cue_output.device is None
+        with _sounddevice(streams):
+            default.play_now(Cue.CONNECTED)
+        assert streams.opened[-1]["device"] is None
 
     def test_the_ended_cue_plays_after_the_calls_own_audio_has_closed(
         self, socket_path: Path
@@ -2603,7 +2607,7 @@ class TestTheCuesItPlays:
 
         audio, player = asyncio.run(scenario())
         assert audio.closed
-        assert [span.cue for span in player.spans] == [Cue.ENDED]
+        assert player.buffers == [cues.render(Cue.ENDED)]
 
     def test_the_adapter_writes_down_the_device_and_the_span_it_played(
         self, socket_path: Path, caplog: pytest.LogCaptureFixture
@@ -2653,41 +2657,6 @@ class TestTheCuesItPlays:
         assert any("no such output device" in said for said in written)
         assert not any(cues.cue_phrase(Cue.ENDED) in said for said in written)
 
-    def test_a_playback_that_finishes_first_does_not_release_another_ones_span(self) -> None:
-        """`playing` answers for every playback in flight, not for the last setter.
-
-        `play_now` is public, so #145 can put a second playback beside the cue
-        worker's. If the *later* one finishes first, a single slot cleared by
-        whoever finishes would announce silence while the earlier cue is still
-        writing — and a capture gate reading that opens the microphone into a
-        live tone. The device is stood in for; the bookkeeping under test is
-        this class's own.
-        """
-        player = webrtc.CuePlayer(device=3)
-        writing, release = threading.Event(), threading.Event()
-        streams = _Streams(blocks_on=(writing, release))
-
-        with _sounddevice(streams):
-            first = threading.Thread(
-                target=lambda: player.play(b"\x00\x00", span="the first"), daemon=True
-            )
-            first.start()
-            assert writing.wait(2.0), "the first playback never reached the device"
-
-            # Started later and finished first, which is the order a single slot
-            # gets wrong.
-            second = threading.Thread(
-                target=lambda: player.play(b"\x00\x00", span="the second"), daemon=True
-            )
-            second.start()
-            second.join(2.0)
-
-            assert player.playing == "the first"
-            release.set()
-            first.join(2.0)
-
-        assert player.playing is None
-
     def test_a_cue_opens_the_stream_on_the_speakers_own_parameters(self) -> None:
         """One shape for the whole audio path, so a cue needs no second opinion.
 
@@ -2698,7 +2667,7 @@ class TestTheCuesItPlays:
         streams = _Streams(blocks_on=None)
 
         with _sounddevice(streams):
-            player.play(cues.render(Cue.CONNECTED), span="a cue")
+            player.play(cues.render(Cue.CONNECTED))
 
         assert streams.opened == [
             {
@@ -2709,29 +2678,6 @@ class TestTheCuesItPlays:
                 "device": 6,
             }
         ]
-
-    def test_the_span_is_readable_while_the_cue_is_going_out(self, socket_path: Path) -> None:
-        """What #145 inherits: the microphone is open through a cue, and the
-        mid-call one is loud enough to carry over speech — so loud enough to be
-        heard back in. A gate needs to know a cue is playing *now*."""
-
-        async def scenario() -> FakeCueOutput:
-            async with FakeAppServer(socket_path) as server:
-                realtime_script(server, thread_id=THREAD)
-                player = FakeCueOutput(device=2)
-                adapter, _ = await riding(server, Sink(), cue_player=player)
-                await adapter.play_cue(Cue.EVENT)
-                self.played(player)
-                return player
-
-        player = asyncio.run(scenario())
-        held = player.seen_playing[-1]
-        assert held.cue is Cue.EVENT
-        assert held.device == 2
-        assert held.seconds == pytest.approx(0.16)
-        # And nothing is held once it has finished: a gate that stayed shut
-        # would be worse than no gate.
-        assert player.playing is None
 
     def test_asking_for_a_cue_does_not_wait_for_it(self, socket_path: Path) -> None:
         """A cue costs 320-620 ms of wall time on the real path (#174), and the
@@ -2783,12 +2729,12 @@ class TestTheCuesItPlays:
                 await adapter.play_cue(Cue.CONNECTED)
                 await adapter.play_cue(Cue.ENDED)
                 deadline = time.monotonic() + 5.0
-                while len(player.spans) < 2 and time.monotonic() < deadline:
+                while len(player.buffers) < 2 and time.monotonic() < deadline:
                     time.sleep(0.005)
                 return player
 
         player = asyncio.run(scenario())
-        assert [span.cue for span in player.spans] == [Cue.CONNECTED, Cue.ENDED]
+        assert player.buffers == [cues.render(cue) for cue in (Cue.CONNECTED, Cue.ENDED)]
 
     def test_every_cue_asked_for_is_played_once_and_in_order(self, socket_path: Path) -> None:
         """A burst longer than any real call, to prove the queue drains in order."""
@@ -2802,12 +2748,12 @@ class TestTheCuesItPlays:
                 for cue in asked:
                     await adapter.play_cue(cue)
                 deadline = time.monotonic() + 5.0
-                while len(player.spans) < len(asked) and time.monotonic() < deadline:
+                while len(player.buffers) < len(asked) and time.monotonic() < deadline:
                     time.sleep(0.005)
                 return player
 
         player = asyncio.run(scenario())
-        assert [span.cue for span in player.spans] == asked
+        assert player.buffers == [cues.render(cue) for cue in asked]
 
     def test_one_worker_plays_every_cue_rather_than_a_thread_each(self, socket_path: Path) -> None:
         """The mechanism the order rests on, asserted rather than assumed."""
@@ -2822,7 +2768,7 @@ class TestTheCuesItPlays:
                 for cue in Cue:
                     await adapter.play_cue(cue)
                 deadline = time.monotonic() + 5.0
-                while len(player.spans) < len(list(Cue)) and time.monotonic() < deadline:
+                while len(player.buffers) < len(list(Cue)) and time.monotonic() < deadline:
                     time.sleep(0.005)
                 return on
 
@@ -2864,16 +2810,16 @@ class TestTheCuesItPlays:
                 adapter, _ = await riding(server, Sink(), cue_player=player)
                 await adapter.play_cue(Cue.CONNECTED)
                 deadline = time.monotonic() + 5.0
-                while len(player.seen_playing) < 1 and time.monotonic() < deadline:
+                while len(player.attempts) < 1 and time.monotonic() < deadline:
                     time.sleep(0.005)
                 player.fails = ""
                 await adapter.play_cue(Cue.ENDED)
-                while len(player.spans) < 1 and time.monotonic() < deadline:
+                while len(player.buffers) < 1 and time.monotonic() < deadline:
                     time.sleep(0.005)
                 return player
 
         player = asyncio.run(scenario())
-        assert [span.cue for span in player.spans] == [Cue.ENDED]
+        assert player.buffers == [cues.render(Cue.ENDED)]
 
 
 class TestWhatALostConnectionReleases:

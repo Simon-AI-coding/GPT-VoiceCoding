@@ -35,9 +35,11 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>14.2</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>GPT-VoiceCoding uses system audio to keep the Mac’s own playback out of your speech during a Live Call.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>GPT-VoiceCoding uses the microphone for the Live Call it speaks and listens through.</string>
 </dict>

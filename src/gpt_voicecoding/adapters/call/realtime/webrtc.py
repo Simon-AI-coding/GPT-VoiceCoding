@@ -33,13 +33,16 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from gpt_voicecoding.adapters.call.realtime.transport import (
     CallTransport,
+    CueOutput,
     LostHandler,
     TransportError,
+    TransportFactory,
 )
 
 _log = logging.getLogger(__name__)
@@ -64,6 +67,10 @@ SAMPLE_BYTES = 2
 #: written out, so the two things measured in frames below cannot drift from the
 #: frames they are counting.
 FRAME_SECONDS = FRAME_SAMPLES / SAMPLE_RATE
+
+#: LiveKit APM accepts exactly 10 ms per processing call.
+APM_SAMPLES = SAMPLE_RATE // 100
+APM_BYTES = APM_SAMPLES * SAMPLE_BYTES
 
 #: How many frames the speaker must go without a new inbound one before what it
 #: has is called the *last* one. Three: shorter than any pause a listener hears
@@ -97,7 +104,7 @@ MAX_PLAYBACK_BYTES = SAMPLE_RATE * SAMPLE_BYTES * 2
 INSTALL_HINT = "pip install 'gpt-voicecoding[voice]'"
 
 #: The distributions this route cannot run without.
-REQUIRED = ("aiortc", "av", "sounddevice")
+REQUIRED = ("aiortc", "av", "sounddevice", "CoreAudio", "livekit.rtc")
 
 
 class VoiceDependencyError(Exception):
@@ -236,8 +243,26 @@ def probe() -> None:
         )
 
 
+def call_audio(
+    *, input_device: int | None, output_device: int | None
+) -> tuple[TransportFactory, CueOutput]:
+    """Build the transport factory and its independent Cue player with one device owner."""
+    probe()
+    output = _OutputSelection(output_device)
+
+    def build() -> CallTransport:
+        return _WebRtcTransport(
+            input_device=input_device, output_device=output_device, silent=False, output=output
+        )
+
+    return build, CuePlayer(_output=output)
+
+
 def webrtc_transport(
-    *, input_device: int | None = None, output_device: int | None = None, silent: bool = False
+    *,
+    input_device: int | None = None,
+    output_device: int | None = None,
+    silent: bool = False,
 ) -> CallTransport:
     """One WebRTC audio path, ready to be offered.
 
@@ -247,21 +272,34 @@ def webrtc_transport(
     only reason the flag exists — it is not a mode the engine ever selects.
     """
     probe()
-    return _WebRtcTransport(input_device=input_device, output_device=output_device, silent=silent)
+    return _WebRtcTransport(
+        input_device=input_device,
+        output_device=output_device,
+        silent=silent,
+        output=_OutputSelection(output_device),
+    )
 
 
 class _WebRtcTransport:
     """`aiortc` behind the `CallTransport` interface. Built by `webrtc_transport`."""
 
     def __init__(
-        self, *, input_device: int | None, output_device: int | None, silent: bool
+        self,
+        *,
+        input_device: int | None,
+        output_device: int | None,
+        silent: bool,
+        output: _OutputSelection | None = None,
     ) -> None:
         from aiortc import RTCPeerConnection
 
         self._pc = RTCPeerConnection()
         self._silent = silent
-        self._microphone = _Microphone(silent=silent, device=input_device)
+        self._output = output or _OutputSelection(output_device)
         self._speaker = _Speaker(silent=silent, device=output_device)
+        self._microphone = _Microphone(
+            silent=silent, device=input_device, output=self._output, failed=self._audio_failed
+        )
         self._on_lost: LostHandler | None = None
         self._closing = False
         #: Whether the loss has already been reported upward. Its own flag, and
@@ -285,7 +323,19 @@ class _WebRtcTransport:
         def _on_message(message: Any) -> None:
             self._read_channel_event(message)
 
-        self._pc.addTrack(self._microphone.track())
+        try:
+            if not silent:
+                # An open silent output keeps the device clock/reference running
+                # before Voice arrives and between utterances.
+                identity = self._speaker.open()
+            else:
+                identity = None
+            self._pc.addTrack(self._microphone.track(identity))
+        except BaseException:
+            self._microphone.stop()
+            self._speaker.stop()
+            asyncio.ensure_future(self._pc.close())
+            raise
 
         @self._pc.on("track")
         def _on_track(track: Any) -> None:
@@ -410,6 +460,13 @@ class _WebRtcTransport:
         with contextlib.suppress(Exception):
             await self._pc.close()
 
+    def _audio_failed(self, error: Exception) -> None:
+        if self._closing:
+            return
+        reason = f"the call's audio processing failed: {error}"
+        self._report_loss(reason)
+        asyncio.ensure_future(self.aclose())
+
     # -- state ------------------------------------------------------------
 
     def _note(self, state: str) -> None:
@@ -428,7 +485,9 @@ class _WebRtcTransport:
             return
         if state not in ("failed", "closed"):
             return
-        reason = f"the call's audio connection is {state}"
+        self._report_loss(f"the call's audio connection is {state}")
+
+    def _report_loss(self, reason: str) -> None:
         if not self._connected.done():
             self._connected.set_exception(TransportError(reason))
         if self._closing or self._reported:
@@ -452,55 +511,24 @@ def _retrieved(waiting: asyncio.Future[None]) -> None:
 
 
 class CuePlayer:
-    """A second output stream, opened for one cue and closed after it.
+    """Independent cue stream; share the call device only while capture is alive.
 
-    **Beside the call's own `_Speaker`, not inside it.** The cue that matters
-    most plays when there is no call left to play it through: `ENDED` goes out
-    after the peer connection and its speaker have already closed. Mixing cues
-    into the playback buffer would tie the two lifetimes together and lose
-    exactly that one. A stream per cue also costs nothing at all in between —
-    there is no device held open for a sound that plays three times an hour.
-
-    The stream's parameters are the speaker's own (48 kHz, mono, int16, 960-frame
-    blocks), so a cue needs no second opinion about what this machine's audio
-    path looks like, and it honours the same `output_device` the call does.
-
-    **It starts no thread.** `play` blocks — the write is a device write and
-    `stop` drains after it, which #174 measured at 320-620 ms of wall time for
-    60-300 ms of sound — and the caller decides where that runs and what a
-    failure means. This class knows about a device and nothing else.
-
-    **What is playing is a set, not a slot.** The adapter feeds this from a
-    single worker, so in practice the cues arrive one at a time — but `play_now`
-    is public and #145 may call it, so a second playback is something this class
-    cannot see coming. A single `_playing` slot cleared by whoever finishes gets
-    that wrong in one of the two orders: the later playback finishing first
-    would announce silence while the earlier one is still writing, and a capture
-    gate reading that opens the microphone into a live tone. So every playback
-    in flight is held, and `playing` answers from the newest of them.
+    ENDED can sound after capture closes, so its stream is never owned by the
+    peer connection. The adapter's existing worker controls ordering; this
+    player blocks until the device has drained and always closes its stream.
     """
 
-    def __init__(self, *, device: int | None = None) -> None:
-        self._device = device
-        self._lock = threading.Lock()
-        self._spans: list[Any] = []
+    def __init__(
+        self, *, device: int | None = None, _output: _OutputSelection | None = None
+    ) -> None:
+        self._output = _output or _OutputSelection(device)
 
     @property
     def device(self) -> int | None:
-        return self._device
+        return self._output.device
 
-    @property
-    def playing(self) -> Any | None:
-        """The span going out right now, or None. Read by #145's capture gate.
-
-        The newest when more than one is in flight: what a gate asks is whether
-        a cue is sounding, and the newest is the one that has longest to run.
-        """
-        with self._lock:
-            return self._spans[-1] if self._spans else None
-
-    def play(self, pcm: bytes, *, span: Any = None) -> None:
-        """Open, write, stop, close. Blocking, and raises what the library raises."""
+    def play(self, pcm: bytes) -> None:
+        """Open, write, drain, close. Blocking; the adapter owns worker ordering."""
         import sounddevice
 
         stream = sounddevice.RawOutputStream(
@@ -508,32 +536,30 @@ class CuePlayer:
             channels=CHANNELS,
             dtype=SAMPLE_FORMAT,
             blocksize=FRAME_SAMPLES,
-            device=self._device,
+            device=self.device,
         )
-        # Held only once the stream exists: a cue that could not open a device
-        # never occupied one, and a gate reading `playing` would otherwise hold
-        # capture shut over a sound nobody made.
-        with self._lock:
-            self._spans.append(span)
         try:
             stream.start()
-            try:
-                stream.write(pcm)
-                stream.stop()
-            finally:
-                stream.close()
+            stream.write(pcm)
+            stream.stop()
         finally:
-            with self._lock:
-                # By identity: two cues of the same kind a moment apart are equal
-                # spans, and dropping "one that compares equal" is how a playback
-                # releases somebody else's.
-                self._spans[:] = [held for held in self._spans if held is not span]
+            stream.close()
 
 
 class _Microphone:
     """What the user says, as 20 ms frames, or paced silence in a silent run."""
 
-    def __init__(self, *, silent: bool, device: int | None) -> None:
+    def __init__(
+        self,
+        *,
+        silent: bool,
+        device: int | None,
+        output: _OutputSelection,
+        failed: Callable[[Exception], None],
+    ) -> None:
+        self._output = output
+        self._worker: _CaptureWorker | None = None
+        self._failed = failed
         self._silent = silent
         self._device = device
         self._stream: Any = None
@@ -541,7 +567,7 @@ class _Microphone:
         self._frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MAX_CAPTURE_FRAMES)
         self._dropped = 0
 
-    def track(self) -> Any:
+    def track(self, output: _OutputIdentity | None = None) -> Any:
         from aiortc.mediastreams import AudioStreamTrack
 
         microphone = self
@@ -566,7 +592,7 @@ class _Microphone:
 
         self._track = _Track()
         if not self._silent:
-            self._open()
+            self._open(output)
         return self._track
 
     async def _next(self, track: Any) -> bytes:
@@ -585,7 +611,7 @@ class _Microphone:
             await asyncio.sleep(delay)
         return b"\x00\x00" * FRAME_SAMPLES
 
-    def _open(self) -> None:
+    def _open(self, output: _OutputIdentity | None) -> None:
         import sounddevice
 
         loop = asyncio.get_event_loop()
@@ -597,12 +623,27 @@ class _Microphone:
                 self._dropped += 1
             self._frames.put_nowait(data)
 
-        def captured(indata: Any, _frames: int, _time: Any, status: Any) -> None:
+        def failed(error: Exception) -> None:
+            loop.call_soon_threadsafe(self._failed, error)
+
+        def deliver(pcm: bytes) -> None:
+            loop.call_soon_threadsafe(push, pcm)
+
+        def captured(indata: Any, _frames: int, timing: Any, status: Any) -> None:
+            worker = self._worker
+            if worker is None:
+                return
             if status:
                 _log.info("microphone reported %s", status)
-            loop.call_soon_threadsafe(push, bytes(indata))
+            # PortAudio's currentTime and ADC timestamp share a clock. Translate
+            # that measured age to the same monotonic clock as the process tap.
+            at = time.monotonic() - (timing.currentTime - timing.inputBufferAdcTime)
+            worker.capture(bytes(indata), at)
 
         try:
+            if output is None:
+                raise TransportError("capture has no resolved playback device")
+            self._worker = _CaptureWorker(output, deliver, failed)
             self._stream = sounddevice.RawInputStream(
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
@@ -612,7 +653,9 @@ class _Microphone:
                 callback=captured,
             )
             self._stream.start()
+            self._output.active = output
         except Exception as unavailable:
+            self.stop()
             raise TransportError(f"the microphone could not be opened: {unavailable}") from None
 
     def stop(self) -> None:
@@ -621,6 +664,10 @@ class _Microphone:
             with contextlib.suppress(Exception):
                 stream.stop()
                 stream.close()
+        self._output.active = None
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.close()
         track, self._track = self._track, None
         if track is not None:
             with contextlib.suppress(Exception):
@@ -758,6 +805,11 @@ class _Speaker:
         self._server_finished = False
         return taken
 
+    def open(self) -> _OutputIdentity:
+        """Open playback and resolve the native identity from that actual stream."""
+        self._open()
+        return _output_identity(self._stream)
+
     def attach(self, track: Any) -> None:
         if not self._silent and self._stream is None:
             self._open()
@@ -835,3 +887,424 @@ class _Speaker:
                 stream.close()
         if self._dropped:
             _log.info("dropped playback audio %d times while the buffer overflowed", self._dropped)
+
+
+class _EchoProcessor:
+    """One call's canceller; only the audio worker crosses this private seam.
+
+    Reference PCM is resampled device playback, never a second copy of Voice or
+    Cues. Capture stays mono s16 / 20 ms. Both timestamps name the first sample
+    on the monotonic clock. The APM's ten-millisecond framing and measured delay
+    stay here, so neither signalling nor the encoder learns about them.
+    """
+
+    def __init__(self, *, reference_channels: int) -> None:
+        from livekit import rtc
+
+        self._apm = rtc.AudioProcessingModule(echo_cancellation=True)
+        self._channels = reference_channels
+        self._reference = bytearray()
+        self._render_offset: float | None = None
+
+    def reference(self, pcm: bytes, *, rendered_at: float, analyzed_at: float) -> bool:
+        from livekit import rtc
+
+        size = APM_BYTES * self._channels
+        buffered_seconds = len(self._reference) / (SAMPLE_RATE * SAMPLE_BYTES * self._channels)
+        self._reference.extend(pcm)
+        first = rendered_at - buffered_seconds
+        while len(self._reference) >= size:
+            frame = rtc.AudioFrame(
+                bytes(self._reference[:size]), SAMPLE_RATE, self._channels, APM_SAMPLES
+            )
+            del self._reference[:size]
+            self._apm.process_reverse_stream(frame)
+            self._render_offset = first - analyzed_at
+            first += APM_SAMPLES / SAMPLE_RATE
+        return self._render_offset is not None
+
+    def capture(self, pcm: bytes, *, captured_at: float, processed_at: float) -> bytes:
+        from livekit import rtc
+
+        if self._render_offset is None:
+            raise TransportError("the playback reference has not started")
+        if len(pcm) != FRAME_SAMPLES * SAMPLE_BYTES:
+            raise TransportError("capture did not supply one 20 ms frame")
+        size = APM_BYTES
+        result = bytearray()
+        for offset in range(0, len(pcm), size):
+            # LiveKit: (t_render - t_analyze) + (t_process - t_capture).
+            delay = (
+                self._render_offset
+                + processed_at
+                - captured_at
+                - offset / (SAMPLE_RATE * SAMPLE_BYTES)
+            )
+            self._apm.set_stream_delay_ms(max(0, round(delay * 1000)))
+            frame = rtc.AudioFrame(pcm[offset : offset + size], SAMPLE_RATE, CHANNELS, APM_SAMPLES)
+            self._apm.process_stream(frame)
+            result.extend(frame.data)
+        return bytes(result)
+
+
+@dataclass(frozen=True)
+class _OutputIdentity:
+    index: int
+    uid: str
+    stream: int
+    render_latency: float
+
+
+class _OutputSelection:
+    """Cues share the resolved device only for the lifetime of capture."""
+
+    def __init__(self, configured: int | None) -> None:
+        self.configured = configured
+        self.active: _OutputIdentity | None = None
+
+    @property
+    def device(self) -> int | None:
+        active = self.active
+        return self.configured if active is None else active.index
+
+
+def _core_property(device: int, selector: int, scope: int | None = None) -> bytes:
+    import CoreAudio
+
+    address = CoreAudio.AudioObjectPropertyAddress(
+        selector,
+        CoreAudio.kAudioObjectPropertyScopeGlobal if scope is None else scope,
+        CoreAudio.kAudioObjectPropertyElementMain,
+    )
+    status, size = CoreAudio.AudioObjectGetPropertyDataSize(device, address, 0, b"", None)
+    _audio_status(status, "read the audio property size")
+    status, _, data = CoreAudio.AudioObjectGetPropertyData(device, address, 0, b"", size, None)
+    _audio_status(status, "read the audio property")
+    return bytes(data)
+
+
+def _audio_status(status: int, operation: str) -> None:
+    if status:
+        raise TransportError(
+            f"could not {operation} (Core Audio status {status}); check the selected audio "
+            "device and allow GPT-VoiceCoding in System Settings > Privacy & Security > "
+            "Screen & System Audio Recording"
+        )
+
+
+def _output_identity(stream: Any) -> _OutputIdentity:
+    """Ask PortAudio which native device this actual stream opened; never match names."""
+    import ctypes
+    import struct
+
+    import CoreAudio
+    import objc
+    import sounddevice
+
+    portaudio = ctypes.CDLL(sounddevice._libname)
+    native_device = portaudio.PaMacCore_GetStreamOutputDevice
+    native_device.argtypes = [ctypes.c_void_p]
+    native_device.restype = ctypes.c_uint32
+    device = native_device(int(sounddevice._ffi.cast("uintptr_t", stream._ptr)))
+    if not device:
+        raise TransportError("PortAudio did not identify the selected Core Audio output")
+    uid_pointer = struct.unpack(
+        "P", _core_property(device, CoreAudio.kAudioDevicePropertyDeviceUID)
+    )[0]
+    uid = str(objc.objc_object(c_void_p=uid_pointer))
+    scope = CoreAudio.kAudioObjectPropertyScopeOutput
+    stream_ids = _core_property(device, CoreAudio.kAudioDevicePropertyStreams, scope)
+    streams = list(enumerate(value[0] for value in struct.iter_unpack("I", stream_ids)))
+    if len(streams) != 1:
+        # A single device-targeted tap must cover the complete device. Selecting
+        # one of several streams would silently exclude other applications.
+        raise TransportError(
+            "cannot establish a complete playback reference for this multi-stream output"
+        )
+    stream_index, native_stream = streams[0]
+    rate = struct.unpack(
+        "d", _core_property(device, CoreAudio.kAudioDevicePropertyNominalSampleRate)
+    )[0]
+    latency = (
+        sum(
+            struct.unpack("I", _core_property(owner, selector, property_scope))[0]
+            for owner, selector, property_scope in (
+                (device, CoreAudio.kAudioDevicePropertyLatency, scope),
+                (device, CoreAudio.kAudioDevicePropertySafetyOffset, scope),
+                (native_stream, CoreAudio.kAudioStreamPropertyLatency, None),
+            )
+        )
+        / rate
+    )
+    return _OutputIdentity(
+        index=int(stream.device), uid=uid, stream=stream_index, render_latency=latency
+    )
+
+
+@dataclass(frozen=True)
+class _ReferenceBlock:
+    planes: tuple[bytes, ...]
+    at: float
+
+
+class _SystemPlayback:
+    """Device-targeted, private, unmuted Core Audio tap; copies only in its callback."""
+
+    def __init__(
+        self,
+        output: _OutputIdentity,
+        receive: Callable[[_ReferenceBlock], None],
+        failed: Callable[[Exception], None],
+    ) -> None:
+        import ctypes
+        import ctypes.util
+        import struct
+        import uuid
+        import warnings
+
+        import CoreAudio
+        import objc
+
+        self._tap: int | None = None
+        self._aggregate: int | None = None
+        self._proc: Any = None
+        self._callback: Any = None
+        self._hal = ctypes.CDLL(ctypes.util.find_library("CoreAudio"))
+        # PyObjC 12.2.2's ^? metadata cannot consume the IOProcID it returns.
+        # These are the same Core Audio operations with their SDK signatures.
+        for name in ("AudioDeviceStart", "AudioDeviceStop", "AudioDeviceDestroyIOProcID"):
+            function = getattr(self._hal, name)
+            function.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+            function.restype = ctypes.c_int32
+
+        class Timebase(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        timebase = Timebase()
+        _audio_status(
+            ctypes.CDLL(None).mach_timebase_info(ctypes.byref(timebase)), "read the audio clock"
+        )
+        seconds_per_tick = timebase.numer / timebase.denom / 1_000_000_000
+        description = (
+            CoreAudio.CATapDescription.alloc().initExcludingProcesses_andDeviceUID_withStream_(
+                [], output.uid, output.stream
+            )
+        )
+        description.setPrivate_(True)
+        description.setMuteBehavior_(CoreAudio.CATapUnmuted)
+        try:
+            status, tap = CoreAudio.AudioHardwareCreateProcessTap(description, None)
+            _audio_status(status, "create the system playback tap")
+            self._tap = int(tap)
+            raw = _core_property(self._tap, CoreAudio.kAudioTapPropertyFormat)
+            rate, kind, flags, _, _, self._bytes_per_frame, channels, bits, _ = struct.unpack(
+                "dIIIIIIII", raw
+            )
+            if kind != CoreAudio.kAudioFormatLinearPCM or channels not in (1, 2):
+                raise TransportError("the selected playback tap must supply mono or stereo PCM")
+            self.rate = int(rate)
+            self.channels = channels
+            self.layout = "mono" if channels == 1 else "stereo"
+            if flags & CoreAudio.kAudioFormatFlagIsFloat and bits in (32, 64):
+                self.format = "flt" if bits == 32 else "dbl"
+            elif flags & CoreAudio.kAudioFormatFlagIsSignedInteger and bits in (16, 32):
+                self.format = "s16" if bits == 16 else "s32"
+            else:
+                raise TransportError("the selected playback tap has an unsupported PCM format")
+            if flags & CoreAudio.kAudioFormatFlagIsBigEndian:
+                raise TransportError("the selected playback tap uses unsupported big-endian PCM")
+            if flags & CoreAudio.kAudioFormatFlagIsNonInterleaved:
+                self.format += "p"
+            config = {
+                CoreAudio.kAudioAggregateDeviceNameKey.decode(): "GPT-VoiceCoding echo reference",
+                CoreAudio.kAudioAggregateDeviceUIDKey.decode(): str(uuid.uuid4()),
+                CoreAudio.kAudioAggregateDeviceIsPrivateKey.decode(): True,
+                CoreAudio.kAudioAggregateDeviceTapAutoStartKey.decode(): True,
+                CoreAudio.kAudioAggregateDeviceTapListKey.decode(): [
+                    {
+                        CoreAudio.kAudioSubTapUIDKey.decode(): str(description.UUID().UUIDString()),
+                        CoreAudio.kAudioSubTapDriftCompensationKey.decode(): True,
+                    }
+                ],
+            }
+            status, aggregate = CoreAudio.AudioHardwareCreateAggregateDevice(config, None)
+            _audio_status(status, "create the playback reference input")
+            self._aggregate = int(aggregate)
+
+            @objc.callbackFor(CoreAudio.AudioDeviceCreateIOProcID)
+            def copied(
+                _device: Any,
+                _now: Any,
+                inputs: Any,
+                stamp: Any,
+                _outputs: Any,
+                _output_stamp: Any,
+                _context: Any,
+            ) -> int:
+                try:
+                    if not stamp.mFlags & CoreAudio.kAudioTimeStampHostTimeValid:
+                        raise TransportError("the playback reference has no hardware timestamp")
+                    planes = tuple(bytes(buffer.mData) for buffer in inputs)
+                    if planes and planes[0]:
+                        receive(
+                            _ReferenceBlock(
+                                planes, stamp.mHostTime * seconds_per_tick + output.render_latency
+                            )
+                        )
+                except Exception as error:
+                    failed(error)
+                return 0
+
+            self._callback = copied
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", objc.ObjCPointerWarning)
+                status, self._proc = CoreAudio.AudioDeviceCreateIOProcID(
+                    self._aggregate, copied, None, None
+                )
+            _audio_status(status, "register the playback reference callback")
+            _audio_status(
+                self._hal.AudioDeviceStart(self._aggregate, self._proc.pointerAsInteger),
+                "start system audio capture",
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def convert(self, block: _ReferenceBlock, resampler: Any) -> list[tuple[bytes, float]]:
+        import av
+
+        count = len(block.planes[0]) // self._bytes_per_frame
+        frame = av.AudioFrame(format=self.format, layout=self.layout, samples=count)
+        frame.sample_rate = self.rate
+        # Preserve the hardware timeline through resampling, including its filter delay.
+        frame.time_base = fractions.Fraction(1, self.rate)
+        frame.pts = round(block.at * self.rate)
+        for plane, data in zip(frame.planes, block.planes, strict=True):
+            plane.update(data)
+        return [
+            (
+                bytes(out.planes[0])[: out.samples * self.channels * SAMPLE_BYTES],
+                float(out.pts * out.time_base),
+            )
+            for out in resampler.resample(frame)
+        ]
+
+    def close(self) -> None:
+        import CoreAudio
+
+        if self._proc is not None:
+            for name in ("AudioDeviceStop", "AudioDeviceDestroyIOProcID"):
+                status = getattr(self._hal, name)(self._aggregate, self._proc.pointerAsInteger)
+                if status:
+                    _log.warning("%s returned Core Audio status %s", name, status)
+            self._proc = None
+        if self._aggregate is not None:
+            status = CoreAudio.AudioHardwareDestroyAggregateDevice(self._aggregate)
+            if status:
+                _log.warning("destroying the playback aggregate returned %s", status)
+            self._aggregate = None
+        if self._tap is not None:
+            status = CoreAudio.AudioHardwareDestroyProcessTap(self._tap)
+            if status:
+                _log.warning("destroying the playback tap returned %s", status)
+            self._tap = None
+        self._callback = None
+
+
+@dataclass(frozen=True)
+class _CapturedBlock:
+    pcm: bytes
+    at: float
+
+
+class _CaptureWorker:
+    """Bounded callback handoff, one serialized APM, and processed capture only."""
+
+    def __init__(
+        self,
+        output: _OutputIdentity,
+        deliver: Callable[[bytes], None],
+        failed: Callable[[Exception], None],
+        *,
+        source_factory: Callable[..., _SystemPlayback] = _SystemPlayback,
+    ) -> None:
+        import queue
+
+        self._queue: queue.Queue[_ReferenceBlock | _CapturedBlock] = queue.Queue(
+            maxsize=MAX_CAPTURE_FRAMES * 2
+        )
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._error: Exception | None = None
+        self._deliver = deliver
+        self._failed = failed
+        self._tap = source_factory(output, self._put, self._fail)
+        self._thread = threading.Thread(
+            target=self._run, name="call-echo-cancellation", daemon=True
+        )
+        self._thread.start()
+        if not self._ready.wait(MAX_CAPTURE_FRAMES * FRAME_SECONDS) or self._error is not None:
+            self.close()
+            raise TransportError(
+                "system audio capture did not become ready: "
+                f"{self._error or 'no reference frames'}; "
+                "allow GPT-VoiceCoding in Screen & System Audio Recording"
+            )
+
+    def _fail(self, error: Exception) -> None:
+        self._error = error
+        self._ready.set()
+
+    def _put(self, block: _ReferenceBlock | _CapturedBlock) -> None:
+        import queue
+
+        if self._stop.is_set():
+            return
+        try:
+            self._queue.put_nowait(block)
+        except queue.Full:
+            # Dropping reference frames would knowingly invalidate the canceller.
+            self._fail(TransportError("audio processing fell behind its bounded buffer"))
+
+    def capture(self, pcm: bytes, at: float) -> None:
+        self._put(_CapturedBlock(pcm, at))
+
+    def _run(self) -> None:
+        import queue
+
+        import av
+
+        try:
+            processor = _EchoProcessor(reference_channels=self._tap.channels)
+            resampler = av.AudioResampler(format="s16", layout=self._tap.layout, rate=SAMPLE_RATE)
+            last_reference = time.monotonic()
+            while not self._stop.is_set():
+                if self._error is not None:
+                    raise self._error
+                try:
+                    block = self._queue.get(timeout=FRAME_SECONDS)
+                except queue.Empty:
+                    block = None
+                now = time.monotonic()
+                if now - last_reference > MAX_CAPTURE_FRAMES * FRAME_SECONDS:
+                    raise TransportError("the system playback reference stopped arriving")
+                if isinstance(block, _ReferenceBlock):
+                    for pcm, at in self._tap.convert(block, resampler):
+                        if processor.reference(pcm, rendered_at=at, analyzed_at=time.monotonic()):
+                            self._ready.set()
+                    last_reference = now
+                elif isinstance(block, _CapturedBlock):
+                    self._deliver(
+                        processor.capture(
+                            block.pcm, captured_at=block.at, processed_at=time.monotonic()
+                        )
+                    )
+        except Exception as error:
+            self._fail(error)
+            if not self._stop.is_set():
+                self._failed(error)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._tap.close()
+        self._thread.join()

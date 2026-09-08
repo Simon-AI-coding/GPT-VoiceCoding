@@ -24,6 +24,7 @@
 | [0022](0022-the-shared-app-server-is-the-users-own-codex.md) | The shared app-server is the user's own codex, on a derived control socket — **supersedes #82's managed standalone and `daemon start`** |
 | [0023](0023-the-engine-decides-when-the-voice-speaks.md) | The engine decides whether and when the Voice speaks; prose decides how |
 | [0024](0024-the-task-half-of-a-session-name-is-descriptive-and-climbs.md) | The task half of a Session Name describes the Session, climbs to a better source, and never addresses — **amends #78's frozen name; the `@<name>:` relay form is retired** |
+| [0025](0025-capture-removes-the-selected-speakers-playback.md) | Capture removes the selected speaker’s playback while keeping human speech — replaces #145’s gate proposal |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67), [#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

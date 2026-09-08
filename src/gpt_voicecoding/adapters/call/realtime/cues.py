@@ -101,16 +101,7 @@ class CueShape:
 
 @dataclass(frozen=True, slots=True)
 class CueSpan:
-    """What one cue occupies on the output device while it is going out.
-
-    Held by the player for exactly as long as the cue is playing, so the capture
-    side can be gated on it (#145): the microphone is open through a mid-call
-    cue, and EVENT is 6 dB hotter than the rest precisely so it carries — which
-    is also what makes it loud enough to come back in.
-
-    `started` is a monotonic reading, because what a gate needs is an elapsed
-    time and never a wall-clock date.
-    """
+    """The logged device, duration and start time of one cue's playback."""
 
     cue: Cue
     device: int | None

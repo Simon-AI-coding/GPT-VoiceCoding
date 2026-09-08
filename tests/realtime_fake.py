@@ -195,33 +195,17 @@ class FakeCueOutput:
         #: Non-empty makes every `play` raise it, the way an unplugged device does.
         self.fails = fails
         self.buffers: list[bytes] = []
-        self.spans: list[Any] = []
-        #: What `playing` said from *inside* the write, one entry a call. The
-        #: span a capture gate would have read (#145) — unreadable afterwards,
-        #: because a finished cue is holding nothing.
-        self.seen_playing: list[Any] = []
-        #: Called at the top of `play`, before anything is recorded. A test that
-        #: needs the write to still be running when it looks blocks in here.
+        self.attempts: list[bytes] = []
         self.while_playing: Any = None
-        self._playing: Any = None
 
     @property
     def device(self) -> int | None:
         return self._device
 
-    @property
-    def playing(self) -> Any:
-        return self._playing
-
-    def play(self, pcm: bytes, *, span: Any = None) -> None:
-        self._playing = span
-        try:
-            self.seen_playing.append(self._playing)
-            if self.while_playing is not None:
-                self.while_playing()
-            if self.fails:
-                raise TransportError(self.fails)
-            self.buffers.append(pcm)
-            self.spans.append(span)
-        finally:
-            self._playing = None
+    def play(self, pcm: bytes) -> None:
+        self.attempts.append(pcm)
+        if self.while_playing is not None:
+            self.while_playing()
+        if self.fails:
+            raise TransportError(self.fails)
+        self.buffers.append(pcm)

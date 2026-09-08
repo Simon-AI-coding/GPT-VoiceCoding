@@ -30,7 +30,7 @@ ADAPTERS = PACKAGE / "adapters"
 AUDIO_MODULE = ADAPTERS / "call" / "realtime" / "webrtc.py"
 
 #: The distributions that file exists to confine.
-AUDIO_LIBRARIES = frozenset({"aiortc", "av", "sounddevice"})
+AUDIO_LIBRARIES = frozenset({"aiortc", "av", "sounddevice", "livekit", "CoreAudio", "objc"})
 
 #: Where the call cues are synthesised, and the reason it is a second file next
 #: to the one above rather than a section inside it (#186).
@@ -61,6 +61,9 @@ PROTOCOL_LIBRARIES = frozenset(
         "pydub",
         "requests",
         "sounddevice",
+        "livekit",
+        "CoreAudio",
+        "objc",
         "telebot",
         "telegram",
         "telethon",

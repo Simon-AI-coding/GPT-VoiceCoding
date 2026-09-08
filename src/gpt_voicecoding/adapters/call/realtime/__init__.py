@@ -35,6 +35,7 @@ from gpt_voicecoding.adapters.call.realtime.settings import (
 )
 from gpt_voicecoding.adapters.call.realtime.transport import (
     CallTransport,
+    CueOutput,
     TransportError,
     TransportFactory,
 )
@@ -79,23 +80,20 @@ def realtime_call(
     in `config.py`.
     """
     read = RealtimeCallSettings.of(settings)
+    audio, cues = (transport_factory, None) if transport_factory else _audio_from(read)
     return RealtimeCallAdapter(
         delegated_turn_model=delegated_turn_model,
         sink=sink,
         settings=read,
-        transport_factory=transport_factory or _audio_from(read),
+        transport_factory=audio,
+        cue_player=cues,
     )
 
 
-def _audio_from(settings: RealtimeCallSettings) -> TransportFactory:
+def _audio_from(settings: RealtimeCallSettings) -> tuple[TransportFactory, CueOutput]:
     """The real audio path, with the voice extra proved present before it is needed."""
     from gpt_voicecoding.adapters.call.realtime import webrtc
 
-    webrtc.probe()
-
-    def build() -> CallTransport:
-        return webrtc.webrtc_transport(
-            input_device=settings.input_device, output_device=settings.output_device
-        )
-
-    return build
+    return webrtc.call_audio(
+        input_device=settings.input_device, output_device=settings.output_device
+    )

@@ -26,7 +26,7 @@ from numbers it could not see — the shallow shape #184 shipped and #195 closed
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
 class TransportError(Exception):
@@ -119,18 +119,8 @@ class CueOutput(Protocol):
         """Which output index cues go to. `None` is the machine's own default."""
         ...
 
-    @property
-    def playing(self) -> Any | None:
-        """The span going out right now, or `None`.
-
-        What #145 gates capture on: the microphone stays open through a cue, and
-        the mid-call one is deliberately loud enough to carry over speech — which
-        is the same thing as loud enough to be heard back.
-        """
-        ...
-
-    def play(self, pcm: bytes, *, span: Any = None) -> None:
-        """Play one buffer to the end, holding `span` while it goes out.
+    def play(self, pcm: bytes) -> None:
+        """Play one buffer to the end.
 
         **Blocking, and says so.** The write is a device write and `stop` drains
         after it — 60-300 ms of sound measured 320-620 ms of wall time on this

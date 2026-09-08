@@ -34,7 +34,8 @@ dev = ["pytest>=8", "ruff==0.16.4"]
 # plane, its Relays and its whole test suite run without them. They are imported
 # in exactly one module (`adapters/call/realtime/webrtc.py`), and the Call
 # adapter's factory refuses to build without them rather than failing mid-call.
-voice = ["aiortc>=1.9", "av>=12", "sounddevice>=0.4"]
+voice = ["aiortc>=1.9", "av>=12", "sounddevice>=0.4",
+         "livekit>=1.1.17", "pyobjc-framework-CoreAudio>=12.2.2"]
 # The real-environment acceptance's one actor: a Telegram *user*-account client,
 # because a bot cannot message a bot and inbound has to be real
 # (`docs/acceptance-design.md`). An extra rather than a dev dependency, and never

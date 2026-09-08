@@ -951,6 +951,200 @@ def _asr_agrees(turn: Turn) -> str:
     )
 
 
+# ----------------------------------------------------------------------
+# What the call cost. Two models, one of which reports nothing.
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Cost:
+    """Everything this record can say about what one call spent.
+
+    Two models run on one call and only one of them is measurable. The Call
+    Agent's thread reports `thread/tokenUsage/updated` on every turn; the Voice
+    reports nothing at all, and that is a fact about codex rather than about
+    this script — `rust-v0.153.4` parses no usage on any realtime protocol
+    version, so `input_token_details`, `output_token_details` and `audio_tokens`
+    appear nowhere in its source and no notification on any call has carried
+    audio usage.
+
+    Recording that asymmetry is the point. A page that printed one total would
+    be read as the call's bill, and it is half of one.
+    """
+
+    voice_model: str | None
+    voice_version: str | None
+    voice_modality: str | None
+    agent_model: str | None
+    agent_provider: str | None
+    agent_effort: str | None
+    context_window: int | None
+    totals: dict[str, int]
+    inputs: tuple[int, ...]
+    updates: int
+    open_seconds: float | None
+    closed_because: str | None
+    quota: tuple[int | None, int | None]
+    quota_window_mins: int | None
+    plan: str | None
+
+
+def cost_of(recorder: TracingRecorder) -> Cost:
+    """Read the two models, the Call Agent's tokens and the Voice's clock back."""
+    dial: dict[str, Any] = {}
+    for record in recorder.notes:
+        detail = record.get("detail")
+        if record.get("probe") == "dialling" and isinstance(detail, dict):
+            dial = detail
+
+    thread: dict[str, Any] = {}
+    totals: dict[str, int] = {}
+    inputs: list[int] = []
+    updates = 0
+    window: int | None = None
+    started: float | None = None
+    closed: float | None = None
+    because: str | None = None
+    percents: list[int | None] = []
+    quota_window: int | None = None
+    plan: str | None = None
+
+    for event in recorder.events:
+        method = event.get("method")
+        params = event.get("params")
+        if not isinstance(params, dict):
+            continue
+        if method == "thread/started" and isinstance(params.get("thread"), dict):
+            thread = params["thread"]
+        elif method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage")
+            if not isinstance(usage, dict):
+                continue
+            updates += 1
+            if isinstance(usage.get("modelContextWindow"), int):
+                window = usage["modelContextWindow"]
+            if isinstance(usage.get("total"), dict):
+                totals = {k: v for k, v in usage["total"].items() if isinstance(v, int)}
+            if isinstance(usage.get("last"), dict) and isinstance(
+                usage["last"].get("inputTokens"), int
+            ):
+                inputs.append(usage["last"]["inputTokens"])
+        elif method == "thread/realtime/started":
+            started = float(event["at"])
+        elif method == "thread/realtime/closed":
+            closed = float(event["at"])
+            because = str(params.get("reason")) if params.get("reason") is not None else None
+        elif method == "account/rateLimits/updated":
+            limits = params.get("rateLimits")
+            if not isinstance(limits, dict):
+                continue
+            plan = str(limits.get("planType")) if limits.get("planType") is not None else plan
+            primary = limits.get("primary")
+            if isinstance(primary, dict):
+                percents.append(primary.get("usedPercent"))
+                if isinstance(primary.get("windowDurationMins"), int):
+                    quota_window = primary["windowDurationMins"]
+
+    return Cost(
+        voice_model=dial.get("model"),
+        voice_version=dial.get("version"),
+        voice_modality=dial.get("outputModality"),
+        agent_model=thread.get("model"),
+        agent_provider=thread.get("modelProvider"),
+        agent_effort=thread.get("reasoningEffort"),
+        context_window=window,
+        totals=totals,
+        inputs=tuple(inputs),
+        updates=updates,
+        open_seconds=None if started is None or closed is None else round(closed - started, 1),
+        closed_because=because,
+        quota=(percents[0] if percents else None, percents[-1] if percents else None),
+        quota_window_mins=quota_window,
+        plan=plan,
+    )
+
+
+def _cost_lines(cost: Cost) -> list[str]:
+    """The cost section, written so nobody reads one model's total as the call's."""
+
+    def known(value: object, otherwise: str = "not stated") -> str:
+        return f"`{value}`" if value not in (None, "") else otherwise
+
+    lines = [
+        "## What the call cost",
+        "",
+        "Two models run on one call, and only one of them reports tokens.",
+        "",
+        "| | Voice | Call Agent |",
+        "| --- | --- | --- |",
+        f"| Model | {known(cost.voice_model)} | {known(cost.agent_model)} |",
+        f"| Provider | codex realtime {known(cost.voice_version, 'version not stated')}"
+        f" ({known(cost.voice_modality, 'modality not stated')}) | {known(cost.agent_provider)} |",
+        f"| Reasoning effort | none — the realtime dial carries no such field"
+        f" | {known(cost.agent_effort)} |",
+        f"| Context window | not stated | "
+        f"{format(cost.context_window, ',') if cost.context_window else 'not stated'} |",
+        "| Tokens | **not measurable, see below** | "
+        + (f"{cost.totals['totalTokens']:,} total |" if cost.totals else "none reported |"),
+        "",
+        "**The Voice's tokens are absent from the wire, not from this page.** codex parses",
+        "no usage on any realtime protocol version — `input_token_details`,",
+        "`output_token_details` and `audio_tokens` appear nowhere in its source — so no",
+        "notification on this call carried audio usage. Any total on this page is the",
+        "Call Agent's half of the bill and must not be read as the call's.",
+        "",
+    ]
+
+    if cost.totals:
+        lines += [
+            f"**Call Agent** — {cost.updates} `thread/tokenUsage/updated` notifications",
+            "",
+            f"- total {cost.totals.get('totalTokens', 0):,}: "
+            f"input {cost.totals.get('inputTokens', 0):,} "
+            f"(cached {cost.totals.get('cachedInputTokens', 0):,}), "
+            f"output {cost.totals.get('outputTokens', 0):,}, "
+            f"reasoning {cost.totals.get('reasoningOutputTokens', 0):,}",
+        ]
+        if cost.inputs:
+            lines += [
+                f"- input per update: {cost.inputs[0]:,} → {cost.inputs[-1]:,} "
+                f"across {len(cost.inputs)} of them",
+                "",
+                "Standing context, not speech, is what is being paid for: the first",
+                "update already carries most of the input and the user's words add a few",
+                "hundred apiece. Output is the cheap half.",
+            ]
+        lines.append("")
+
+    lines += ["**The Voice's half, as far as it can be measured**", ""]
+    if cost.open_seconds is not None:
+        lines.append(
+            f"- realtime session open {cost.open_seconds} s"
+            f" (`thread/realtime/started` → `thread/realtime/closed`"
+            + (f", reason `{cost.closed_because}`" if cost.closed_because else "")
+            + ")"
+        )
+    else:
+        lines.append("- the realtime session's open and close were not both recorded")
+    before, after = cost.quota
+    if before is not None:
+        lines.append(
+            f"- account quota {before}% → {after}%"
+            + (f" of a {cost.quota_window_mins}-minute window" if cost.quota_window_mins else "")
+            + (f", plan `{cost.plan}`" if cost.plan else "")
+        )
+    else:
+        lines.append("- no `account/rateLimits/updated` reached us on this call")
+    lines += [
+        "",
+        "Audio is normally billed by time, so the duration is the closer proxy. The quota",
+        "percentage moves in whole points and is recorded because it is free, not because",
+        "it can resolve a single call.",
+        "",
+    ]
+    return lines
+
+
 def timeline(
     *,
     recorder: TracingRecorder,
@@ -961,6 +1155,7 @@ def timeline(
     roster: str,
 ) -> str:
     """The whole run as one page, written for somebody asking where the words changed."""
+    cost = cost_of(recorder)
     lines = [
         "# One spoken instruction, from the microphone to a Relay",
         "",
@@ -969,6 +1164,9 @@ def timeline(
         f"- Notifications: `{recorder.path}`",
         f"- Voice prompt: {prose.voice_from} ({len(prose.voice.encode())} bytes)",
         f"- Call Agent rules: {prose.agent_from} ({len(prose.agent.encode())} bytes)",
+        f"- Voice model: `{cost.voice_model}` (realtime {cost.voice_version},"
+        f" {cost.voice_modality} out, no reasoning effort field)",
+        f"- Call Agent model: `{cost.agent_model}`, reasoning effort `{cost.agent_effort}`",
         f"- Hand-over at dial: {roster}",
         "",
     ]
@@ -1004,7 +1202,7 @@ def timeline(
             "notification.",
             "",
         ]
-        return "\n".join(lines + _speech_only(recorder))
+        return "\n".join(lines + _speech_only(recorder) + _cost_lines(cost))
 
     lines += [
         f"- Call Agent record: `{rollout.path}`",
@@ -1021,7 +1219,7 @@ def timeline(
             "speech to the Call Agent. What was heard and said is below.",
             "",
         ]
-        return "\n".join(lines + _speech_only(recorder))
+        return "\n".join(lines + _speech_only(recorder) + _cost_lines(cost))
 
     lines += [
         "## Index",
@@ -1138,6 +1336,8 @@ def timeline(
             f"{sum(1 for role, _ in item.entries if role == 'user')} of them the user's",
         ]
     lines.append("")
+
+    lines += _cost_lines(cost)
 
     lines += [
         "## Everything the Call Agent ran",

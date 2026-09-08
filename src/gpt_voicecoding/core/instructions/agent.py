@@ -7,15 +7,16 @@ never speaks to anybody — and that costs nothing, while a speaking rule here
 would be a rule in the set that cannot act on it.
 
 **Stock Text first** (#289 P1, ADR 0018 as amended): codex's own
-`realtime_start.md` at `STOCK_TEXT_VERSION`, whose five content lines our old
-set had displaced and two of them dropped (#294) — that a hand-off may be
-spurious, and that the words are a transcript with recognition errors. They are
-kept in codex's wording, extended in place with the three roles of this call
+`realtime_start.md` at `catalogue.STOCK_TEXT_VERSION`, whose five content lines
+our old set had displaced and two of them dropped (#294) — that a hand-off may
+be spurious, and that the words are a transcript with recognition errors. They
+are kept in codex's wording, extended in place with the three roles of this call
 (Call Agent, Voice, engine), and joined by this engine's response rules in one
-paragraph. Then one **Engine tools** section: the invocation and the shared
-calling rules, and one entry per tool grouping its purpose, its usage form and
-the rules that are its own — the structure Simon chose over a concatenated
-catalogue (#299).
+paragraph. Each of the five carries an `agent.stock.*` rule id, so a line
+deleted here fails the coverage gate (#300). Then one **Engine tools** section:
+the invocation and the shared calling rules, and one entry per tool grouping its
+purpose, its usage form and the rules that are its own — the structure Simon
+chose over a concatenated catalogue (#299).
 
 **Shaping is this half's** (P4). The `relay` entry carries the **Relayed
 Instruction** (`CONTEXT.md`): the user's spoken pieces gathered into one
@@ -67,11 +68,6 @@ AGENT_INSTRUCTION_TOKEN_BUDGET = 8_192
 
 #: The same number in the unit that proves it: one token costs at least one byte.
 MAX_AGENT_INSTRUCTION_BYTES = AGENT_INSTRUCTION_TOKEN_BUDGET
-
-#: The codex release the Stock Text below is taken from
-#: (`codex-rs/prompts/templates/realtime/realtime_start.md`). One pin for both
-#: halves of a call: the Voice's module names the same tag.
-STOCK_TEXT_VERSION = "rust-v0.153.4"
 
 #: The actions a Live Call's acting half is given, in the order #173 §4 lists
 #: them. Five actions, rendered as that section's six forms.
@@ -155,8 +151,12 @@ def _sections(context: InstructionContext) -> tuple[Section, ...]:
         Section(
             title="Stock Text",
             blocks=(
-                Block(text="Realtime conversation started."),
                 Block(
+                    covers=("agent.stock.call-started",),
+                    text="Realtime conversation started.",
+                ),
+                Block(
+                    covers=("agent.stock.executor-behind-the-voice",),
                     text=(
                         "You are the Call Agent, the backend executor behind the Voice, which "
                         "has no tools. You use this engine to act on the user's requests. The "
@@ -165,6 +165,7 @@ def _sections(context: InstructionContext) -> tuple[Section, ...]:
                     ),
                 ),
                 Block(
+                    covers=("agent.stock.transcript-decides-whether-to-work",),
                     text=(
                         "When invoked, you receive the latest conversation transcript and any "
                         "relevant mode or metadata. The Voice may invoke you even when backend "
@@ -174,13 +175,18 @@ def _sections(context: InstructionContext) -> tuple[Section, ...]:
                     ),
                 ),
                 Block(
+                    covers=("agent.stock.speech-is-a-transcript",),
                     text=(
                         "When user text is routed from realtime, treat it as a transcript. It "
                         "may be unpunctuated or contain recognition errors."
                     ),
                 ),
+                # Stock L9 and this engine's two output rules in one paragraph
+                # (#299): the stock sentence keeps its own id, so the merge
+                # cannot swallow it (#300).
                 Block(
                     covers=(
+                        "agent.stock.concise-updates",
                         "agent.output.returns-it-whole",
                         "agent.outcome.only-a-successful-call-is-success",
                     ),

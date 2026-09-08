@@ -8,11 +8,13 @@ wording**, then the **Overlay** — the amendment of 2026-09-08 to ADR 0018,
 decided in #289 and measured in #299. Which field on the wire carries it to
 this half is the realtime adapter's to know and this module's never to name.
 
-**The stock lines are codex's, at a pinned version** — `openai/codex`
-`rust-v0.153.4`, `codex-rs/prompts/templates/realtime/backend_prompt.md`. A
-stock line is kept unless the evidence of this wire falsifies it or a
+**The stock lines are codex's, at a pinned version** — `openai/codex` at
+`catalogue.STOCK_TEXT_VERSION`, `codex-rs/prompts/templates/realtime/backend_prompt.md`.
+A stock line is kept unless the evidence of this wire falsifies it or a
 requirement of this system conflicts with it (#289 P2); the per-line fate table
-is `scripts/prompts/stock-overlay/review.md`. Four kinds of line went:
+is `scripts/prompts/stock-overlay/review.md`. Every line that survived it carries
+a `voice.stock.*` rule id below, so deleting one fails the coverage gate the way
+deleting an Overlay sentence always has (#300). Four kinds of line went:
 
 - codex's identity (line 3) and the two lines that present the backend's work
   as the Voice's own (19, 52) — identity is the Overlay's (P3);
@@ -70,11 +72,6 @@ VOICE_INSTRUCTION_TOKEN_BUDGET = 8_000
 #: The same number in the unit that proves it: one token costs at least one byte.
 MAX_VOICE_INSTRUCTION_BYTES = VOICE_INSTRUCTION_TOKEN_BUDGET
 
-#: The codex release the Stock Text below is taken from, whole. A codex upgrade
-#: re-reads `backend_prompt.md` against this file and the fate table, and moves
-#: this pin when it is done.
-STOCK_TEXT_VERSION = "rust-v0.153.4"
-
 #: The heading under which this engine's own prose starts. Everything above it
 #: in the rendered set is codex's.
 OVERLAY_TITLE = "Engine Overlay"
@@ -87,18 +84,25 @@ def voice_instructions(context: InstructionContext) -> InstructionSet:
 
 
 def _stock() -> tuple[Section, ...]:
-    """codex's `backend_prompt.md` at `STOCK_TEXT_VERSION`, less what the fate table removed."""
+    """codex's `backend_prompt.md` at the pinned tag, less what the fate table removed.
+
+    Every line here is one `voice.stock.*` rule, claimed by the block it stands
+    in (#300). A block carrying several of them is a bullet list, and the ids
+    run in the order the bullets do.
+    """
     return (
         Section(
             title="Identity, tone, and role",
             blocks=(
                 Block(
+                    covers=("voice.stock.concise-no-fluff",),
                     text=(
                         "Be concise, clear, and efficient. Keep responses tight and useful—no "
                         "fluff."
                     ),
                 ),
                 Block(
+                    covers=("voice.stock.playful-collaborator",),
                     text=(
                         "Your personality is a playful collaborator: super fun, warm, witty, "
                         "and expressive. Bring energy and personality to every response—light "
@@ -107,12 +111,14 @@ def _stock() -> tuple[Section, ...]:
                     ),
                 ),
                 Block(
+                    covers=("voice.stock.user-first-name",),
                     text=(
                         "The user's name is {{ user_first_name }}. Use it sparingly—only for "
                         "emphasis, confirmations, or smooth transitions."
                     ),
                 ),
                 Block(
+                    covers=("voice.stock.talk-like-a-friend",),
                     text=(
                         "Talk like a trusted collaborator and a friend. Keep things natural, "
                         "supportive, and easy to follow."
@@ -123,14 +129,25 @@ def _stock() -> tuple[Section, ...]:
         Section(
             title="Interface and operating model",
             blocks=(
-                Block(text="The user interacts with you by speaking."),
                 Block(
+                    covers=("voice.stock.the-user-speaks",),
+                    text="The user interacts with you by speaking.",
+                ),
+                Block(
+                    covers=("voice.stock.backend-executes",),
                     text=(
                         "The backend handles execution. You are the conversational surface of "
                         "the same system."
                     ),
                 ),
                 Block(
+                    covers=(
+                        "voice.stock.one-unified-assistant",
+                        "voice.stock.pass-execution-through",
+                        "voice.stock.never-refuse",
+                        "voice.stock.backend-output-is-authoritative",
+                        "voice.stock.conversation-supports-execution",
+                    ),
                     text=(
                         "### Policies\n\n"
                         "* Treat the system as one unified assistant. Do not mention anything "
@@ -154,6 +171,14 @@ def _stock() -> tuple[Section, ...]:
             title="Backend use and steering",
             blocks=(
                 Block(
+                    covers=(
+                        "voice.stock.always-use-the-backend",
+                        "voice.stock.answer-directly-only-when-self-contained",
+                        "voice.stock.never-claim-inability",
+                        "voice.stock.clarify-only-to-avoid-harm",
+                        "voice.stock.running-work-is-steerable",
+                        "voice.stock.running-work-can-be-redirected",
+                    ),
                     text=(
                         "* For any actions/tasks, always use the backend. If it is unclear "
                         "whether backend use would help, use it.\n"
@@ -177,6 +202,11 @@ def _stock() -> tuple[Section, ...]:
             title="Backend outputs and user inputs",
             blocks=(
                 Block(
+                    covers=(
+                        "voice.stock.both-arrive-as-user-messages",
+                        "voice.stock.backend-messages-are-prefixed",
+                        "voice.stock.updates-or-final-outputs",
+                    ),
                     text=(
                         "* In the conversation stream, both user inputs and backend messages "
                         "appear as `user` text messages.\n"
@@ -190,6 +220,12 @@ def _stock() -> tuple[Section, ...]:
             title="Presenting backend results",
             blocks=(
                 Block(
+                    covers=(
+                        "voice.stock.tell-the-takeaway",
+                        "voice.stock.read-out-no-formatted-content",
+                        "voice.stock.the-backend-transforms",
+                        "voice.stock.detail-only-on-request",
+                    ),
                     text=(
                         "* Briefly tell the user the key takeaway, status, or next step without "
                         "repeating visible content unless the user asks.\n"
@@ -207,6 +243,11 @@ def _stock() -> tuple[Section, ...]:
             title="Task-level user preferences",
             blocks=(
                 Block(
+                    covers=(
+                        "voice.stock.preferences-are-task-level",
+                        "voice.stock.preferences-persist",
+                        "voice.stock.no-silent-revert",
+                    ),
                     text=(
                         "* Treat user instructions about update frequency, verbosity, pacing, "
                         "detail level, and presentation style as active task-level "
@@ -224,6 +265,12 @@ def _stock() -> tuple[Section, ...]:
             title="Communication style",
             blocks=(
                 Block(
+                    covers=(
+                        "voice.stock.proceed-without-framing",
+                        "voice.stock.no-narration",
+                        "voice.stock.updates-brief-and-grounded",
+                        "voice.stock.updates-stay-frequent-on-request",
+                    ),
                     text=(
                         "* When the user makes a clear request, proceed directly. Do not "
                         "paraphrase the request, announce your plan, or add unnecessary "

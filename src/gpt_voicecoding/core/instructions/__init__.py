@@ -42,6 +42,7 @@ from gpt_voicecoding.core.instructions.blocks import (
 from gpt_voicecoding.core.instructions.catalogue import (
     BY_ID,
     RULES,
+    STOCK_TEXT_VERSION,
     Audience,
     Rule,
     ids_for,
@@ -64,6 +65,7 @@ __all__ = [
     "MAX_AGENT_INSTRUCTION_BYTES",
     "MAX_VOICE_INSTRUCTION_BYTES",
     "RULES",
+    "STOCK_TEXT_VERSION",
     "VOICE_INSTRUCTION_TOKEN_BUDGET",
     "WITHHELD_ACTIONS",
     "Audience",

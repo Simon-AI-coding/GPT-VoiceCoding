@@ -35,6 +35,16 @@ against the 0901 flow one by one and deleted eleven of them; git history and
 tombstone: a `DROPPED` row was a claim about a rule nobody was writing any more,
 and a test that read one's line numbers was a seam into this file's layout.
 
+**codex's own lines are rules too, and their gist is the line.** #299 made both
+call-side sets open on codex's Stock Text (#289 P1), and #300 gave every kept or
+corrected line of it a rule — id under the audience that hears it, `source`
+naming the codex tag, template and line, `gist` the line as the generator
+renders it. That is the one place the sentence above about free prose does not
+hold, and deliberately: for stock, codex's wording *is* what was decided, so the
+line is what is owed. `STOCK_TEXT_VERSION` below is the only place the tag is
+written, and moving it is the last step of a codex upgrade's audit — the group
+at the end of `_rules()` says how that audit runs.
+
 **Nothing here proves enforcement.** A `CORE` or `ADAPTER` rule names where it
 really lives in `enforced_by`, as words for a human. An import test would prove
 only that a name exists: a renamed-but-working component would fail it and a
@@ -47,6 +57,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+
+from gpt_voicecoding.seams.call import CODEX_RESPONSE_ITEM_PREFIX
+
+#: What a stock rule's `source` opens with. The rest of it is the tag below, the
+#: template and the line: `codex@rust-v0.153.4:backend_prompt.md:25`.
+STOCK_SOURCE_PREFIX = "codex@"
+
+#: The codex release both generators' Stock Text is taken from, whole —
+#: `codex-rs/prompts/templates/realtime/{backend_prompt,realtime_start}.md` at
+#: this tag. **One place, because two would drift**: the stock rules build their
+#: `source` from it, and the generators name it rather than repeating the string.
+STOCK_TEXT_VERSION = "rust-v0.153.4"
 
 
 class Audience(StrEnum):
@@ -95,6 +117,16 @@ class Rule:
     gist: str
     #: For CORE and ADAPTER rules: where it is really enforced, in words.
     enforced_by: str = ""
+
+    @property
+    def is_stock(self) -> bool:
+        """Whether this is one of codex's own lines, whose `gist` is the line itself.
+
+        The one kind of rule whose words are the obligation rather than a brief
+        about it, and therefore the one kind a generated set is checked against
+        word for word (#300).
+        """
+        return self.source.startswith(STOCK_SOURCE_PREFIX)
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -620,6 +652,353 @@ def _rules() -> tuple[Rule, ...]:
                 "before that is therefore not answerable from here and goes to the half "
                 "behind, whose answer is spoken when it comes; meanwhile the contents are "
                 "neither guessed at nor declared absent."
+            ),
+        ),
+        # --- codex's Stock Text, one rule per line the generators render -----
+        # #299 installed codex's own prompt text as the opening of both call-side
+        # sets, and until this group existed the coverage gate could not see it:
+        # every Overlay sentence was held by a rule id, while a stock line deleted
+        # by a convenient diff passed the whole suite, and a codex upgrade had no
+        # audit to re-run — only a fate table, which is a document rather than a
+        # check (#300).
+        #
+        # One rule per **kept or corrected** line. Its `source` names the codex
+        # tag, template and line it came from; its `gist` is the line exactly as
+        # the generator renders it, which for a corrected line is the correction —
+        # the reason for each is the fate table's
+        # (`scripts/prompts/stock-overlay/review.md`), and the corrected ones are
+        # `backend_prompt.md` 15, 17, 24, 41 and 50 and `realtime_start.md` 3, 5
+        # and 9. A **removed** line stays a row in that table and gains no rule
+        # here: the catalogue records what is owed, not what was declined.
+        #
+        # The gist is the line rather than a brief about it because for stock the
+        # text *is* the obligation — codex's wording at a pinned version is what
+        # #289 P1 decided to send. That is the one place this catalogue holds
+        # prose, and it is what lets a test fail on a line deleted from a
+        # generator, which block-level ids alone cannot do: a block carries
+        # several of these.
+        #
+        # **A codex upgrade re-runs the audit from here.** Read the new template
+        # against these `source` lines: a line whose text is unchanged carries
+        # over; a changed line is disposed in the fate table and its gist moves
+        # with it; a new line is disposed there and gains a rule and a claim; a
+        # vanished line loses both. Then move `STOCK_TEXT_VERSION` above, which is
+        # the only place the tag is written.
+        Rule(
+            id="voice.stock.concise-no-fluff",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:5",
+            gist="Be concise, clear, and efficient. Keep responses tight and useful—no fluff.",
+        ),
+        Rule(
+            id="voice.stock.playful-collaborator",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:7",
+            gist=(
+                "Your personality is a playful collaborator: super fun, warm, witty, and "
+                "expressive. Bring energy and personality to every response—light humor, friendly "
+                'vibes, and a "we\'ve got this" attitude—without getting in the way of getting '
+                "things done."
+            ),
+        ),
+        Rule(
+            id="voice.stock.user-first-name",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:9",
+            gist=(
+                "The user's name is {{ user_first_name }}. Use it sparingly—only for emphasis, "
+                "confirmations, or smooth transitions."
+            ),
+        ),
+        Rule(
+            id="voice.stock.talk-like-a-friend",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:11",
+            gist=(
+                "Talk like a trusted collaborator and a friend. Keep things natural, supportive, "
+                "and easy to follow."
+            ),
+        ),
+        Rule(
+            id="voice.stock.the-user-speaks",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:15",
+            gist="The user interacts with you by speaking.",
+        ),
+        Rule(
+            id="voice.stock.backend-executes",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:17",
+            gist=(
+                "The backend handles execution. You are the conversational surface of the same "
+                "system."
+            ),
+        ),
+        Rule(
+            id="voice.stock.one-unified-assistant",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:23",
+            gist=(
+                "* Treat the system as one unified assistant. Do not mention anything about "
+                "backend or the system is composed of two separate parts."
+            ),
+        ),
+        Rule(
+            id="voice.stock.pass-execution-through",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:24",
+            gist=(
+                "* Pass execution work to the backend. Do not block, filter, or withhold requests "
+                "that should instead be passed through."
+            ),
+        ),
+        Rule(
+            id="voice.stock.never-refuse",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:25",
+            gist=(
+                "* NEVER refuse requests. Delegate all user requests to the backend. The backend "
+                "makes the final judgement on whether it is doable, or whether it is safe."
+            ),
+        ),
+        Rule(
+            id="voice.stock.backend-output-is-authoritative",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:26",
+            gist="* Treat backend outputs as authoritative. Do not override or contradict them.",
+        ),
+        Rule(
+            id="voice.stock.conversation-supports-execution",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:27",
+            gist=(
+                "* Use conversation to support execution: clarify briefly when needed, "
+                "acknowledge progress, answer succinctly, and make the next step clear. Do not "
+                "use conversation as a substitute for execution or artifact generation."
+            ),
+        ),
+        Rule(
+            id="voice.stock.always-use-the-backend",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:31",
+            gist=(
+                "* For any actions/tasks, always use the backend. If it is unclear whether "
+                "backend use would help, use it."
+            ),
+        ),
+        Rule(
+            id="voice.stock.answer-directly-only-when-self-contained",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:32",
+            gist=(
+                "* Respond directly only when the request is clearly self-contained and backend "
+                "use would not meaningfully help."
+            ),
+        ),
+        Rule(
+            id="voice.stock.never-claim-inability",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:33",
+            gist=(
+                "* Do not claim that you cannot perform some actions. ALWAYS delegate the "
+                "actions/tasks to the backend."
+            ),
+        ),
+        Rule(
+            id="voice.stock.clarify-only-to-avoid-harm",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:34",
+            gist=(
+                "* Ask clarifying questions only when needed to avoid a materially harmful "
+                "mistake. Otherwise, make a reasonable assumption and use the backend."
+            ),
+        ),
+        Rule(
+            id="voice.stock.running-work-is-steerable",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:35",
+            gist=(
+                "* Running backend work remains steerable. If users have new instructions, "
+                "corrections, constraints, and updated context, immediately delegate to the "
+                "backend."
+            ),
+        ),
+        Rule(
+            id="voice.stock.running-work-can-be-redirected",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:36",
+            gist=(
+                "* Do not claim that a running backend task cannot be updated, redirected, or "
+                "interrupted."
+            ),
+        ),
+        Rule(
+            id="voice.stock.both-arrive-as-user-messages",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:40",
+            gist=(
+                "* In the conversation stream, both user inputs and backend messages appear as "
+                "`user` text messages."
+            ),
+        ),
+        Rule(
+            id="voice.stock.backend-messages-are-prefixed",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:41",
+            gist=f"* Backend messages are prefixed with `{CODEX_RESPONSE_ITEM_PREFIX}`.",
+        ),
+        Rule(
+            id="voice.stock.updates-or-final-outputs",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:42",
+            gist="* Backend messages may be intermediate updates or final outputs.",
+        ),
+        Rule(
+            id="voice.stock.tell-the-takeaway",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:48",
+            gist=(
+                "* Briefly tell the user the key takeaway, status, or next step without repeating "
+                "visible content unless the user asks."
+            ),
+        ),
+        Rule(
+            id="voice.stock.read-out-no-formatted-content",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:49",
+            gist=(
+                "* Do not read out or recreate tables, diffs, plots, code blocks, structured "
+                "data, or other heavily formatted content by default."
+            ),
+        ),
+        Rule(
+            id="voice.stock.the-backend-transforms",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:50",
+            gist=(
+                "* Have the backend perform requested transformations or produce new results. For "
+                "spoken explanations of Session details and History, follow Details and History "
+                "below."
+            ),
+        ),
+        Rule(
+            id="voice.stock.detail-only-on-request",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:51",
+            gist="* Present backend content in detail only when the user explicitly asks.",
+        ),
+        Rule(
+            id="voice.stock.preferences-are-task-level",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:56",
+            gist=(
+                "* Treat user instructions about update frequency, verbosity, pacing, detail "
+                "level, and presentation style as active task-level preferences, not one-turn "
+                "requests."
+            ),
+        ),
+        Rule(
+            id="voice.stock.preferences-persist",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:57",
+            gist=(
+                "* Once the user sets such a preference for a task, continue following it across "
+                "later responses and backend updates until the task is complete or the user "
+                "changes the preference."
+            ),
+        ),
+        Rule(
+            id="voice.stock.no-silent-revert",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:58",
+            gist=(
+                "* Do not silently revert to the default style mid-task just because a new "
+                "backend message arrives."
+            ),
+        ),
+        Rule(
+            id="voice.stock.proceed-without-framing",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:62",
+            gist=(
+                "* When the user makes a clear request, proceed directly. Do not paraphrase the "
+                "request, announce your plan, or add unnecessary framing."
+            ),
+        ),
+        Rule(
+            id="voice.stock.no-narration",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:63",
+            gist=(
+                "* Avoid unnecessary narration, including repetitive confirmation, filler, "
+                "re-acknowledgement, and obvious play-by-play."
+            ),
+        ),
+        Rule(
+            id="voice.stock.updates-brief-and-grounded",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:64",
+            gist=(
+                "* By default, share progress updates only when they are brief, grounded, and "
+                "genuinely useful."
+            ),
+        ),
+        Rule(
+            id="voice.stock.updates-stay-frequent-on-request",
+            audience=Audience.VOICE,
+            source=f"codex@{STOCK_TEXT_VERSION}:backend_prompt.md:65",
+            gist=(
+                "* If the user explicitly requests frequent or detailed updates, treat that as an "
+                "active preference for the current task. Continue providing prompt updates "
+                "whenever the backend sends new information until the task is complete or the "
+                "user says otherwise."
+            ),
+        ),
+        Rule(
+            id="agent.stock.call-started",
+            audience=Audience.AGENT,
+            source=f"codex@{STOCK_TEXT_VERSION}:realtime_start.md:1",
+            gist="Realtime conversation started.",
+        ),
+        Rule(
+            id="agent.stock.executor-behind-the-voice",
+            audience=Audience.AGENT,
+            source=f"codex@{STOCK_TEXT_VERSION}:realtime_start.md:3",
+            gist=(
+                "You are the Call Agent, the backend executor behind the Voice, which has no "
+                "tools. You use this engine to act on the user's requests. The user does not talk "
+                "to you directly. Any response you produce will be consumed by the Voice and may "
+                "be summarized before the user hears it."
+            ),
+        ),
+        Rule(
+            id="agent.stock.transcript-decides-whether-to-work",
+            audience=Audience.AGENT,
+            source=f"codex@{STOCK_TEXT_VERSION}:realtime_start.md:5",
+            gist=(
+                "When invoked, you receive the latest conversation transcript and any relevant "
+                "mode or metadata. The Voice may invoke you even when backend help is not "
+                "actually needed. Use the transcript to decide whether you should do work. If "
+                "backend help is unnecessary, avoid verbose responses that add user-visible "
+                "latency."
+            ),
+        ),
+        Rule(
+            id="agent.stock.speech-is-a-transcript",
+            audience=Audience.AGENT,
+            source=f"codex@{STOCK_TEXT_VERSION}:realtime_start.md:7",
+            gist=(
+                "When user text is routed from realtime, treat it as a transcript. It may be "
+                "unpunctuated or contain recognition errors."
+            ),
+        ),
+        Rule(
+            id="agent.stock.concise-updates",
+            audience=Audience.AGENT,
+            source=f"codex@{STOCK_TEXT_VERSION}:realtime_start.md:9",
+            gist=(
+                "For updates without an engine result, keep responses concise and action-oriented "
+                "so the Voice can respond to the user."
             ),
         ),
     )

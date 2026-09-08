@@ -130,6 +130,14 @@ Simon decided on 2026-09-08 to install the approved text as the shipping catalog
 
 The Voice set renders with codex's headings (ADR 0018 as amended); the Call Agent set renders without section titles so stock's first line stays a sentence. The `[AGENT] ` prefix the Voice is told comes from the seam constant the adapter dials with. Budgets: Voice 7,997 of 8,000 bytes; Call Agent ~3,100 of 8,192. Not measured: this installed text has not been dialled; the interruption and hang-up items above stand.
 
+## The kept and corrected rows are rules
+
+Since [#300](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/300), every row above marked `kept` or `corrected` — excluding blank lines and headings, which state no obligation — carries a rule in `core/instructions/catalogue.py`: id `voice.stock.*` or `agent.stock.*`, `source` the codex tag, template and line (`codex@rust-v0.153.4:backend_prompt.md:25`), `gist` the line exactly as the generator renders it, which for a corrected row is the correction. The reason stays here; the catalogue holds no reason column. `removed` rows gain no rule and stay rows here alone: the catalogue records what is owed, not what was declined.
+
+The generators claim those ids on the blocks that say them, and `InstructionSet` refuses a set that claims a stock line without carrying it word for word — so a line deleted from a block fails generation even though the block still claims every id it ever did. The tag lives in exactly one place, `catalogue.STOCK_TEXT_VERSION`.
+
+**A codex upgrade re-runs this audit.** Diff the new `backend_prompt.md` and `realtime_start.md` against the `source` lines pinned in `TestTheTableIsSettled.STOCK`: an unchanged line carries over; a changed line is disposed in the tables above and its gist moves with it; a new line is disposed here and gains a rule and a claim; a vanished line loses both. Move `STOCK_TEXT_VERSION` last. Nothing about this changes what the prompts say.
+
 ## Preparation checks
 
 The full Python suite passed after the tracer slot change. Subsequent edits affected prompt and review Markdown only. Ruff lint and format, Swift format lint, and tracer `--help` passed. No-dial checks exercised runtime slots, paths with spaces, unchanged literal files, single-pass substitution and whitespace-only rejection. The current Agent draft has each allowed usage form once and passes the rendered byte budget; Voice is 7,023 bytes against its 8,000-byte cap. Stock-prefix byte equality applied to the earlier measured Agent file, not the approved restructuring.

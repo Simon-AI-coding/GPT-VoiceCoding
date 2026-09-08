@@ -16,6 +16,12 @@ its text is an invitation to fabricate. And the Voice's set **dictates no
 sentence in any language** — it speaks the engine's grade in the user's own
 (#299). None of the three survives as an id, so each is read off the rendered
 text.
+
+**codex's Stock Text is the one place words are ids.** Every stock line is a
+rule whose `gist` is the line (#300), so those are asserted against the rendered
+text by the catalogue rather than by hand — and the refusal itself lives in
+`InstructionSet`, because a block carries a whole bullet list and coverage alone
+cannot see one bullet go.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from gpt_voicecoding.core.instructions import (
     MAX_AGENT_INSTRUCTION_BYTES,
     MAX_VOICE_INSTRUCTION_BYTES,
     RULES,
+    STOCK_TEXT_VERSION,
     VOICE_INSTRUCTION_TOKEN_BUDGET,
     WITHHELD_ACTIONS,
     Audience,
@@ -49,9 +56,11 @@ from gpt_voicecoding.core.instructions import (
     ids_for,
     voice_instructions,
 )
+from gpt_voicecoding.core.instructions import agent as agent_module
 from gpt_voicecoding.core.instructions import catalogue as catalogue_module
 from gpt_voicecoding.core.instructions import delegated as delegated_module
 from gpt_voicecoding.core.instructions import voice as voice_module
+from gpt_voicecoding.core.instructions.catalogue import STOCK_SOURCE_PREFIX
 from gpt_voicecoding.seams.call import CODEX_RESPONSE_ITEM_PREFIX
 from gpt_voicecoding.seams.control_plane import USAGE, Action
 
@@ -69,10 +78,14 @@ AUTHORITY_MARK = "own confirmation"
 DETAILS_MARK = "### Details and History"
 
 #: codex's `backend_prompt.md` headings, in codex's order, as the Voice hears
-#: them before anything of this engine's (#289 P1).
+#: them before anything of this engine's (#289 P1). A heading carries no rule —
+#: it states no obligation, and a `Section` title has nowhere to claim an id —
+#: so this tuple is the whole of what holds them, which is why `### Policies`
+#: belongs in it beside the seven `## ` ones (#300).
 STOCK_VOICE_HEADINGS = (
     "## Identity, tone, and role",
     "## Interface and operating model",
+    "### Policies",
     "## Backend use and steering",
     "## Backend outputs and user inputs",
     "## Presenting backend results",
@@ -105,9 +118,14 @@ class TestCatalogue:
         assert len(ids) == len(set(ids))
 
     def test_every_rule_names_where_it_came_from(self) -> None:
-        """Provenance survives migration and later product decisions."""
+        """Provenance survives migration, later product decisions, and codex's own text.
+
+        Three forms, because there are three ways a rule got here: a span of a
+        migrated skill file, the ticket that ruled it, and — since #300 — the
+        codex template line the Stock Text was taken from.
+        """
         for rule in RULES:
-            assert rule.source.startswith(("skill/", "issue/")), rule.id
+            assert rule.source.startswith(("skill/", "issue/", STOCK_SOURCE_PREFIX)), rule.id
 
     def test_a_rule_carried_by_code_names_where(self) -> None:
         for rule in RULES:
@@ -149,8 +167,10 @@ class TestTheTableIsSettled:
     """#173's disposition of the twenty-one `voice.*` rules, one by one.
 
     Nine survive as Voice rules, one became a Call Agent rule, and eleven were
-    deleted. Written down as three sets rather than three counts, because a
-    count passes while the wrong rule is missing.
+    deleted. Written down as sets rather than counts, because a count passes
+    while the wrong rule is missing. Later decisions add sets of their own — what
+    a ticket ruled in, what one retired, and codex's Stock Text (#300) — rather
+    than editing #173's reading, which has to keep saying what it said then.
     """
 
     SURVIVING = frozenset(
@@ -202,8 +222,17 @@ class TestTheTableIsSettled:
     RETIRED_SINCE = frozenset({"voice.instruction.one-clean-instruction"})
 
     def test_the_voice_set_is_those_nine_and_what_was_decided_since(self) -> None:
-        """The nine #173 kept, less what a later ticket retired, plus what one ruled in."""
-        assert ids_for(Audience.VOICE) == (self.SURVIVING - self.RETIRED_SINCE) | self.ADDED_SINCE
+        """The nine #173 kept, less what a later ticket retired, plus what one ruled in.
+
+        And codex's own lines, which are the Voice's rules too since #300 — a
+        fourth group rather than entries in the three above, because their
+        provenance is a template at a pinned tag rather than a reading or a
+        ticket, and they leave together when the tag moves.
+        """
+        stock = {rule_id for rule_id in self.STOCK if rule_id.startswith(f"{Audience.VOICE}.")}
+        assert ids_for(Audience.VOICE) == (
+            (self.SURVIVING - self.RETIRED_SINCE) | self.ADDED_SINCE | stock
+        )
 
     def test_every_retired_rule_is_gone_from_the_catalogue(self) -> None:
         known = {rule.id for rule in RULES}
@@ -265,17 +294,75 @@ class TestTheTableIsSettled:
         }
     )
 
+    #: codex's Stock Text, id by id, each against the template line it was taken
+    #: from (#300). A dict rather than a set of ids, because the line number is
+    #: half of what a codex upgrade has to re-read: the audit diffs the new
+    #: template against exactly these, disposes whatever moved in the fate table
+    #: (`scripts/prompts/stock-overlay/review.md`), and only then moves
+    #: `STOCK_TEXT_VERSION`. Removed lines are not here — they stay rows in that
+    #: table, because the catalogue records what is owed, not what was declined.
+    STOCK = {
+        "voice.stock.concise-no-fluff": "backend_prompt.md:5",
+        "voice.stock.playful-collaborator": "backend_prompt.md:7",
+        "voice.stock.user-first-name": "backend_prompt.md:9",
+        "voice.stock.talk-like-a-friend": "backend_prompt.md:11",
+        "voice.stock.the-user-speaks": "backend_prompt.md:15",
+        "voice.stock.backend-executes": "backend_prompt.md:17",
+        "voice.stock.one-unified-assistant": "backend_prompt.md:23",
+        "voice.stock.pass-execution-through": "backend_prompt.md:24",
+        "voice.stock.never-refuse": "backend_prompt.md:25",
+        "voice.stock.backend-output-is-authoritative": "backend_prompt.md:26",
+        "voice.stock.conversation-supports-execution": "backend_prompt.md:27",
+        "voice.stock.always-use-the-backend": "backend_prompt.md:31",
+        "voice.stock.answer-directly-only-when-self-contained": "backend_prompt.md:32",
+        "voice.stock.never-claim-inability": "backend_prompt.md:33",
+        "voice.stock.clarify-only-to-avoid-harm": "backend_prompt.md:34",
+        "voice.stock.running-work-is-steerable": "backend_prompt.md:35",
+        "voice.stock.running-work-can-be-redirected": "backend_prompt.md:36",
+        "voice.stock.both-arrive-as-user-messages": "backend_prompt.md:40",
+        "voice.stock.backend-messages-are-prefixed": "backend_prompt.md:41",
+        "voice.stock.updates-or-final-outputs": "backend_prompt.md:42",
+        "voice.stock.tell-the-takeaway": "backend_prompt.md:48",
+        "voice.stock.read-out-no-formatted-content": "backend_prompt.md:49",
+        "voice.stock.the-backend-transforms": "backend_prompt.md:50",
+        "voice.stock.detail-only-on-request": "backend_prompt.md:51",
+        "voice.stock.preferences-are-task-level": "backend_prompt.md:56",
+        "voice.stock.preferences-persist": "backend_prompt.md:57",
+        "voice.stock.no-silent-revert": "backend_prompt.md:58",
+        "voice.stock.proceed-without-framing": "backend_prompt.md:62",
+        "voice.stock.no-narration": "backend_prompt.md:63",
+        "voice.stock.updates-brief-and-grounded": "backend_prompt.md:64",
+        "voice.stock.updates-stay-frequent-on-request": "backend_prompt.md:65",
+        "agent.stock.call-started": "realtime_start.md:1",
+        "agent.stock.executor-behind-the-voice": "realtime_start.md:3",
+        "agent.stock.transcript-decides-whether-to-work": "realtime_start.md:5",
+        "agent.stock.speech-is-a-transcript": "realtime_start.md:7",
+        "agent.stock.concise-updates": "realtime_start.md:9",
+    }
+
+    def test_the_stock_rules_are_exactly_these_codex_lines(self) -> None:
+        """A stock rule deleted, added or quietly re-pointed fails here by name and line."""
+        assert {
+            rule.id: rule.source.removeprefix(f"{STOCK_SOURCE_PREFIX}{STOCK_TEXT_VERSION}:")
+            for rule in RULES
+            if rule.is_stock
+        } == self.STOCK
+
     def test_the_catalogue_owes_exactly_these_rules_and_no_others(self) -> None:
         """The proof that nothing left unread, carried by ids rather than by lines.
 
-        `SURVIVING` pins the nine Voice rules #173 kept and `ADDED_SINCE` the
-        Voice rules ruled in after it; this pins everything else the catalogue
-        still holds. A rule deleted because a diff was convenient fails here by
-        name, and adding one is a decision somebody writes down in the same
-        commit — in one of the three sets, which is the decision.
+        `SURVIVING` pins the nine Voice rules #173 kept, `ADDED_SINCE` the Voice
+        rules ruled in after it and `STOCK` codex's own lines; this pins
+        everything else the catalogue still holds. A rule deleted because a diff
+        was convenient fails here by name, and adding one is a decision somebody
+        writes down in the same commit — in one of the four sets, which is the
+        decision.
         """
         assert {rule.id for rule in RULES} == (
-            self.RETAINED | (self.SURVIVING - self.RETIRED_SINCE) | self.ADDED_SINCE
+            self.RETAINED
+            | (self.SURVIVING - self.RETIRED_SINCE)
+            | self.ADDED_SINCE
+            | set(self.STOCK)
         )
 
     def test_the_history_rule_moved_to_the_call_agent_under_its_own_name(self) -> None:
@@ -478,6 +565,88 @@ class TestTheTwoBudgets:
         monkeypatch.setattr("gpt_voicecoding.core.instructions.MAX_AGENT_INSTRUCTION_BYTES", 100)
         with pytest.raises(InstructionError, match="agent instructions are"):
             generate(CONTEXT)
+
+
+class TestTheStockLinesAreOwedLineByLine:
+    """#300: codex's Stock Text is rules too, and the gate can see a line go.
+
+    Every other rule is proved by its id alone, because its prose is free. A
+    stock rule is proved by its words as well: #289 P1 decided to send codex's
+    own wording at a pinned tag, so the line is the obligation. That is what
+    makes a bullet deleted from the middle of a block a failure — the ids the
+    block claims are all still there, and only the words are missing.
+    """
+
+    def test_every_stock_line_is_rendered_word_for_word(self, instructions) -> None:
+        rendered = {
+            Audience.VOICE: instructions.voice.text,
+            Audience.AGENT: instructions.agent.text,
+        }
+        for rule in RULES:
+            if rule.is_stock:
+                assert rule.gist in rendered[rule.audience], rule.id
+
+    def test_every_stock_rule_is_claimed_by_the_set_that_says_it(self, instructions) -> None:
+        for rule in RULES:
+            if rule.is_stock:
+                assert instructions.carrier_of(rule.id) is rule.audience, rule.id
+
+    def test_claiming_a_stock_line_without_saying_it_is_refused(self) -> None:
+        """The refusal that block-level ids cannot give: one bullet gone, both ids kept."""
+        said = BY_ID["voice.stock.never-refuse"]
+        unsaid = BY_ID["voice.stock.one-unified-assistant"]
+        with pytest.raises(InstructionError, match="word for word"):
+            InstructionSet(
+                audience=Audience.VOICE,
+                sections=(
+                    Section(
+                        title="Policies",
+                        blocks=(Block(covers=(said.id, unsaid.id), text=said.gist),),
+                    ),
+                ),
+            )
+
+    def test_a_block_that_says_both_of_them_is_fine(self) -> None:
+        """The positive control: the refusal above is about the missing line, not the pair."""
+        said, also = BY_ID["voice.stock.never-refuse"], BY_ID["voice.stock.one-unified-assistant"]
+        built = InstructionSet(
+            audience=Audience.VOICE,
+            sections=(
+                Section(
+                    title="Policies",
+                    blocks=(Block(covers=(said.id, also.id), text=f"{also.gist}\n{said.gist}"),),
+                ),
+            ),
+        )
+        assert built.covers == {said.id, also.id}
+
+    def test_a_stock_bullet_deleted_from_the_generator_stops_generation(self, monkeypatch) -> None:
+        """The failure the ticket asks for, on the real Voice set rather than a fixture."""
+        stock, victim = voice_module._stock, BY_ID["voice.stock.never-refuse"]
+
+        def thinned() -> tuple[Section, ...]:
+            return tuple(
+                Section(
+                    title=section.title,
+                    blocks=tuple(
+                        Block(covers=block.covers, text=block.text.replace(f"{victim.gist}\n", ""))
+                        for block in section.blocks
+                    ),
+                )
+                for section in stock()
+            )
+
+        monkeypatch.setattr(voice_module, "_stock", thinned)
+        with pytest.raises(InstructionError, match=victim.id):
+            generate(CONTEXT)
+
+    def test_the_codex_tag_is_written_in_exactly_one_place(self) -> None:
+        """Two copies of a version pin drift; the audit then reads the wrong template."""
+        catalogue_source = Path(catalogue_module.__file__).read_text(encoding="utf-8")
+        assert catalogue_source.count(f'"{STOCK_TEXT_VERSION}"') == 1
+        for module in (voice_module, agent_module):
+            written = Path(module.__file__).read_text(encoding="utf-8")
+            assert STOCK_TEXT_VERSION not in written, module.__name__
 
 
 class TestTheVoiceHearsStockTextThenOverlay:

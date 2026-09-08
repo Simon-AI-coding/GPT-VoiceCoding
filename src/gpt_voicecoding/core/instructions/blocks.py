@@ -7,7 +7,7 @@ searching the text for words that might mean the right thing. Rewriting a
 sentence changes nothing about coverage; deleting a rule changes everything,
 and that is the asymmetry the tests need.
 
-Three things are refused at construction rather than left to a test, because
+Four things are refused at construction rather than left to a test, because
 they are the mistakes that would make the coverage claim meaningless:
 
 - covering an id the catalogue does not have — a typo would otherwise read as
@@ -15,7 +15,10 @@ they are the mistakes that would make the coverage claim meaningless:
 - covering the same id twice — "appears once" has to mean once;
 - covering an id that belongs to another audience — a Core rule wearing prose,
   or a speaking rule handed to the half with the tools, is what the split of
-  audiences exists to prevent.
+  audiences exists to prevent;
+- claiming one of codex's stock lines without saying it word for word — the one
+  place the freedom above does not apply, because there the wording is what was
+  decided (#289 P1, #300).
 
 **A set may be rendered without its headings.** The Voice hears prose and
 nothing else (ADR 0018: 控制 voice 一定要用自然语言而不是代码语言), so its section
@@ -86,6 +89,7 @@ class InstructionSet:
             )
         object.__setattr__(self, "covers", frozenset(self._claimed()))
         object.__setattr__(self, "text", self._rendered())
+        self._stock_lines_are_there()
 
     def _claimed(self) -> tuple[str, ...]:
         claimed: list[str] = []
@@ -110,6 +114,28 @@ class InstructionSet:
                         )
                     claimed.append(rule_id)
         return tuple(claimed)
+
+    def _stock_lines_are_there(self) -> None:
+        """A claimed stock line has to really be in the prose, word for word.
+
+        The three refusals above are about ids, and for every rule this engine
+        wrote itself that is the whole contract: the prose is free. codex's Stock
+        Text is the exception (#289 P1) — what was decided there was to send
+        codex's own wording at a pinned version, so the line *is* the obligation
+        and its `gist` is the line.
+
+        It is checked here rather than in a test because ids alone cannot see it:
+        a block carries a whole bullet list, so a set with one bullet quietly
+        deleted still claims every id it ever did and passes coverage (#300).
+        """
+        for rule_id in sorted(self.covers):
+            rule = BY_ID[rule_id]
+            if rule.is_stock and rule.gist not in self.text:
+                raise InstructionError(
+                    f"the {self.audience} set claims {rule_id} but does not say it: a stock "
+                    f"rule's gist is codex's line at {rule.source}, and it is carried word "
+                    "for word or not at all"
+                )
 
     def _rendered(self) -> str:
         parts: list[str] = []

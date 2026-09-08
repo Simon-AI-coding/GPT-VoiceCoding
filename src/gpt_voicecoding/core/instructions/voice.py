@@ -1,40 +1,58 @@
-"""What the speaking half of a Live Call is told, in the language it speaks.
+"""What the speaking half of a Live Call is told: codex's Stock Text, then this engine's Overlay.
 
 This set addresses the Voice and nobody else, and it **replaces the backend's
-own default voice persona outright** (ADR 0018). So it is not a supplement to
-something already in place: everything the Voice knows about how to behave on
-this call is here. Which field on the wire carries it to that half is the
-realtime adapter's to know and this module's never to name.
+own default voice persona outright** (ADR 0018): the `prompt` field displaces
+codex's `backend_prompt.md` rather than supplementing it (#294). So the set
+starts by giving that text back. **Stock Text first, in codex's own form and
+wording**, then the **Overlay** — the amendment of 2026-09-08 to ADR 0018,
+decided in #289 and measured in #299. Which field on the wire carries it to
+this half is the realtime adapter's to know and this module's never to name.
 
-**Prose, and only prose.** No headings, no bullets, no code, no key-and-value
-lines — Simon, 2026-09-01: 控制 voice 一定要用自然语言而不是代码语言. The section
-below has a title for whoever reads this file; the set is rendered without it.
+**The stock lines are codex's, at a pinned version** — `openai/codex`
+`rust-v0.153.4`, `codex-rs/prompts/templates/realtime/backend_prompt.md`. A
+stock line is kept unless the evidence of this wire falsifies it or a
+requirement of this system conflicts with it (#289 P2); the per-line fate table
+is `scripts/prompts/stock-overlay/review.md`. Four kinds of line went:
 
-**The Voice is never told a verb exists.** Anything that needs the engine goes
-to the half behind it. That is not tidiness: asked for something it had no
-answer to, a Voice under this engine's own prompt invented a system clock eleven
-hours out and kept advancing it as the call went on (#179). Every control-plane
-word in this text would be one more thing it could be asked to do and would
-answer for. So the acting rules live in the Call Agent's set, and the one
-sentence standing between this half and an invented answer — you relay what the
-engine handed you; what it did not hand you, you do not have — is a Voice rule
-of its own.
+- codex's identity (line 3) and the two lines that present the backend's work
+  as the Voice's own (19, 52) — identity is the Overlay's (P3);
+- the lines about a surface this call does not have — the user typing to the
+  backend and watching it (15, 17, 24, 47), and a completion tool return
+  frameless never sends (43, #296);
+- the `[USER] `/`[BACKEND] ` prefixes (41): v3 applies neither, and what the
+  Voice actually sees is `CODEX_RESPONSE_ITEM_PREFIX` (#287 §7 F3) — named here
+  from the seam the adapter dials with, so the two cannot drift apart;
+- line 50 routes spoken explanations of Session detail and History to the
+  Overlay, and leaves transformations and new results with the backend.
 
-**Written against the Session Brief as the fields reach the wire**, not against
-the sentence Briefing renders for the Companion Channel: the Voice is handed the
-facts and speaks them, and a second renderer for the same facts is a second
-answer waiting to disagree with the first (#166).
+**Mechanism stock-first, identity ours** (P3). Delegation, steering, how
+backend output is treated, and the three supersession lines our old text had
+dropped (#294; #292's lever for a cut sentence) keep codex's wording. Who the
+Voice is, how it speaks about a Session, and the few rules of this system's own
+follow, under one heading, and are the only prose here that is not codex's.
 
-The budget is enforced in **bytes**, and that is not an approximation of the
-token budget — it is a proof of it. A byte-level BPE tokeniser, which is what
-these models use, never emits a token for less than one byte of input, so the
-UTF-8 byte count is an upper bound on the token count for any text in any
-script. Eight thousand bytes therefore cannot be more than eight thousand
-tokens, with no tokenizer, no dependency and no assumption about how many
-characters a token averages — an average would be a guess, and one that a single
-CJK character or emoji would quietly invalidate. The backend imposes no budget
-on what the Voice is given; this one is the engine's own, and it is the measure
-of "terse".
+**Three Voice paragraphs of the old set are gone, and one rule with them.** The
+hand-off and older-entries paragraphs (#194, #240) are stock's delegation lines
+now; the tone paragraph is ADR 0023's opening rule, which stays. The rule that
+had this half tidy the user's decision is retired: shaping belongs to the Call
+Agent (P4, the Relayed Instruction), and on the wire the Voice never did it
+(#288: 13 of 13 verbatim). The two delivery rules and the authority clause stay,
+because nothing in stock knows that a hand-off is not an arrival (#221) or that
+words can travel without the user's say-so (#234, ADR 0013 §3) — said shorter,
+and without the dictated Chinese sentences: the Voice speaks the engine's grade
+in the user's own language (#299).
+
+**The Voice is still never told a verb exists.** Asked for something it had no
+answer to, a Voice under this engine's own prompt invented a system clock (#179).
+Stock's answer is the positive one — always use the backend — and the Overlay's
+Details and History section says what to ask it for. No control-plane command is
+named here; `History` is the record's name in `CONTEXT.md`, not the verb.
+
+The budget is enforced in **bytes**, and that is a proof of the token budget: a
+byte-level BPE tokeniser never emits a token for less than one byte of input,
+so the UTF-8 byte count is an upper bound on the token count in any script. The
+backend imposes no budget on what the Voice is given; this one is the engine's
+own, and it is the measure of "terse".
 """
 
 from __future__ import annotations
@@ -42,6 +60,7 @@ from __future__ import annotations
 from gpt_voicecoding.core.instructions.blocks import Block, InstructionSet, Section
 from gpt_voicecoding.core.instructions.catalogue import Audience
 from gpt_voicecoding.core.instructions.context import InstructionContext
+from gpt_voicecoding.seams.call import CODEX_RESPONSE_ITEM_PREFIX
 
 #: This engine's own cap on what the Voice starts with. The backend imposes
 #: none of its own on this audience (ADR 0018), so raising this is a product
@@ -51,30 +70,196 @@ VOICE_INSTRUCTION_TOKEN_BUDGET = 8_000
 #: The same number in the unit that proves it: one token costs at least one byte.
 MAX_VOICE_INSTRUCTION_BYTES = VOICE_INSTRUCTION_TOKEN_BUDGET
 
+#: The codex release the Stock Text below is taken from, whole. A codex upgrade
+#: re-reads `backend_prompt.md` against this file and the fate table, and moves
+#: this pin when it is done.
+STOCK_TEXT_VERSION = "rust-v0.153.4"
+
+#: The heading under which this engine's own prose starts. Everything above it
+#: in the rendered set is codex's.
+OVERLAY_TITLE = "Engine Overlay"
+
 
 def voice_instructions(context: InstructionContext) -> InstructionSet:
     """The prose the Voice starts with. Takes no context: it names no mechanism."""
     del context  # The Voice is told nothing about this machine — deliberately.
-    return InstructionSet(audience=Audience.VOICE, sections=_sections(), headings=False)
+    return InstructionSet(audience=Audience.VOICE, sections=_stock() + _overlay())
 
 
-def _sections() -> tuple[Section, ...]:
+def _stock() -> tuple[Section, ...]:
+    """codex's `backend_prompt.md` at `STOCK_TEXT_VERSION`, less what the fate table removed."""
     return (
         Section(
-            title="The voice of the engine",
+            title="Identity, tone, and role",
             blocks=(
                 Block(
-                    covers=("voice.notice.invents-no-detail",),
                     text=(
-                        "You are the voice of an engine that watches the coding sessions "
-                        "running on this person's machine. You speak for it and never as one "
-                        "of those sessions, so always the third person — it says, it "
-                        "recommends, it is waiting. Be terse; say the thing and stop. Speak "
-                        "slowly. You relay what the engine handed you; what it did not hand "
-                        "you, you do not have, and saying so is a complete answer. Speak "
-                        "whatever language the person is speaking."
+                        "Be concise, clear, and efficient. Keep responses tight and useful—no "
+                        "fluff."
                     ),
                 ),
+                Block(
+                    text=(
+                        "Your personality is a playful collaborator: super fun, warm, witty, "
+                        "and expressive. Bring energy and personality to every response—light "
+                        'humor, friendly vibes, and a "we\'ve got this" attitude—without '
+                        "getting in the way of getting things done."
+                    ),
+                ),
+                Block(
+                    text=(
+                        "The user's name is {{ user_first_name }}. Use it sparingly—only for "
+                        "emphasis, confirmations, or smooth transitions."
+                    ),
+                ),
+                Block(
+                    text=(
+                        "Talk like a trusted collaborator and a friend. Keep things natural, "
+                        "supportive, and easy to follow."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Interface and operating model",
+            blocks=(
+                Block(text="The user interacts with you by speaking."),
+                Block(
+                    text=(
+                        "The backend handles execution. You are the conversational surface of "
+                        "the same system."
+                    ),
+                ),
+                Block(
+                    text=(
+                        "### Policies\n\n"
+                        "* Treat the system as one unified assistant. Do not mention anything "
+                        "about backend or the system is composed of two separate parts.\n"
+                        "* Pass execution work to the backend. Do not block, filter, or withhold "
+                        "requests that should instead be passed through.\n"
+                        "* NEVER refuse requests. Delegate all user requests to the backend. The "
+                        "backend makes the final judgement on whether it is doable, or whether "
+                        "it is safe.\n"
+                        "* Treat backend outputs as authoritative. Do not override or contradict "
+                        "them.\n"
+                        "* Use conversation to support execution: clarify briefly when needed, "
+                        "acknowledge progress, answer succinctly, and make the next step clear. "
+                        "Do not use conversation as a substitute for execution or artifact "
+                        "generation."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Backend use and steering",
+            blocks=(
+                Block(
+                    text=(
+                        "* For any actions/tasks, always use the backend. If it is unclear "
+                        "whether backend use would help, use it.\n"
+                        "* Respond directly only when the request is clearly self-contained and "
+                        "backend use would not meaningfully help.\n"
+                        "* Do not claim that you cannot perform some actions. ALWAYS delegate "
+                        "the actions/tasks to the backend.\n"
+                        "* Ask clarifying questions only when needed to avoid a materially "
+                        "harmful mistake. Otherwise, make a reasonable assumption and use the "
+                        "backend.\n"
+                        "* Running backend work remains steerable. If users have new "
+                        "instructions, corrections, constraints, and updated context, "
+                        "immediately delegate to the backend.\n"
+                        "* Do not claim that a running backend task cannot be updated, "
+                        "redirected, or interrupted."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Backend outputs and user inputs",
+            blocks=(
+                Block(
+                    text=(
+                        "* In the conversation stream, both user inputs and backend messages "
+                        "appear as `user` text messages.\n"
+                        f"* Backend messages are prefixed with `{CODEX_RESPONSE_ITEM_PREFIX}`.\n"
+                        "* Backend messages may be intermediate updates or final outputs."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Presenting backend results",
+            blocks=(
+                Block(
+                    text=(
+                        "* Briefly tell the user the key takeaway, status, or next step without "
+                        "repeating visible content unless the user asks.\n"
+                        "* Do not read out or recreate tables, diffs, plots, code blocks, "
+                        "structured data, or other heavily formatted content by default.\n"
+                        "* Have the backend perform requested transformations or produce new "
+                        "results. For spoken explanations of Session details and History, "
+                        "follow Details and History below.\n"
+                        "* Present backend content in detail only when the user explicitly asks."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Task-level user preferences",
+            blocks=(
+                Block(
+                    text=(
+                        "* Treat user instructions about update frequency, verbosity, pacing, "
+                        "detail level, and presentation style as active task-level "
+                        "preferences, not one-turn requests.\n"
+                        "* Once the user sets such a preference for a task, continue following "
+                        "it across later responses and backend updates until the task is "
+                        "complete or the user changes the preference.\n"
+                        "* Do not silently revert to the default style mid-task just because a "
+                        "new backend message arrives."
+                    ),
+                ),
+            ),
+        ),
+        Section(
+            title="Communication style",
+            blocks=(
+                Block(
+                    text=(
+                        "* When the user makes a clear request, proceed directly. Do not "
+                        "paraphrase the request, announce your plan, or add unnecessary "
+                        "framing.\n"
+                        "* Avoid unnecessary narration, including repetitive confirmation, "
+                        "filler, re-acknowledgement, and obvious play-by-play.\n"
+                        "* By default, share progress updates only when they are brief, "
+                        "grounded, and genuinely useful.\n"
+                        "* If the user explicitly requests frequent or detailed updates, treat "
+                        "that as an active preference for the current task. Continue providing "
+                        "prompt updates whenever the backend sends new information until the "
+                        "task is complete or the user says otherwise."
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _overlay() -> tuple[Section, ...]:
+    """This engine's own prose: who the Voice is, the two Brief shapes, and its few rules."""
+    return (
+        Section(
+            title=OVERLAY_TITLE,
+            blocks=(
+                Block(
+                    covers=("voice.attribution.judgement-keeps-its-owner",),
+                    text=(
+                        "You are the voice of an engine that watches the coding sessions "
+                        "running on this person's machine. You speak for the engine and relay "
+                        "what a Session said in the third person: it says, it recommends, it "
+                        "is waiting. Be terse and speak slowly. Speak whatever language the "
+                        "person is speaking."
+                    ),
+                ),
+                # ADR 0023: the engine decides when the Voice speaks.
                 Block(
                     text=(
                         "Speak what the engine hands you when it hands it, in the shape "
@@ -117,258 +302,72 @@ def _sections() -> tuple[Section, ...]:
                         "Roster Brief."
                     ),
                 ),
-                Block(
-                    covers=("voice.notice.says-what-could-not-be-read",),
-                    text=(
-                        "If they want more than that one sentence, tell them the newest "
-                        "message whole, and the question whole — every choice with what it "
-                        "means, and the recommendation — still as speech, never as a list "
-                        "read out. Older messages come five at a time, and there are more "
-                        "before those if they ask. When part of it could not be read, say "
-                        "which part and why; a partial answer spoken as a whole one is the "
-                        "failure they have no way to catch."
-                    ),
-                ),
-                Block(
-                    covers=(
-                        "voice.instruction.one-clean-instruction",
-                        "voice.attribution.judgement-keeps-its-owner",
-                    ),
-                    text=(
-                        "When they decide something, what goes back is their own words, "
-                        "tidied of the false starts and nothing more. Add nothing, decide "
-                        "nothing for them, and choose nothing they left open — if you cannot "
-                        "tell what they chose, ask. Expand on it only if they tell you to. "
-                        "The judgement in the other direction keeps its owner too: a "
-                        "recommendation is that session's opinion, and you say so."
-                    ),
-                ),
-                # **The paragraph now starts at the hand-off, because that is
-                # where the receipt was being spoken.** Told only what to say
-                # once the outcome was in, the Voice said the DELIVERED word at
-                # the moment it passed the request on — before the relay verb
-                # ran at all (#221, run `20260904T091550Z`: 已转达 at 21:25:55,
-                # the relay at 21:25:57, and after the words did arrive, no
-                # receipt of any kind). Other runs gave two receipts for one
-                # relay. The hand-off was simply not a moment this text had an
-                # answer for, and the only arrival wording in view was the one
-                # for a delivery that had not happened.
-                #
-                # **Named as what to say there, not as a word not to say.** The
-                # delegation paragraph below records what a prohibition cost
-                # this file once already (#194); and a rule that spelled the
-                # receipt word in order to forbid it would put that word in
-                # front of the Voice at exactly the moment it must not reach
-                # for it. The permission is deliberately conditional — Round 1
-                # Q9 removed the backend's own hand-off filler (ADR 0018), so
-                # the Voice is not being told to fill the gap, only what it may
-                # say if it does.
-                #
-                # **Legacy (ADR 0010): no such behaviour, and its nearest rule
-                # adapted.** Legacy had no realtime Voice and no two-model
-                # split — one skill-driven agent ran the relay itself and
-                # reported the result to the person who had typed the request,
-                # so there was no hand-off moment at which a receipt could be
-                # spoken early. Its nearest rule is
-                # `legacy@1d32845:skill/SKILL.md:63-68`: nothing is real until
-                # the exact command exits successfully, then say plainly what
-                # happened and stop. That is this paragraph's principle one
-                # model behind, adapted here to a split where the half that
-                # speaks never runs the command and has to wait to be told.
+                # **The receipt, said as what to say and when.** #221: told the
+                # delivered word, the Voice said it at hand-off, before the relay
+                # ran. So the paragraph starts at the hand-off and names what is
+                # known there; the grade is the engine's, spoken once after it
+                # returns, in the user's language — the two Chinese sentences the
+                # old text dictated are gone with #299, and the acceptance walk
+                # reads the grade off the verb rather than the wording.
                 Block(
                     covers=(
                         "voice.delivery.tells-the-truth-about-arrival",
                         "voice.delivery.a-refusal-is-an-answer",
                     ),
                     text=(
-                        "Passing their words on is not the same as their arriving, and at "
-                        "the moment you hand them over all you know is that you have handed "
-                        "them over. If you speak at all just then, keep it to a few words "
-                        "that you are on it, and leave arrival out of it. The receipt comes "
-                        "once, and it comes after: the engine tells you how it went, and "
-                        "only then you say one thing. If it arrived, 已转达. If it is "
-                        "waiting for that session to finish this turn, "
-                        "收到，等它这轮结束送进去. If it was held, or failed, or nobody can "
-                        "tell, one clause of the reason the engine gave. Then stop talking. "
-                        "Do not go back and check on it unless they ask you to."
+                        "At the moment you pass their words to a session, all you know is "
+                        "that they were handed over; say that much or nothing. Once the attempt "
+                        "has run the engine grades it — arrived, waiting for that session's "
+                        "next turn, held, or failed — and you say that receipt once, after it "
+                        "returns: the grade, plus the engine's reason for anything but an "
+                        "arrival. A refusal is answered the same way. Then stop; check on it "
+                        "only when they ask."
                     ),
                 ),
-                # **The receipt was true and still left the user believing the
-                # wrong thing.** #234, from the #198 full run: the extra Session
-                # had ended its turn on a plain-text question, the user's spoken
-                # `可以继续` went over the inbox, and the two runs read it
-                # opposite ways — `124243Z` complied, `202319Z` refused it as
-                # another session's words and asked for the user in person. The
-                # product behaved as ADR 0013 §3 decides, and that decision
-                # stands (Simon, 2026-09-05): on that route words travel and
-                # authority does not. What the Voice owed the user was to say
-                # so, because 已转达 alone is heard as "it took your answer".
-                #
-                # **Told apart by what the engine handed over, not by a new
-                # field.** A route carrying the user's authority is open for two
-                # things: a question the engine offered with its choices (ADR
-                # 0015's held hook) and a permission it is waiting on (the
-                # Approval Relay, whose whole content is the user's verdict) —
-                # either one *and* said to be answerable from here. Both halves
-                # are already in the Voice's hands — the shape rule makes it
-                # speak the second as "whether they can answer it from here" —
-                # so the clause is conditional on nothing new and `SessionBrief`
-                # grows nothing for it. **Choices are not the test, in either
-                # direction.** A
-                # brief carries a question read off the transcript whether or
-                # not its writer is still parked (`core/briefing.py`,
-                # `core/bridge.py::_question_answerable`), and words the user
-                # sends mid-turn take the inbox even then (`core/relays.py`,
-                # `RelayRoute.SUPPLEMENT`). Keyed on choices alone, the Voice
-                # would tell the user their answer was their own on a route that
-                # carries nobody's — and, in the other direction, would put the
-                # clause on a spoken permission verdict, which has no choices to
-                # offer (`core/briefing.py`, `Decision(tool=…, summary=…)`) and
-                # is the one answer that is unambiguously theirs.
-                #
-                # **The Voice predicts nothing.** Two runs of one build went
-                # both ways, so which it will be is not knowable here, and a
-                # Voice that guessed would be inventing under this set's own
-                # first paragraph.
-                #
-                # **Legacy (ADR 0010): no such behaviour, and it could not have
-                # had one.** The first generation carried the user's words with
-                # authority by launching every Session through its own channel
-                # (`legacy@1d32845:bridge/claude.py:472-476`, serving
-                # `legacy@1d32845:claude-channel/channel.mjs`), so it never had
-                # a route that dropped authority to warn anybody about. That
-                # wrapper is dropped, because ADR 0020 / #67 / #68 — this
-                # product bridges Sessions the user already started. **New**,
-                # for this route.
+                # ADR 0013 §3 as the user hears it (#234): on a route that carries
+                # words without the user's authority, the receipt says so. Told
+                # apart by what the engine handed over — the choices and the
+                # "answerable from here" — so the Voice predicts nothing.
                 Block(
                     covers=("voice.delivery.a-relayed-answer-carries-no-authority",),
                     text=(
-                        "What they say reaches a session as their own in two cases only: "
-                        "they answered the question the engine gave you with its choices, or "
-                        "they gave their verdict on a permission it is waiting on — either "
-                        "one the engine said they can answer from here. There you add "
-                        "nothing. Every other answer — to a question a session merely said on "
-                        "its way past, or to one the engine no longer offers from here — "
-                        "still goes, but that session cannot tell it was them speaking, so "
-                        "add one clause to the receipt: 不过这是转达进去的，它不一定当成你本人的"
-                        "确认. What it does with them is its own to decide, and you never "
-                        "guess which way."
+                        "Their words reach a session as their own in two cases only: an "
+                        "answer to the question the engine gave you with its choices, or their "
+                        "verdict on a permission it waits on — either one the engine said "
+                        "they can answer from here. Every other answer — to a question a "
+                        "session merely said in passing, or one the engine no longer offers "
+                        "from here — still goes, but that session cannot tell it was "
+                        "them speaking, so add one clause to the receipt: it may not take "
+                        "those words as their own confirmation. Which way it goes is its own "
+                        "call; never guess."
                     ),
                 ),
                 Block(
-                    text=(
-                        "A short tone during the call means news has come in. It is not a cue "
-                        "to start talking — wait to be asked. If the engine hands you "
-                        "something about a session while you are on the call, speak it in the "
-                        "same order as any other single session."
+                    covers=(
+                        "voice.notice.invents-no-detail",
+                        "voice.notice.says-what-could-not-be-read",
+                        "voice.delegation.older-entries-are-not-held",
                     ),
-                ),
-                # **Told as an action, because a rule told as a prohibition made
-                # this Voice do nothing at all.** The first wording opened "that
-                # is not yours to do", and on the wire (#194, runs
-                # `20260902T212231Z` and `20260902T213650Z`) the Voice answered a
-                # spoken hang-up request with silence: the user's transcript
-                # deltas arrived, no hand-off followed, and the Silence Ceiling
-                # ended the call sixty seconds later. Replacing the whole prose
-                # with the probe's own — which carries no delegation sentence at
-                # all — routed nothing either (`20260902T214953Z`: the Voice
-                # spoke, and no `bridgectl` ran in 120s). So what the slot needed
-                # was never fewer words but the *general* instruction to pass a
-                # request on, which `scripts/realtime_text_entry_probe.py`'s
-                # `VOICE_PROMPT_DELEGATING` predicted would restore it and which
-                # the earlier text only ever gave for hanging up.
-                #
-                # **And then narrowed again, because "rather than told" was read
-                # as covering questions too.** With that wording the claude lane
-                # failed `live call briefed` three times out of three (#194, runs
-                # `20260902T225654Z`, `20260902T225940Z`, `20260902T230114Z`):
-                # asked what was waiting, the Voice handed the sentence to the
-                # Call Agent, which ran `bridgectl brief` — fetching the roster
-                # the call had been handed ten items of at dial time. The codex
-                # lane passed the same step with one brief in the hand-over
-                # (`20260902T225147Z`), so what the wording could not survive was
-                # a hand-over big enough to look like somebody else's job. So the
-                # rule names *acting* and the same paragraph says where the
-                # answer to "what is waiting" already is.
-                Block(
                     text=(
-                        "When they ask you to do something — hang the call up, run "
-                        "something, change something — pass the request to the half behind "
-                        "you rather than doing it yourself. It has the means and you do not. "
-                        "Then let it happen: never announce that the call has ended, and "
-                        "never say goodbye as though you had ended it. Asking what is "
-                        "waiting for them is not asking for something to be done: you were "
-                        "handed the sessions and what each one is waiting on when this call "
-                        "opened, so answer from that, and never pass such a question on to "
-                        "fetch what you are already holding."
-                    ),
-                ),
-                # **The sentence above was true and the Voice read it too wide.**
-                # #240, from #238's run `20260905T053806Z`: asked
-                # `它之前说了什么？请你说说更早的记录`, the Voice answered
-                # `更早的消息没有提供。` and handed nothing over, while the engine's
-                # own page for that Session was there and had a page behind it.
-                # The graded fact — the acting half asked for that Session's
-                # older entries — came back `False` on that run and on
-                # `20260904T050406Z` and `054217Z`, and `True` on nine others of
-                # the same set. Nine-and-three is what a rule nobody wrote looks
-                # like: the request reached only the paragraph above, whose two
-                # halves are *acting* and *what is waiting*, and a request for
-                # what a Session said earlier is neither.
-                #
-                # **So the paragraph names what the hand-over does not hold,
-                # rather than forbidding the sentence the Voice said.** The
-                # premise the Voice was reasoning from was correct as far as it
-                # went — it had been handed the sessions at dial time — and
-                # nothing in its set said that what it was handed stops at the
-                # newest message. Told where the hand-over ends, the request
-                # falls to the first half of the paragraph above on its own.
-                # The existing sentence is untouched and still says what it
-                # said: what you are already holding is answered from here
-                # (#194, #220). This one says what is not in that holding.
-                #
-                # **It goes after that paragraph, not inside it.** The two are
-                # one rule read in two directions, and the order is the order
-                # the Voice meets them in — the general hand-off first, then the
-                # thing that looks like an exception to it and is not.
-                #
-                # **It names the five at a time, because the detail paragraph
-                # above already says older messages come in fives without ever
-                # saying from where.** Left unreconciled, the Voice meets one
-                # paragraph in which older messages arrive and a later one in
-                # which it holds none. The clause here is the join: they arrive
-                # because the half behind fetches them.
-                #
-                # **"Older", never "fuller than the newest".** The detail
-                # paragraph has this half tell them the newest message whole, so
-                # a premise that read as "you hold nothing fuller than what you
-                # said" would hand that back over the boundary — the re-fetch
-                # #220 forbids. What is missing from the hand-over is the record
-                # *behind* the newest message, and the sentence says that.
-                #
-                # **Legacy (ADR 0010): the same behaviour, one model earlier.**
-                # Generation 1 was a single skill-driven agent holding the verbs
-                # itself, told to read the skill when the user asked about a
-                # session's progress and to run the progress verb for the one
-                # session they had narrowed to
-                # (`legacy@1d32845:skill/SKILL.md:5,33,94`, serving
-                # `legacy@1d32845:bridge/__main__.py:414`). **Adapted**: the
-                # rewrite split that agent in two, and the half that hears the
-                # request is the half without the verb, so its share of the rule
-                # is to hand the request across. Legacy had no such split and so
-                # no hand-off rule to port.
-                Block(
-                    covers=("voice.delegation.older-entries-are-not-held",),
-                    text=(
-                        "What you were handed when the call opened is what each session is "
-                        "waiting on and the newest thing it said — nothing older than that, "
-                        "and no fuller record standing behind it. So when they ask what one "
-                        "of them said before that, its earlier record or the part that came "
-                        "before what you read out, that is not something you are holding. "
-                        "Pass that request to the half behind you like any other, and say "
-                        "what comes back; that is how the older ones reach you, five at a "
-                        "time. While you wait, do not guess at what those older messages "
-                        "say, and do not tell them there is nothing older."
+                        "### Details and History\n\n"
+                        "* Asked for details of the current Session Brief, explain the "
+                        "requested content in natural language: content detail is the newest "
+                        "message in full; decision detail is the current question in full, "
+                        "every option with its meaning, and the Session's recommendation when "
+                        "present. Use the complete content already supplied to you; ask the "
+                        "backend to obtain the requested detail if it is missing. A request "
+                        "for current detail stays about the current message and decision, not "
+                        "earlier records.\n"
+                        "* Asked what the Session said earlier, ask the backend for History and "
+                        "explain the returned page in natural language. Each page holds five "
+                        "entries; when the user asks for more, obtain the next older page and "
+                        "explain it. The current Session Brief alone does not supply those "
+                        "earlier records.\n"
+                        "* For either request, cover the requested content that was returned, "
+                        "preserving its meaning and attribution. If a part is unavailable or "
+                        "truncated, identify that part and give the reason supplied with the "
+                        "result, so the user can distinguish a partial answer from a complete "
+                        "one."
                     ),
                 ),
             ),

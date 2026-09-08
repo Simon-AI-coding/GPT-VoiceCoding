@@ -97,6 +97,7 @@ from gpt_voicecoding.adapters.codex_app_server.wire import (
     WireError,
 )
 from gpt_voicecoding.seams.call import (
+    CODEX_RESPONSE_ITEM_PREFIX,
     CallDropped,
     CallEnded,
     CallSnapshot,
@@ -164,7 +165,6 @@ DELEGATION_ACK_FILLER = False
 #: were spoken (ADR 0018 as amended by #179). It stays on because that is the
 #: recorded decision, not because it delivers what the decision expected.
 CODEX_RESPONSES_AS_ITEMS = True
-CODEX_RESPONSE_ITEM_PREFIX = "[AGENT] "
 
 #: `includeStartupContext` off. Its default is *on*, and what it includes is up
 #: to 5,300 tokens of thread history, a scan of the user's forty most recent

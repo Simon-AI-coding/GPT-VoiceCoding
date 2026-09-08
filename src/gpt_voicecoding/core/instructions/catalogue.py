@@ -160,16 +160,6 @@ def _rules() -> tuple[Rule, ...]:
             enforced_by="the Session registry and its stale-target refusals — core/sessions.py",
         ),
         Rule(
-            id="voice.instruction.one-clean-instruction",
-            audience=Audience.VOICE,
-            source="skill/SKILL.md:46-49",
-            gist=(
-                "The user's decision goes back in their own words, tidied of the false "
-                "starts and nothing else: no decision they did not make, and no elaboration "
-                "unless they authorised one."
-            ),
-        ),
-        Rule(
             id="voice.attribution.judgement-keeps-its-owner",
             audience=Audience.VOICE,
             source="skill/SKILL.md:50-55",
@@ -377,9 +367,11 @@ def _rules() -> tuple[Rule, ...]:
             audience=Audience.VOICE,
             source="skill/checking-and-talking.md:76-107",
             gist=(
-                "The three sentences Round 1 settled, and then silence: 已转达 only when the "
-                "receipt says delivered, 收到，等它这轮结束送进去 when it is queued, and one "
-                "clause of reason when it is held, unknown or failed. No checking on it "
+                "At hand-off the Voice knows only that the words were handed over. The "
+                "receipt is spoken once, after the engine returns it, as the grade the "
+                "engine gave — arrived, waiting for the Session's next turn, held, or "
+                "failed — with one clause of reason for anything but an arrival, in the "
+                "user's language rather than a dictated sentence (#299). No checking on it "
                 "afterwards unless asked."
             ),
         ),
@@ -573,10 +565,14 @@ def _rules() -> tuple[Rule, ...]:
         Rule(
             id="agent.relay.carries-the-users-words",
             audience=Audience.AGENT,
-            source="issue/173",
+            source="issue/289",
             gist=(
-                "A relay carries the user's instruction as the speaking half handed it "
-                "over, with no decision added on the way."
+                "A relay carries the Relayed Instruction: one complete instruction in the "
+                "user's own meaning, gathered from the pieces it was spoken in and tidied "
+                "of fillers, stutters, overruled self-corrections and the framing addressed "
+                "to the Voice; nothing added, expanded, decided or chosen on their behalf. "
+                "Shaping is this half's, which reads the transcript (#289 P4; was #173's "
+                '"as the speaking half handed it over").'
             ),
         ),
         Rule(

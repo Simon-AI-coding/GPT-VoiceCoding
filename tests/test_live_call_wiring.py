@@ -1474,15 +1474,14 @@ def test_the_answer_utterance_carries_the_words_the_session_is_told() -> None:
 
     The Session asked `journey.THE_QUESTION_ASKED`, so the
     payload is what the user says back — and what the Session's next turn then
-    carries, which is what the step reads. Deliberately not `收到`: that is the
-    wording the Voice says for a **queued** receipt (`instructions/voice.py`),
-    and a payload spelling it would make the receipt and its echo the same
-    string.
+    carries, which is what the step reads. Deliberately nothing shaped like a
+    receipt (`live_call_step._spoken_as_receipt`): a payload that stated an
+    arrival would make the receipt and its echo the same line.
     """
     said = live_call.relay_request(live_call.FOCUS_WORKSPACE_NAME)
 
     assert live_call_step.LIVE_CALL_ANSWER_SUBSTRING in said
-    assert live_call_step.RELAY_RECEIPT_QUEUED not in said
+    assert not live_call_step._spoken_as_receipt(said)
 
 
 def test_the_question_a_session_stops_on_is_one_the_voice_reads_out() -> None:
@@ -1576,13 +1575,12 @@ def test_the_offered_labels_share_no_run_with_anything_graded() -> None:
         journey.QUESTION_ASKED_SPOKEN_SUBSTRING,
         live_call_step.LIVE_CALL_DICTATED_REPLY_SUBSTRING,
         live_call_step.LIVE_CALL_ANSWER_SUBSTRING,
-        live_call_step.RELAY_RECEIPT_QUEUED,
-        live_call_step.RELAY_RECEIPT_DELIVERED,
     )
     for label in journey.CALL_QUESTION_OPTIONS:
         for fragment in graded:
             assert fragment not in label
             assert label not in fragment
+        assert not live_call_step._spoken_as_receipt(label)
         for lane in journey.LANES:
             for workspace in lane.call_workspaces:
                 assert workspace not in label
@@ -1614,9 +1612,8 @@ def test_the_focus_session_is_told_what_to_answer_a_relay_with() -> None:
     # the air, the Call Agent's argv and the Session's next turn.
     assert reply not in live_call.relay_request(live_call.FOCUS_WORKSPACE_NAME)
     assert live_call_step.LIVE_CALL_DICTATED_REPLY_SUBSTRING in reply
-    # Neither receipt wording: an echo of the receipt would otherwise pass.
-    assert live_call_step.RELAY_RECEIPT_QUEUED not in reply
-    assert live_call_step.RELAY_RECEIPT_DELIVERED not in reply
+    # Nothing shaped like a receipt: an echo of the receipt would otherwise pass.
+    assert not live_call_step._spoken_as_receipt(reply)
     # Nor any lane's workspace name, which the answer is graded on elsewhere.
     for lane in journey.LANES:
         for workspace in lane.call_workspaces:
@@ -1656,12 +1653,16 @@ def test_every_lane_names_three_extra_sessions(tmp_path: Path) -> None:  # noqa:
         assert len(set(named)) == 3
 
 
-def test_the_grade_wording_the_voice_is_told_to_say_is_what_the_step_looks_for() -> None:
-    """The receipt wording is the product's, and the step quotes it (#193 §Voice).
+def test_the_receipt_the_step_recognises_is_the_grade_the_voice_is_told_to_speak() -> None:
+    """The step reads the receipt by its shape, and the product says the grade (#299).
 
-    `已转达` for a delivered relay and `收到` for a queued one are shipped in the
-    Voice's own instructions; a copy in the harness that nothing checks would
-    pass a run where the product had stopped saying either.
+    The old set dictated `已转达` and `收到`, and the step quoted them; a copy in
+    the harness that nothing checked would have passed a run where the product
+    had stopped saying either. Now the product carries the two delivery rules
+    and names the engine's grades, and the step's recogniser is tested against
+    what recorded runs actually said (`test_live_call_harness.py`). What this
+    test holds together is that both halves still exist: the rules in the
+    shipped set, and the grades the recogniser is built around in its text.
     """
     spoken = voice_instructions(
         InstructionContext(
@@ -1671,10 +1672,14 @@ def test_the_grade_wording_the_voice_is_told_to_say_is_what_the_step_looks_for()
                 socket_path=Path("/tmp/gpt-voicecoding-501/control.sock"),
             )
         )
-    ).text
+    )
 
-    assert live_call_step.RELAY_RECEIPT_DELIVERED in spoken
-    assert live_call_step.RELAY_RECEIPT_QUEUED in spoken
+    assert "voice.delivery.tells-the-truth-about-arrival" in spoken.covers
+    assert "voice.delivery.a-refusal-is-an-answer" in spoken.covers
+    assert "arrived" in spoken.text
+    assert "next turn" in spoken.text
+    assert "已转达" not in spoken.text
+    assert "收到" not in spoken.text
 
 
 def test_the_settings_build_the_utterance_from_the_workspace_they_carry() -> None:

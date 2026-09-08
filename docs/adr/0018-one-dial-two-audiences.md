@@ -56,6 +56,24 @@ claim the wire as their reason.
 paragraphs — no headings, bullets, code or key-value text (Simon, 2026-09-01: 控制 voice
 一定要用自然语言而不是代码语言). The agent set may keep its structure.
 
+*Amended 2026-09-08 after [#289](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/289).*
+The paragraph above misread the 2026-09-01 instruction. It was about how the Voice is
+**spoken to and fed** — the user talks to it and the Briefing hands it facts in natural
+language, never in code-like text — not about the format of the prompt that shapes it.
+Two audits (#294, #284) found the prompt this engine sends displaces codex's own
+`backend_prompt.md` outright, in wording and in form, and the three live runs of #288
+found the displaced text missing the rules codex wrote for exactly the failures on
+#283's route. The Voice's prompt is therefore rebuilt as **codex's stock text, in its own
+form and wording, with this engine's overlay after it** — the stock lines kept unless
+falsified on this wire or in conflict with a requirement of this system, mechanism rules
+stock-first, identity rules ours (the Voice speaks for the engine and relays what a
+Session said; terse and slow are added to the stock persona, not substituted for it). The
+"prose only" rendering rule and its docstring in `core/instructions/voice.py` fall with
+this amendment when the rebuilt set lands; the three payloads, the two audiences, the
+coverage gate and the byte budgets stand. Decided in #289; the rebuilt sets are measured
+on the tracer of #288 against the 2026-09-08 09:54 baseline before the ADR that records
+the shaping decision is written.
+
 **Three dial-time switches are the adapter's constants, not `Dial` fields**, because no
 caller varies them: `delegationAckFiller` off (the backend's own "好，等我看一下" filler
 is the wordiness Round 1 Q9 removed), `codexResponsesAsItems` on with a prefix, and

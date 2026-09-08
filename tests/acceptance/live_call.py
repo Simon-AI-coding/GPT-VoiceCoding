@@ -219,10 +219,10 @@ class CallWorkspaces:
 #: kind as the utterances around it, and `journey` imports it for the one
 #: instruction that dictates it.
 #:
-#: Chinese, so the Voice reads it out rather than translating it. It spells
-#: neither `收到` nor `已转达` — both are receipt wordings
-#: (`instructions/voice.py`) an echo of which would pass this grade — and not
-#: the workspace name, which the answer is already graded on elsewhere.
+#: Chinese, so the Voice reads it out rather than translating it. It has no
+#: receipt's shape (`live_call_step._spoken_as_receipt`) — an echo of one would
+#: pass that grade — and not the workspace name, which the answer is already
+#: graded on elsewhere.
 DICTATED_REPLY_FRAGMENT = "接着往下做"
 DICTATED_REPLY = f"那我就{DICTATED_REPLY_FRAGMENT}。"
 

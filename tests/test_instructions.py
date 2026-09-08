@@ -5,13 +5,17 @@ words they chose. That is the whole point of the catalogue: the prose is free to
 be rewritten, translated or restructured, and the suite still fails the moment a
 rule stops being carried or moves to a set that was never meant to have it.
 
-Two things here are asserted about words rather than ids, and both are the
-product decision of ADR 0018 rather than a preference about style. The Voice
-hears **prose** — a heading, a bullet or a backtick in that set is the code
-language Simon ruled out of the `prompt` slot. And the Voice is **never told a
-verb exists**: a Voice handed something it cannot do invents rather than refuses
-(#179), so every control-plane word in its text is an invitation to fabricate.
-Neither claim survives as an id, so each is read off the rendered text.
+Three things here are asserted about words rather than ids, and all three are
+product decisions rather than preferences about style. Each set is **codex's
+Stock Text first, then this engine's Overlay** (ADR 0018 as amended 2026-09-08,
+#289): the stock headings come in codex's order, the prefix the Voice is told
+is the one the adapter dials with, and the lines the fate table removed are
+absent. The Voice is **never told a verb exists**: a Voice handed something it
+cannot do invents rather than refuses (#179), so every control-plane command in
+its text is an invitation to fabricate. And the Voice's set **dictates no
+sentence in any language** — it speaks the engine's grade in the user's own
+(#299). None of the three survives as an id, so each is read off the rendered
+text.
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ from gpt_voicecoding.core.instructions import (
 )
 from gpt_voicecoding.core.instructions import catalogue as catalogue_module
 from gpt_voicecoding.core.instructions import delegated as delegated_module
+from gpt_voicecoding.core.instructions import voice as voice_module
+from gpt_voicecoding.seams.call import CODEX_RESPONSE_ITEM_PREFIX
 from gpt_voicecoding.seams.control_plane import USAGE, Action
 
 CLI = ControlPlaneCli(
@@ -56,9 +62,23 @@ CLI = ControlPlaneCli(
 )
 CONTEXT = InstructionContext(cli=CLI)
 
-#: The clause #240's paragraph is found by. Named once, because a marker
+#: The words each Overlay paragraph is found by. Named once, because a marker
 #: written out at each use is a marker that can drift from its prose.
-OLDER_ENTRIES_MARK = "nothing older than that"
+RECEIPT_MARK = "handed over"
+AUTHORITY_MARK = "own confirmation"
+DETAILS_MARK = "### Details and History"
+
+#: codex's `backend_prompt.md` headings, in codex's order, as the Voice hears
+#: them before anything of this engine's (#289 P1).
+STOCK_VOICE_HEADINGS = (
+    "## Identity, tone, and role",
+    "## Interface and operating model",
+    "## Backend use and steering",
+    "## Backend outputs and user inputs",
+    "## Presenting backend results",
+    "## Task-level user preferences",
+    "## Communication style",
+)
 
 
 def paragraph_with(instructions, mark: str) -> str:
@@ -174,13 +194,28 @@ class TestTheTableIsSettled:
         }
     )
 
+    #: Voice rules retired after #173's table, each by the ticket that ruled it.
+    #: #289 P4 put the shaping of the user's instruction with the Call Agent,
+    #: as the Relayed Instruction, and #288 found the Voice never did it on
+    #: the wire (13 of 13 hand-offs verbatim) — so the Voice's own tidying
+    #: rule was a rule with no behaviour behind it, and #299 deleted the row.
+    RETIRED_SINCE = frozenset({"voice.instruction.one-clean-instruction"})
+
     def test_the_voice_set_is_those_nine_and_what_was_decided_since(self) -> None:
-        """The nine #173 kept, and nothing else but what a later ticket ruled in."""
-        assert ids_for(Audience.VOICE) == self.SURVIVING | self.ADDED_SINCE
+        """The nine #173 kept, less what a later ticket retired, plus what one ruled in."""
+        assert ids_for(Audience.VOICE) == (self.SURVIVING - self.RETIRED_SINCE) | self.ADDED_SINCE
 
     def test_every_retired_rule_is_gone_from_the_catalogue(self) -> None:
         known = {rule.id for rule in RULES}
         assert not known & set(self.RETIRED)
+        assert not known & self.RETIRED_SINCE
+
+    def test_the_relay_rule_carries_the_relayed_instruction(self) -> None:
+        """#289 P4: shaping moved to the half that reads the transcript, under the same id."""
+        rule = BY_ID["agent.relay.carries-the-users-words"]
+        assert rule.audience is Audience.AGENT
+        assert rule.source == "issue/289"
+        assert "Relayed Instruction" in rule.gist
 
     #: Every rule the catalogue still owes, by id. The audit that replaces the
     #: file-line totality #193 retired: a rule deleted without a decision fails
@@ -239,7 +274,9 @@ class TestTheTableIsSettled:
         name, and adding one is a decision somebody writes down in the same
         commit — in one of the three sets, which is the decision.
         """
-        assert {rule.id for rule in RULES} == self.RETAINED | self.SURVIVING | self.ADDED_SINCE
+        assert {rule.id for rule in RULES} == (
+            self.RETAINED | (self.SURVIVING - self.RETIRED_SINCE) | self.ADDED_SINCE
+        )
 
     def test_the_history_rule_moved_to_the_call_agent_under_its_own_name(self) -> None:
         """#190's deferred key: a read belongs to the acting half, so the id says so."""
@@ -443,42 +480,64 @@ class TestTheTwoBudgets:
             generate(CONTEXT)
 
 
-class TestTheVoiceHearsProse:
+class TestTheVoiceHearsStockTextThenOverlay:
+    """ADR 0018 as amended: codex's `backend_prompt.md` first, this engine's Overlay after."""
+
     def test_the_engine_hands_the_words_and_the_voice_is_told_how(self, instructions):
         voice = instructions.voice.text
         assert "This person opened the call themselves" not in voice
         assert "Speak what the engine hands you when it hands it" in voice
         assert "otherwise wait to be spoken to" in voice
 
-    """ADR 0018: the Voice's set is natural language, and names no mechanism."""
+    def test_the_stock_headings_come_first_and_in_codexs_order(self, instructions) -> None:
+        """P1: stock text in its own form and wording, and the Overlay after all of it."""
+        voice = instructions.voice.text
+        headings = (*STOCK_VOICE_HEADINGS, f"## {voice_module.OVERLAY_TITLE}")
+        at = [voice.find(heading) for heading in headings]
+        assert all(place >= 0 for place in at), dict(zip(headings, at, strict=True))
+        assert at == sorted(at), dict(zip(headings, at, strict=True))
+        assert voice.startswith(STOCK_VOICE_HEADINGS[0])
 
-    #: A heading, a bullet, a fenced or inline code span, and a `key: value`
-    #: line — the four shapes of "code language" the `prompt` slot must not
-    #: carry. Matched per line, because that is what each of them is.
-    NOT_PROSE = {
-        "a markdown heading": re.compile(r"^\s*#"),
-        "a list marker": re.compile(r"^\s*[-*+•]\s"),
-        "a code span": re.compile(r"`"),
-        "a key: value line": re.compile(r"^\s*\S[^:\n]{0,30}:\s"),
-    }
+    def test_the_prefix_the_voice_is_told_is_the_one_the_adapter_dials_with(
+        self, instructions
+    ) -> None:
+        """#287 §7 F3: v3 applies neither stock prefix; the seam constant is the one it sees."""
+        voice = instructions.voice.text
+        assert f"prefixed with `{CODEX_RESPONSE_ITEM_PREFIX}`" in voice
+        assert "[USER] " not in voice
+        assert "[BACKEND] " not in voice
 
-    #: Every control-plane word the Voice may not be told about, as a word.
+    #: One phrase from each stock line the fate table removed or corrected
+    #: (`scripts/prompts/stock-overlay/review.md`): codex's identity, the two
+    #: first-person-ownership lines, the visible-surface lines, and the
+    #: completion tool return frameless never sends (#294, #296).
+    REMOVED_STOCK_PHRASES = (
+        "You are Codex",
+        "Present every work as done by you",
+        "Present the updates/result as if done by you",
+        "sending text directly to the backend",
+        "user-visible artifacts",
+        "the user can always send requests directly",
+        "backend-visible output",
+        "tool return indicating completion",
+    )
+
+    @pytest.mark.parametrize("phrase", REMOVED_STOCK_PHRASES)
+    def test_a_stock_line_the_fate_table_removed_is_absent(self, phrase, instructions) -> None:
+        assert phrase not in instructions.voice.text
+
+    #: Every control-plane command the Voice may not be told about, as a word.
     #: `live` has to be a word: `delivered` contains it, and a substring test
     #: would have failed on a sentence about delivery.
     #:
-    #: **`brief` and `relay` are deliberately not here.** Both are also ordinary
-    #: English for what this half does, and the ticket fixes the sentences that
-    #: use them that way — the Session Brief and the Roster Brief are Briefing's
-    #: own nouns (#166), and "you relay what the engine handed you" is #173 §3.1's
-    #: own wording. What this test can still prove is that no command is named:
-    #: no CLI, and none of the words below.
-    VERBS = re.compile(r"\b(bridgectl|status|switch|history|approve|verify|live)\b", re.IGNORECASE)
-
-    @pytest.mark.parametrize("shape", sorted(NOT_PROSE))
-    def test_the_voice_text_carries_none_of_the_code_shapes(self, shape, instructions) -> None:
-        pattern = self.NOT_PROSE[shape]
-        offenders = [line for line in instructions.voice.text.splitlines() if pattern.search(line)]
-        assert not offenders, f"the voice set contains {shape}: {offenders}"
+    #: **`brief`, `relay`, `history` and `status` are deliberately not here.**
+    #: All four are also ordinary English for what this half hears and says:
+    #: the Session Brief and Roster Brief are Briefing's own nouns (#166), "you
+    #: relay what a Session said" is the identity paragraph, `History` is the
+    #: record's name in `CONTEXT.md`, and `status` is stock's own word for what
+    #: to tell the user. What this test can still prove is that no command is
+    #: named: no CLI, and none of the words below.
+    VERBS = re.compile(r"\b(bridgectl|switch|approve|verify|live)\b", re.IGNORECASE)
 
     def test_the_voice_is_never_told_a_verb_exists(self, instructions) -> None:
         """A Voice handed something it cannot do invents rather than refuses (#179)."""
@@ -486,7 +545,7 @@ class TestTheVoiceHearsProse:
         assert not found, f"the voice set names control-plane verbs: {sorted(set(found))}"
 
     def test_the_voice_set_names_no_cli(self, instructions) -> None:
-        """The invocation moved to the half that can run it."""
+        """The invocation lives with the half that can run it."""
         assert str(CLI.command) not in instructions.voice.text
         assert str(CLI.socket_path) not in instructions.voice.text
 
@@ -509,30 +568,34 @@ class TestTheVoiceHearsProse:
         )
         assert elsewhere.text == voice_instructions(CONTEXT).text
 
-    def test_it_is_eleven_paragraphs_in_the_order_the_ticket_fixes(self, instructions) -> None:
-        """Nine from #173's order, the authority clause #234 added after the receipt,
-        and the older-entries hand-off #240 added after the delegation paragraph."""
-        paragraphs = [part for part in instructions.voice.text.split("\n\n") if part.strip()]
-        assert len(paragraphs) == 11
-
-    def test_the_paragraphs_run_in_the_0901_order(self, instructions) -> None:
-        """#173 §3: who you are, the opened call, the two briefs, and so on to hanging up."""
+    def test_the_overlay_runs_in_the_order_299_fixed(self, instructions) -> None:
+        """Identity, the opening rule, the two Briefs, the receipt, the authority
+        clause, and Details and History — all of it after the Overlay heading."""
+        voice = instructions.voice.text
         marks = (
-            "what it did not hand you, you do not have",
+            f"## {voice_module.OVERLAY_TITLE}",
+            "You are the voice of an engine",
             "Speak what the engine hands you",
             "Session Brief",
             "Roster Brief",
-            "five at a time",
-            "their own words",
-            "已转达",
-            "不一定当成你本人的确认",
-            "wait to be asked",
-            "the half behind you",
-            OLDER_ENTRIES_MARK,
+            RECEIPT_MARK,
+            AUTHORITY_MARK,
+            DETAILS_MARK,
         )
-        at = [instructions.voice.text.find(mark) for mark in marks]
+        at = [voice.find(mark) for mark in marks]
         assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
         assert at == sorted(at), dict(zip(marks, at, strict=True))
+
+    def test_the_voice_dictates_no_sentence_in_any_language(self, instructions) -> None:
+        """#299: the Voice speaks the engine's grade in the user's language.
+
+        The old set spelled two Chinese receipt sentences, and the acceptance
+        walk graded delivery by them; now the walk reads the shape of the
+        statement (`tests/acceptance/live_call_step.py`), and the prompt carries
+        no sentence the Voice is to say verbatim in any language but its own
+        instructions'. No CJK in the set is the checkable form of that.
+        """
+        assert re.search(r"[\u3400-\u9fff]", instructions.voice.text) is None
 
     def test_the_undelivered_reply_is_spoken_between_the_state_and_the_newest(
         self, instructions
@@ -554,44 +617,43 @@ class TestTheVoiceHearsProse:
         assert "whichever of the two it said" in instructions.voice.text
         assert "say that it did not and" not in instructions.voice.text
 
-    def test_the_post_relay_sentences_are_the_ones_round_1_settled(self, instructions) -> None:
-        assert "已转达" in instructions.voice.text
-        assert "收到，等它这轮结束送进去" in instructions.voice.text
-
     @staticmethod
     def _receipt_paragraph(instructions) -> str:
-        """The one paragraph #173 §3.7 fixes, found by the word it settles on."""
-        return paragraph_with(instructions, "已转达")
+        """The one paragraph #173 §3.7 fixes, found by the moment it starts at."""
+        return paragraph_with(instructions, RECEIPT_MARK)
 
     def test_the_hand_off_moment_is_spoken_of_before_the_receipt(self, instructions) -> None:
-        """#221: the Voice said 已转达 at hand-off, seconds before the relay ran.
+        """#221: the Voice said the delivered word at hand-off, seconds before the relay ran.
 
-        The paragraph now reaches the hand-off moment first and tells the Voice
-        what it may say there, so the receipt wording is no longer the only
-        sentence in view when the words go out.
+        The paragraph reaches the hand-off moment first and says what is known
+        there, so the grade is never the only sentence in view when the words
+        go out.
         """
         paragraph = self._receipt_paragraph(instructions)
-        marks = (
-            "hand them over",
-            "leave arrival out of it",
-            "已转达",
-        )
+        marks = (RECEIPT_MARK, "say that much or nothing", "grades it", "once, after it returns")
         at = [paragraph.find(mark) for mark in marks]
         assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
         assert at == sorted(at), dict(zip(marks, at, strict=True))
 
-    def test_the_receipt_is_named_as_spoken_once_and_only_after_the_outcome(
-        self, instructions
-    ) -> None:
-        """One receipt, from the grade the relay earned — not two, and not none."""
+    def test_the_receipt_is_the_engines_grade_and_its_reason(self, instructions) -> None:
+        """The four truths of `seams/delivery.py`, as the user hears them, and a refusal
+        answered the same way (`voice.delivery.a-refusal-is-an-answer`)."""
         paragraph = self._receipt_paragraph(instructions)
-        assert "comes once" in paragraph
-        assert "only then" in paragraph
+        for grade in ("arrived", "next turn", "held", "failed"):
+            assert grade in paragraph, grade
+        assert "reason for anything but an arrival" in paragraph
+        assert "A refusal is answered the same way" in paragraph
+
+    def test_the_voice_stops_after_the_receipt(self, instructions) -> None:
+        """One receipt, and then silence unless asked (#198)."""
+        paragraph = self._receipt_paragraph(instructions)
+        assert "Then stop" in paragraph
+        assert "only when they ask" in paragraph
 
     @staticmethod
     def _authority_paragraph(instructions) -> str:
         """The paragraph #234 added, found by the clause it dictates."""
-        return paragraph_with(instructions, "不一定当成你本人的确认")
+        return paragraph_with(instructions, AUTHORITY_MARK)
 
     def test_the_two_answers_that_carry_authority_escape_the_clause(self, instructions) -> None:
         """ADR 0013 §3 as the user hears it: which answers are the user's own.
@@ -613,12 +675,7 @@ class TestTheVoiceHearsProse:
     def test_every_other_answer_gets_the_clause(self, instructions) -> None:
         """Both of the two ways a question can fall outside the hook are named."""
         paragraph = self._authority_paragraph(instructions)
-        marks = (
-            "Every other answer",
-            "merely said",
-            "no longer offers from here",
-            "不一定当成你本人的确认",
-        )
+        marks = ("Every other answer", "merely said", "no longer offers from here", AUTHORITY_MARK)
         at = [paragraph.find(mark) for mark in marks]
         assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
         assert at == sorted(at), dict(zip(marks, at, strict=True))
@@ -627,80 +684,78 @@ class TestTheVoiceHearsProse:
         """#234's evidence: two runs, same product, opposite readings by the Session.
 
         Which way it goes is the Session's own call, so the Voice says what the
-        words are and stops — a guess either way is the invention this set's
-        first paragraph forbids.
+        words are and stops — a guess either way is an invented answer.
         """
         paragraph = self._authority_paragraph(instructions)
-        assert "its own" in paragraph
-        assert "guess" in paragraph
-
-    def test_the_hand_off_sentence_repeats_no_receipt_wording(self, instructions) -> None:
-        """Naming the word to forbid it is how the Voice comes to say it.
-
-        And a prohibition is what this file's own history warns against (#194):
-        so each settled receipt word appears exactly once, in the sentence that
-        tells the Voice when to say it.
-        """
-        paragraph = self._receipt_paragraph(instructions)
-        assert paragraph.count("已转达") == 1
-        assert paragraph.count("收到，等它这轮结束送进去") == 1
-        assert "已送达" not in instructions.voice.text
+        assert "its own call" in paragraph
+        assert "never guess" in paragraph
 
 
-class TestOlderEntriesAreHandedOff:
-    """#240: the Voice had no rule that a Session's earlier record is not its to answer.
+class TestDetailsAndHistory:
+    """The Overlay section Simon approved in #299, and the three rules it carries.
 
-    The graded fact `history ran history for Session` went `False` on three runs
-    of an instruction set that passed it on nine others — the request for older
-    entries reached no rule, so whether it was handed on was the model's guess.
+    Current detail is explained from what was supplied or fetched; earlier
+    records come from the backend a page at a time (#240: the request for a
+    Session's older entries reached no rule on three runs of twelve, so whether
+    it was handed on was the model's guess); and a partial answer says which
+    part is missing and why (`voice.notice.says-what-could-not-be-read`).
     """
 
     @staticmethod
-    def _older_paragraph(instructions) -> str:
-        """The paragraph #240 added, found by what it says the hand-over lacks."""
-        return paragraph_with(instructions, OLDER_ENTRIES_MARK)
+    def _section(instructions) -> str:
+        """The section from its own heading to the end of the set, which it closes."""
+        voice = instructions.voice.text
+        assert voice.count(DETAILS_MARK) == 1
+        return voice[voice.index(DETAILS_MARK) :]
 
-    def test_it_names_what_the_hand_over_holds_and_what_it_does_not(self, instructions) -> None:
-        """The premise the Voice was answering from, said out loud rather than assumed."""
-        paragraph = self._older_paragraph(instructions)
-        assert "waiting on" in paragraph
-        assert "newest" in paragraph
-
-    def test_what_is_missing_is_the_record_behind_the_newest_message(self, instructions) -> None:
-        """Not "nothing fuller than what you said": that would hand the whole newest
-        message back over the boundary, which is the re-fetch #220 forbids, and the
-        paragraph above has this half tell them that message whole."""
-        paragraph = self._older_paragraph(instructions)
-        assert "no fuller record standing behind it" in paragraph
-        assert "nothing fuller than that" not in instructions.voice.text
-
-    def test_a_request_for_the_earlier_record_goes_to_the_other_half(self, instructions) -> None:
-        """The hand-off, in the order the Voice meets it: the ask, then where it goes."""
-        paragraph = self._older_paragraph(instructions)
-        marks = ("said before that", "not something you are holding", "the half behind you")
-        at = [paragraph.find(mark) for mark in marks]
+    def test_current_detail_is_explained_from_what_was_supplied_or_fetched(
+        self, instructions
+    ) -> None:
+        section = self._section(instructions)
+        marks = (
+            "newest message in full",
+            "every option with its meaning",
+            "ask the backend to obtain the requested detail if it is missing",
+            "not earlier records",
+        )
+        at = [section.find(mark) for mark in marks]
         assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
         assert at == sorted(at), dict(zip(marks, at, strict=True))
 
-    def test_it_says_where_the_five_at_a_time_come_from(self, instructions) -> None:
-        """The detail paragraph says older messages come in fives and never from where.
+    def test_earlier_records_come_from_the_backend_a_page_at_a_time(self, instructions) -> None:
+        """#240, in the order the Voice meets it: the ask, where it goes, and what
+        the hand-over does not hold."""
+        section = self._section(instructions)
+        marks = (
+            "said earlier",
+            "ask the backend for History",
+            "five entries",
+            "next older page",
+            "does not supply those earlier records",
+        )
+        at = [section.find(mark) for mark in marks]
+        assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
+        assert at == sorted(at), dict(zip(marks, at, strict=True))
 
-        Unjoined, the Voice holds one paragraph in which they arrive and a later
-        one in which it has none of them.
-        """
-        assert "Older messages come five at a time" in instructions.voice.text
-        assert "five at a time" in self._older_paragraph(instructions)
+    def test_a_partial_answer_is_said_to_be_partial(self, instructions) -> None:
+        section = self._section(instructions)
+        assert "unavailable or truncated" in section
+        assert "give the reason supplied with the result" in section
 
-    def test_it_neither_guesses_the_contents_nor_denies_them(self, instructions) -> None:
-        """Both failing shapes: an invented older message, and 更早的消息没有提供."""
-        paragraph = self._older_paragraph(instructions)
-        assert "do not guess" in paragraph
-        assert "there is nothing older" in paragraph
-
-    def test_the_existing_delegation_sentence_is_not_weakened(self, instructions) -> None:
-        """#220 and #194 stand: what the hand-over holds is still answered from it."""
-        sentence = "never pass such a question on to fetch what you are already holding"
-        assert instructions.voice.text.count(sentence) == 1
+    def test_the_section_is_the_block_that_carries_the_three_rules(self) -> None:
+        """Coverage is claimed by the block that says it, not by a neighbour."""
+        blocks = [
+            block
+            for section in voice_instructions(CONTEXT).sections
+            for block in section.blocks
+            if block.text.startswith(DETAILS_MARK)
+        ]
+        assert len(blocks) == 1
+        assert set(blocks[0].covers) == {
+            "voice.notice.invents-no-detail",
+            "voice.notice.says-what-could-not-be-read",
+            "voice.delegation.older-entries-are-not-held",
+        }
 
     def test_the_rule_is_the_voices_alone(self) -> None:
         """The paging rule is the Call Agent's and correct; this half gains no verb."""
@@ -749,17 +804,17 @@ class TestTheAgentSetIsTheActingHalf:
     def test_the_rendered_set_names_no_action_it_may_not_run(self, instructions) -> None:
         """The voice call neither queries nor flips switches, nor opens a screen (#173, #264).
 
-        Read off the rendered action lines — the indented `<usage> — <gist>`
-        rows — rather than off every word of the prose: `sessions` is an
-        ordinary word in the gist that explains `brief`, and a withheld verb
-        is withheld as a *form the agent may run*, not as a word.
+        Read off the rendered usage lines — one form in backticks under each
+        entry's heading — rather than off every word of the prose: `sessions`
+        is an ordinary word in the sentence that explains `brief`, and a
+        withheld verb is withheld as a *form the agent may run*, not as a word.
         """
-        listed = [
-            line.strip() for line in instructions.agent.text.splitlines() if line.startswith("    ")
-        ]
+        lines = instructions.agent.text.splitlines()
+        listed = [line.strip("`") for line in lines if line.startswith("`") and line.endswith("`")]
         for action in WITHHELD_ACTIONS:
             named = [line for line in listed if line.startswith(USAGE[action])]
             assert named == [], f"the agent set names {action}: {named}"
+            assert f"### {action}" not in lines, f"the agent set has an entry for {action}"
 
     def test_it_names_the_cli_the_context_gave_it(self, instructions) -> None:
         assert str(CLI.command) in instructions.agent.text
@@ -780,35 +835,68 @@ class TestTheAgentSetIsTheActingHalf:
         assert str(CLI.command) not in elsewhere.text
         assert elsewhere.text != instructions.agent.text
 
-    def test_the_card_puts_the_decision_in_brief_and_the_record_in_history(
+    @staticmethod
+    def _entry(instructions, action: Action) -> str:
+        """One tool's entry: from its `### <action>` heading to the next heading or the end."""
+        text = instructions.agent.text
+        start = text.index(f"### {action}\n")
+        following = text.find("\n### ", start + 1)
+        return text[start : following if following >= 0 else len(text)]
+
+    def test_the_stock_text_opens_the_set_and_the_tools_follow(self, instructions) -> None:
+        """P1: `realtime_start.md` in codex's own words, then one Engine tools section."""
+        text = instructions.agent.text
+        assert text.startswith("Realtime conversation started.\n")
+        marks = (
+            "may invoke you even when backend help is not actually needed",
+            "Use the transcript to decide whether you should do work",
+            "contain recognition errors",
+            "## Engine tools",
+        )
+        at = [text.find(mark) for mark in marks]
+        assert all(place >= 0 for place in at), dict(zip(marks, at, strict=True))
+        assert at == sorted(at), dict(zip(marks, at, strict=True))
+
+    def test_each_given_action_has_one_entry_in_173s_order(self, instructions) -> None:
+        text = instructions.agent.text
+        at = [text.find(f"### {action}\n") for action in AGENT_ACTIONS]
+        assert all(place >= 0 for place in at), dict(zip(AGENT_ACTIONS, at, strict=True))
+        assert at == sorted(at), dict(zip(AGENT_ACTIONS, at, strict=True))
+        for action in AGENT_ACTIONS:
+            assert f"`{USAGE[action]}`" in self._entry(instructions, action), action
+
+    def test_the_entries_put_the_decision_in_brief_and_the_record_in_history(
         self, instructions
     ) -> None:
         """#277: asked what needed deciding, the Call Agent ran `history` twice.
 
         `brief <address>` held the parked question and its four options
         throughout; `history` cannot, because a pending question reaches the
-        engine by hook before the transcript holds it. So the card names the
-        decision on the `brief` line and the record on the `history` line, and
-        a paragraph says which read answers which ask. Graded on the rendered
-        text, because that is what the Call Agent hears.
+        engine by hook before the transcript holds it. So the brief entry owns
+        the current decision and says so, and the history entry owns the
+        earlier messages. Graded on the rendered text, because that is what the
+        Call Agent hears.
         """
-        lines = instructions.agent.text.splitlines()
-        brief = next(line for line in lines if USAGE[Action.BRIEF] in line)
-        history = next(line for line in lines if USAGE[Action.HISTORY] in line)
-        live = next(line for line in lines if line.strip().startswith(USAGE[Action.LIVE]))
-        assert "now" in brief and "options" in brief, brief
-        assert "record" in history, history
-        assert live.strip().endswith("end the call that is up"), live
+        brief = self._entry(instructions, Action.BRIEF)
+        history = self._entry(instructions, Action.HISTORY)
+        assert "current decision" in brief and "options" in brief, brief
+        assert "belong here, not in History" in brief, brief
+        assert "earlier messages" in history, history
+        assert "`--before` value supplied by the previous page" in history, history
         assert "agent.brief.is-the-session-now" in instructions.agent.covers
-        assert re.search(
-            r"what it needs decided[^\n]*`brief <address>`", instructions.agent.text
-        ), instructions.agent.text
+
+    def test_the_relay_entry_carries_the_relayed_instruction(self, instructions) -> None:
+        """#289 P4: shaping is this half's, and the receipt's meaning sits beside it."""
+        relay = self._entry(instructions, Action.RELAY)
+        assert "one complete Relayed Instruction" in relay
+        assert "add, expand, decide and choose nothing" in relay
+        assert "only `delivered` means the words arrived" in relay
 
     def test_it_says_which_verb_ends_the_call(self, instructions) -> None:
         """#179, 3 of 3: told this, the Call Agent ran it on every spoken request."""
-        assert re.search(r"\blive\b[^\n]*end", instructions.agent.text) or re.search(
-            r"end[^\n]*\blive\b", instructions.agent.text
-        )
+        live = self._entry(instructions, Action.LIVE)
+        assert "run this command to end the call" in live
+        assert "A spoken goodbye does not end it" in live
 
     def test_an_action_nobody_explained_stops_generation(self, monkeypatch) -> None:
         from gpt_voicecoding.core.instructions import agent as agent_module

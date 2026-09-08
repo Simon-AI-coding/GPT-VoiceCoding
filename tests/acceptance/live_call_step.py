@@ -386,27 +386,49 @@ LIVE_CALL_EARLIER_HEARD_SUBSTRING = live_call.HEARD_FRAGMENTS[live_call.EARLIER]
 
 HEARD_FRAGMENTS = live_call.HEARD_FRAGMENTS
 
-#: What the Voice is told to say once the engine has graded the user's words
-#: (`core/instructions/voice.py`, #193 §Voice): `已转达` when the relay was
-#: delivered, `收到` when it is queued behind that Session's turn, and one clause
-#: of the engine's reason otherwise. Quoted here because the run cannot know
-#: which grade a real relay earned — a Session that happens to be mid-turn queues
-#: it — so what is graded is that the user was told *one of the two*, matched as
-#: a substring per #181. The third branch is the engine's own sentence and is not
-#: pinned: a walk whose relay neither arrived nor queued has lost its premise
-#: before this line reads anything.
-RELAY_RECEIPT_DELIVERED = "已转达"
+#: How a spoken relay receipt is recognised (#299). The Voice is told to say
+#: the grade the engine returned — arrived, waiting for that Session's next
+#: turn, held, or failed — once, after the receipt, in the user's own language
+#: (`core/instructions/voice.py`); it is no longer handed a sentence to say. So,
+#: for `UNDELIVERED_SPOKEN_PATTERN`'s reason, what is pinned is the **shape** of
+#: the statement and not its wording. The run cannot know which grade a real
+#: relay earned — a Session that happens to be mid-turn queues it — so the step
+#: accepts either of the two a healthy walk can produce; the other grades carry
+#: the engine's reason and a walk that earned one has lost its premise before
+#: this line reads anything.
+#:
+#: **Arrived**: a verb of the words going over, completed, and not negated —
+#: `已转达` and `已送达` are what every recorded run said, and `已经转达给它了` is the
+#: same statement. The completion marker is half of what is matched: `在转达`
+#: (run `20260903T233723Z`, said at hand-off) is the words going and not gone,
+#: which is #221's premature receipt, and it stays out.
+ARRIVAL_VERBS = r"(?:转达|送达|送到|送进|传达|带到|交给|转告)"
+DELIVERED_SPOKEN_PATTERN = (
+    rf"(?:已经?|都)[^，,。.；;！!？?没沒冇未]{{0,4}}{ARRIVAL_VERBS}"
+    rf"|(?<![没沒冇未]){ARRIVAL_VERBS}[^，,。.；;！!？?]{{0,3}}了"
+)
 
-#: The delivered receipt permits the two product-observed synonyms, so the
-#: grade is delivery rather than the Voice's wording choice (#193).
-DELIVERED_SPOKEN_PATTERN = r"已[转送]达"
+#: **Waiting for the Session's next turn**: a wait on the turn ending, or a
+#: queue — `等它这轮结束送进去` and `等这轮结束后交给它` are the recorded forms.
+QUEUED_SPOKEN_PATTERN = r"等[^，,。.；;！!？?]{0,8}(?:结束|完|下一?轮|空)|排队"
 
-RELAY_RECEIPT_QUEUED = "收到"
+#: The two a relay can earn, as the step looks for them.
+RECEIPT_SPOKEN_PATTERNS = (DELIVERED_SPOKEN_PATTERN, QUEUED_SPOKEN_PATTERN)
 
-#: The two a relay can earn, as the step looks for them. `收到` stays a word:
-#: #193 §Voice dictates it for a queued relay and no run has yet spelled it any
-#: other way.
-RECEIPT_SPOKEN_PATTERNS = (DELIVERED_SPOKEN_PATTERN, re.escape(RELAY_RECEIPT_QUEUED))
+
+def _spoken_as_receipt(said: str) -> bool:
+    """Whether one recorded Voice line states a relay's grade (#299).
+
+    Spaceless for `_voice_said_something_carrying`'s reason. A line that says
+    the words did **not** arrive is the other receipt (`UNDELIVERED_SPOKEN_PATTERN`)
+    and never this one, whatever else it carries: `上次回复没送达，因为超时了`
+    ends on 了 and must not read as an arrival.
+    """
+    line = _unspaced(said)
+    if re.search(UNDELIVERED_SPOKEN_PATTERN, line):
+        return False
+    return any(re.search(pattern, line) for pattern in RECEIPT_SPOKEN_PATTERNS)
+
 
 #: How the engine says its own Silence Ceiling ended a call. A pattern rather
 #: than an imported string because the line carries the configured number
@@ -464,7 +486,7 @@ def _hand_over_kinds(line: str) -> list[str]:
     return [kind.strip() for kind in tail[1].split(",") if kind.strip() not in ("", "none")]
 
 
-def _unaccounted_voice_turns(lines: list[str], receipts: tuple[str, ...]) -> int | None:
+def _unaccounted_voice_turns(lines: list[str]) -> int | None:
     """Assistant turns after a spoken receipt that no engine payment accounts for (#198).
 
     The ticket asks that the Voice say the grade the engine gave the user's words
@@ -478,9 +500,8 @@ def _unaccounted_voice_turns(lines: list[str], receipts: tuple[str, ...]) -> int
     Voice going on by itself, which is what the ticket forbids.
 
     `None` when no line carrying a receipt is there at all: that is a different
-    failure and the caller has already asked about it. `receipts` are patterns
-    rather than words (`DELIVERED_SPOKEN_PATTERN`), searched against the line
-    with its spaces taken out for `_user_speech_lines`' reason.
+    failure and the caller has already asked about it. A receipt is recognised
+    by its shape (`_spoken_as_receipt`), never by a dictated wording.
 
     **The window this counts over starts at the relay, not at the utterance.**
     A receipt spoken *before* the relay ran is #221's symptom — the Voice says
@@ -496,8 +517,7 @@ def _unaccounted_voice_turns(lines: list[str], receipts: tuple[str, ...]) -> int
         (
             index
             for index, line in enumerate(lines)
-            if re.search(VOICE_SAID_PATTERN, line)
-            and any(re.search(pattern, _unspaced(line)) for pattern in receipts)
+            if re.search(VOICE_SAID_PATTERN, line) and _spoken_as_receipt(line)
         ),
         None,
     )
@@ -1735,7 +1755,7 @@ class _LiveCallRun:
         # is #221's separate symptom, not this phase's product grade.
         at_relay = len(self.engine.log_lines())
         receipted = self._while_the_call_is_up(
-            lambda: bool(self._voice_said_matching(RECEIPT_SPOKEN_PATTERNS, since=at_relay)),
+            lambda: bool(self._voice_said_receipts(since=at_relay)),
             deadline_seconds=LIVE_CALL_ANSWER_SECONDS,
         )
         # **Delivery is read off the Session's next turn, not off the record
@@ -1764,13 +1784,11 @@ class _LiveCallRun:
         # over is the one the payment would have fallen in.
         since_relay = self._log_since(at_relay)
         payments = support.matching_lines(since_relay, MID_CALL_SPOKEN_PATTERN)
-        unaccounted = _unaccounted_voice_turns(since_relay, RECEIPT_SPOKEN_PATTERNS)
-        # #221's symptom, recorded rather than graded: a receipt-worded turn
+        unaccounted = _unaccounted_voice_turns(since_relay)
+        # #221's symptom, recorded rather than graded: a receipt-shaped turn
         # between the utterance going out and the relay running. It is left out
         # of the count above by where that window starts.
-        premature = self._voice_said_matching(
-            RECEIPT_SPOKEN_PATTERNS, since=relaying, until=at_relay
-        )
+        premature = self._voice_said_receipts(since=relaying, until=at_relay)
         further = self._verbs_run(since=runs_at_relay)
         facts.record("relay runs", relays)
         facts.record("relay named focus", any(focus_address in verb for verb in relays))
@@ -1815,10 +1833,10 @@ class _LiveCallRun:
             "Voice gave relay receipt",
             receipted,
             (
-                f"the words reached the Session and the Voice never told the user so. #193 "
-                f"§Voice has it say {RELAY_RECEIPT_DELIVERED!r} for a delivered relay and "
-                f"{RELAY_RECEIPT_QUEUED!r} for one queued behind that Session's turn. What it "
-                f"said after the relay went out: "
+                f"the words reached the Session and the Voice never told the user so. The "
+                f"Voice says the engine's grade in the user's language (#299), and the step "
+                f"reads an arrival as {DELIVERED_SPOKEN_PATTERN!r} or a wait on the Session's "
+                f"turn as {QUEUED_SPOKEN_PATTERN!r}. What it said after the relay went out: "
                 f"{self._voice_said_lines(since=at_relay) or 'nothing this call recorded'}. "
                 f"Before it (#221, not this grade): {premature or 'nothing'}"
             ),
@@ -3094,16 +3112,13 @@ class _LiveCallRun:
             for line in support.matching_lines(self._log_since(since), VOICE_SAID_PATTERN)
         ]
 
-    def _voice_said_matching(
-        self, patterns: tuple[str, ...], *, since: int, until: int | None = None
-    ) -> list[str]:
-        """The Voice's turns in a window that match any of `patterns` (#198, #221).
+    def _voice_said_receipts(self, *, since: int, until: int | None = None) -> list[str]:
+        """The Voice's turns in a window that state a relay's grade (#198, #221, #299).
 
-        A pattern rather than a word for `UNDELIVERED_SPOKEN_PATTERN`'s reason,
+        A shape rather than a word for `UNDELIVERED_SPOKEN_PATTERN`'s reason,
         and a window with two ends because phase 3 has two of them to tell apart:
         what the Voice said after the relay ran, which is the receipt, and what
-        it said before, which is #221. Spaceless for
-        `_voice_said_something_carrying`'s reason.
+        it said before, which is #221.
         """
         window = self._log_since(since)
         if until is not None:
@@ -3111,7 +3126,7 @@ class _LiveCallRun:
         return [
             line.strip()
             for line in support.matching_lines(window, VOICE_SAID_PATTERN)
-            if any(re.search(pattern, _unspaced(line)) for pattern in patterns)
+            if _spoken_as_receipt(line)
         ]
 
     def _voice_said_something_carrying(self, fragment: str, *, since: int) -> bool:

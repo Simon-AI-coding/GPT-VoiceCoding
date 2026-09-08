@@ -2,7 +2,7 @@
 
 Prepared for [the stock-plus-overlay tracer task](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/299). Simon approved the revised Call Agent text on 2026-09-08. The current revisions have not been live-tested.
 
-Source: `openai/codex`, `rust-v0.153.4`, commit `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`, `codex-rs/prompts/templates/realtime/`. These are probe inputs; the shipping catalogue is unchanged.
+Source: `openai/codex`, `rust-v0.153.4`, commit `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`, `codex-rs/prompts/templates/realtime/`. These began as probe inputs; on 2026-09-08 Simon had them installed in the shipping catalogue (`core/instructions/{voice,agent}.py`), whose rendered text is the two files here plus the two Overlay paragraphs recorded under **Installed** below.
 
 After the 12:14 and 12:26 runs, Simon requested restoring stock L9 (the user-name template) and L48 (the full spoken-summary sentence). The current Voice file includes both restorations; it has not been dialled. The earlier runs retain their actual prompt text in their JSONL records. The template remains literal; this edit adds no name substitution.
 
@@ -110,13 +110,25 @@ One Engine tools section adds the runtime invocation and shared calling rules, f
 - `approve` and `live` each own their purpose and invocation. The hang-up requirement appears only with `live`.
 - Shared response rules retain whole engine output, evidence of success, and stopping on refusal/failure. Address provenance and fresh requested reads remain with shared invocation rules. The statement that reads have no side effects is omitted; it describes tool behavior rather than an agent action.
 
-The tracer fills `{{ tracer_cli_invocation }}` and `{{ engine_version }}` from this run's stand-in command, socket and version before recording and sending the text. The shipping catalogue is unchanged.
+The tracer fills `{{ tracer_cli_invocation }}` and `{{ engine_version }}` from this run's stand-in command, socket and version before recording and sending the text. The shipping catalogue generates the same text from the engine's own invocation.
 
 ## Measurement
 
 The two recorded runs used earlier prompt revisions: `20260908T001434Z-tracer` and `20260908T002654Z-tracer` under `docs/research/probes/`. Simon accepted three Relay samples across them: a greeting, a multi-part instruction, and repeated corrections. Their comparisons were posted on the task; they do not validate the current revised files. Duplicate hand-offs and speech into unfinished requests were observed. Simon excluded further interruption scenarios. Spoken hang-up was not measured.
 
-The task remains open for disposition of the current revision's measurement; approving this text does not claim live acceptance or install it in the shipping catalogue.
+The task remains open for disposition of the current revision's measurement; approving this text does not claim live acceptance.
+
+## Installed
+
+Simon decided on 2026-09-08 to install the approved text as the shipping catalogue before the remaining measurements. The catalogue's coverage gate refuses a set that drops a rule, and the Voice file above carries none of four rules the old set had. Disposition, decided with Simon:
+
+| Rule | Disposition |
+| --- | --- |
+| `voice.instruction.one-clean-instruction` | Retired. P4 puts shaping with the Call Agent; `agent.relay.carries-the-users-words` is re-gisted to the Relayed Instruction (source `issue/289`). The Voice never rewrote a hand-off on the wire (#288, 13/13). |
+| `voice.delivery.tells-the-truth-about-arrival`, `voice.delivery.a-refusal-is-an-answer` | One Overlay paragraph after the Roster Brief, positive and without the dictated `已转达` / `收到，等它这轮结束送进去`: at hand-off the Voice knows only that the words were handed over; the engine's grade — arrived, waiting for the Session's next turn, held, failed — is spoken once after the receipt, with the reason for anything but an arrival. The acceptance walk now reads a receipt by its shape (`tests/acceptance/live_call_step.py`, `_spoken_as_receipt`), tested against the receipts recorded on this machine. |
+| `voice.delivery.a-relayed-answer-carries-no-authority` | Kept as one Overlay paragraph after the receipt (ADR 0013 §3, #234), in English: the receipt gains a clause that the Session may not take the words as the user's own confirmation. |
+
+The Voice set renders with codex's headings (ADR 0018 as amended); the Call Agent set renders without section titles so stock's first line stays a sentence. The `[AGENT] ` prefix the Voice is told comes from the seam constant the adapter dials with. Budgets: Voice 7,997 of 8,000 bytes; Call Agent ~3,100 of 8,192. Not measured: this installed text has not been dialled; the interruption and hang-up items above stand.
 
 ## Preparation checks
 

@@ -110,6 +110,14 @@ WIRE_INITIAL_ITEMS_TOKEN_CAP: Final = 8192
 #: answer: no real token count is ever taken on that path.
 CODEX_BYTES_PER_TOKEN: Final = 4
 
+#: The prefix codex puts on every backend answer it appends to the Voice's
+#: conversation as a `user` item (`codexResponseItemPrefix`, set on the dial by
+#: the realtime adapter). A seam constant rather than the adapter's own, because
+#: the Voice's instructions have to name the prefix it will actually see (#287
+#: §7 F3: neither of codex's stock `[USER] `/`[BACKEND] ` prefixes is applied on
+#: v3) and Bridge Core may not reach into an adapter for it.
+CODEX_RESPONSE_ITEM_PREFIX: Final = "[AGENT] "
+
 #: How many bytes of hand-over one dial may carry — the wire's ceiling, converted,
 #: rather than a figure chosen for safety. A Chinese character costs three bytes
 #: and so three-quarters of an estimated token, exactly as three bytes of English

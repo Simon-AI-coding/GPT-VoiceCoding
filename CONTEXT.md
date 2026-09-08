@@ -59,12 +59,20 @@ The span of the Voice's audio still being played out after the model has sent it
 _Avoid_: drain, playback (the buffer, not the span), audio tail
 
 **Voice**:
-The Live Call's speaking half — the model the user hears and talks to. It has no tools: it composes speech from what the engine hands it, and hands anything that reads as a job to the Call Agent. It is addressed in plain prose, never in code-like text.
+The Live Call's speaking half — the model the user hears and talks to. It has no tools: it composes speech from what the engine hands it, and hands anything that reads as a job to the Call Agent. The user speaks to it, and the engine feeds it, in natural language, never in code-like text; the prompt that shapes it is codex's Stock Text with this engine's Overlay after it (ADR 0018, amended 2026-09-08).
 _Avoid_: voice model, realtime model, assistant (unqualified), voice thread
 
 **Call Agent**:
 The Live Call's acting half — the coding model behind the Voice and the only one on the call with tools. It runs the control-plane verbs the Voice hands it. Not a Delegated Turn, which is work the system hands out on purpose.
 _Avoid_: backing Codex model, the agent behind the call, delegate
+
+**Stock Text**:
+The instructions codex itself ships for the Voice and for the Call Agent, taken whole from a named codex version. On this engine's calls each half hears its Stock Text first, in codex's own form and wording; a stock line is dropped or changed only when the evidence of this wire falsifies it or a requirement of this system conflicts with it.
+_Avoid_: default prompt (unqualified), codex prompt, base prompt
+
+**Overlay**:
+What this engine adds after a half's Stock Text: who the Voice is and how it speaks, the engine's verbs and shapes for the Call Agent, and the few rules of this system's own. Where the two meet, a rule about mechanism keeps the Stock Text's wording and a rule about identity is the Overlay's.
+_Avoid_: house rules, our prompt, custom instructions
 
 **Delegated Turn**:
 Work the system hands to a coding model on the user's behalf, asked for from any surface — during a Live Call, distinct from the call's own speech, or from the Companion Channel. Its model is a user-facing setting, one for every surface.
@@ -156,6 +164,10 @@ _Avoid_: injection (a mechanism, not the capability), push, channel (reserved fo
 **Answer Relay**:
 A Relay of the user's own words — their instructions and their answers to a Session's questions. It always carries the words; whether it also carries the user's authority is the route's to say. An answer to the question a Session Brief offers with its choices, when it says that question can be answered from here, arrives as the user's own (ADR 0015) — as does an Approval Relay, which is nothing but their verdict. Every other Relay arrives as another session's words, with none of their authority, so whether the Session acts on it is that Session's own call (ADR 0013 §3). When the words were an answer to a question, the Voice says so on the receipt rather than leaving the user to assume otherwise.
 _Avoid_: MCP Channel (one adapter, not the capability)
+
+**Relayed Instruction**:
+The user's spoken words as a Relay puts them into a Session: one complete instruction, in the user's own meaning, that the Session can act on as a task. Tidied of what speech leaves behind — fillers, stutters, the versions a self-correction overruled, and the framing the user addressed to the Voice — and gathered from the pieces it was spoken in. Nothing is added, expanded, decided or chosen on the user's behalf, and the meaning does not move. Graded by the user reading what was heard beside what was relayed.
+_Avoid_: tidied instruction, cleaned transcript, rewritten request
 
 **Approval Relay**:
 A Relay of the user's verdict on a Session's pending permission request — one decision for one request, carrying the user's authority. It carries and nothing more: the request is briefed as the Session's PERMISSION state like any other, the hook's own life bounds how long a verdict can land, and the outcome is the receipt the verb returns.

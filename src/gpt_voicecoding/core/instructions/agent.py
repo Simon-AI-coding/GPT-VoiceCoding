@@ -1,4 +1,4 @@
-"""What the acting half of a Live Call is told: its verbs, and its discipline.
+"""What the acting half of a Live Call is told: codex's Stock Text, then this engine's tools.
 
 A codex v3 realtime call is two models, and this is the one with tools (ADR
 0018). It hears the user's speech, runs the control plane, and hands what came
@@ -6,28 +6,41 @@ back to the Voice. It is told nothing about tone, order or pacing, because it
 never speaks to anybody — and that costs nothing, while a speaking rule here
 would be a rule in the set that cannot act on it.
 
-**Five actions, six forms, and six the call does not get.** `status`, the switch
-flip and the seam report are withheld: the voice call neither queries the
-engine's switches nor flips them (#173), and an action in this text is an action
-the model will find a reason to run. The three menu verbs — `sessions`, `config`
-and `assistant` (#264) — are withheld beside them: a screen is a surface's way
-of offering the user choices to press, and this half has `brief` for the roster
-and nothing to press on. The split is total over the closed action set by
-construction, so a twelfth action fails generation until somebody decides which
-side of the line it is on — the same forcing function the Delegated set has for
-its own card.
+**Stock Text first** (#289 P1, ADR 0018 as amended): codex's own
+`realtime_start.md` at `STOCK_TEXT_VERSION`, whose five content lines our old
+set had displaced and two of them dropped (#294) — that a hand-off may be
+spurious, and that the words are a transcript with recognition errors. They are
+kept in codex's wording, extended in place with the three roles of this call
+(Call Agent, Voice, engine), and joined by this engine's response rules in one
+paragraph. Then one **Engine tools** section: the invocation and the shared
+calling rules, and one entry per tool grouping its purpose, its usage form and
+the rules that are its own — the structure Simon chose over a concatenated
+catalogue (#299).
+
+**Shaping is this half's** (P4). The `relay` entry carries the **Relayed
+Instruction** (`CONTEXT.md`): the user's spoken pieces gathered into one
+complete instruction in their own meaning, tidied of what speech leaves behind,
+with nothing added, decided or chosen. Stock's "use the transcript to decide"
+is what makes this the half that can do it — the Voice never rewrote its
+hand-off on the wire (#288), and this half did, without a rule either way.
+
+**Five actions, five usage lines, and six the call does not get.** `status`,
+the switch flip and the seam report are withheld: the voice call neither
+queries the engine's switches nor flips them (#173), and an action in this text
+is an action the model will find a reason to run. The three menu verbs —
+`sessions`, `config` and `assistant` (#264) — are withheld beside them: a
+screen is a surface's way of offering the user choices to press, and this half
+has `brief` for the roster and nothing to press on. The split is total over the
+closed action set by construction, so a twelfth action fails generation until
+somebody decides which side of the line it is on.
 
 **The forms come from the shared vocabulary, never from memory.** `USAGE` sits
 in `seams/control_plane.py` beside `Action`, and it is what `bridgectl` prints
 as its help and what the Companion Channel's `/` grammar refuses against — so a
 form written out here by hand would be a third spelling, free to drift from the
-parser that has to accept it. Reading it from the seam rather than from the
-parser is what keeps Bridge Core off the mechanism package: that module imports
-`core.relays`, so the convenient import would have closed a cycle across ADR
-0001's boundary. `brief` carries its address in brackets, which is why #173's
-six forms are five usage lines: `brief` and `brief <address>` are one line with
-an optional argument, and hand-splitting it would be exactly the retyping this
-avoids.
+parser that has to accept it. `brief` carries its address in brackets, which is
+why #173's six forms are five usage lines: `brief` and `brief <address>` are
+one line with an optional argument.
 
 **The budget is 8,192 bytes** because the backend caps what this audience is
 given at 8,192 tokens and a byte is the floor on what one token costs — the same
@@ -55,6 +68,11 @@ AGENT_INSTRUCTION_TOKEN_BUDGET = 8_192
 #: The same number in the unit that proves it: one token costs at least one byte.
 MAX_AGENT_INSTRUCTION_BYTES = AGENT_INSTRUCTION_TOKEN_BUDGET
 
+#: The codex release the Stock Text below is taken from
+#: (`codex-rs/prompts/templates/realtime/realtime_start.md`). One pin for both
+#: halves of a call: the Voice's module names the same tag.
+STOCK_TEXT_VERSION = "rust-v0.153.4"
+
 #: The actions a Live Call's acting half is given, in the order #173 §4 lists
 #: them. Five actions, rendered as that section's six forms.
 AGENT_ACTIONS: tuple[Action, ...] = (
@@ -79,36 +97,38 @@ WITHHELD_ACTIONS: tuple[Action, ...] = (
     Action.ASSISTANT,
 )
 
-#: What each given action answers, in one line. Total over `AGENT_ACTIONS`.
-#:
-#: **What it answers, never how to use it.** The discipline around a verb — that
-#: history pages backwards, that a relay carries the user's own words, that
-#: nothing but the toggle ends a call — is a rule with an id, and lives in the
-#: blocks below. Saying it in both places would cost the budget twice and leave
-#: two wordings free to drift apart, which is the finding that shortened these.
+#: What each given action is for, in one sentence — the first line of its
+#: entry. Total over `AGENT_ACTIONS`, so an action nobody explained fails
+#: generation. The rules that are the action's own (that history pages
+#: backwards, what a relay carries, that nothing but the toggle ends a call)
+#: are rules with ids and live in the entry's block below, not here.
 AGENT_GIST: dict[Action, str] = {
     Action.BRIEF: (
-        "the session now: what it is waiting on — the question with its options, or "
-        "the permission — and the newest thing it said; with no address, one line per "
-        "session"
+        "Use this for current Session status, the newest message, or the current "
+        "decision with its question, options, recommendation or permission request. With "
+        "no address, get the roster; with an address, get that Session's full brief."
     ),
-    Action.HISTORY: (
-        "the record behind that: a page of what the session said and was told, newest "
-        "first, for when the newest is not enough"
+    Action.HISTORY: "Use this when the user asks for earlier messages.",
+    Action.RELAY: "Use this to carry the user's words into the addressed Session.",
+    Action.APPROVE: (
+        "Use this to answer the pending permission request identified by the approval "
+        "id, carrying the user's verdict."
     ),
-    Action.RELAY: "put words into one exact session",
-    Action.APPROVE: "answer one pending permission request",
-    Action.LIVE: "end the call that is up",
+    Action.LIVE: "When the user asks to hang up, run this command to end the call.",
 }
 
 
 def agent_instructions(context: InstructionContext) -> InstructionSet:
     """The Call Agent's rules, for this engine and this machine."""
-    return InstructionSet(audience=Audience.AGENT, sections=_sections(context))
+    _every_action_is_placed()
+    # Rendered without section titles: stock `realtime_start.md` opens on a
+    # sentence, not a heading, and the one heading this set does carry — Engine
+    # tools — is written where it stands. The titles stay for the reader.
+    return InstructionSet(audience=Audience.AGENT, sections=_sections(context), headings=False)
 
 
-def _command_card() -> str:
-    """The forms this half may run, from the seam's own usage lines."""
+def _every_action_is_placed() -> None:
+    """Every control-plane action is given or withheld, and every given one explained."""
     unsorted = set(AGENT_ACTIONS) | set(WITHHELD_ACTIONS)
     if unsorted != set(Action) or set(AGENT_ACTIONS) & set(WITHHELD_ACTIONS):
         raise InstructionError(
@@ -122,119 +142,115 @@ def _command_card() -> str:
             "the Call Agent is given actions nothing here explains: "
             + ", ".join(str(action) for action in missing)
         )
-    return "\n".join(f"    {USAGE[action]} — {AGENT_GIST[action]}" for action in AGENT_ACTIONS)
+
+
+def _entry(action: Action, *rules: str) -> str:
+    """One tool's entry: its heading, its usage form, what it is for, and its own rules."""
+    heading, usage = f"### {action}", f"`{USAGE[action]}`"
+    return "\n\n".join((heading, usage, " ".join((AGENT_GIST[action], *rules))))
 
 
 def _sections(context: InstructionContext) -> tuple[Section, ...]:
     return (
         Section(
-            title="What you are",
+            title="Stock Text",
             blocks=(
+                Block(text="Realtime conversation started."),
                 Block(
                     text=(
-                        "You are the acting half of a voice call. A person is speaking to a "
-                        "voice that has no tools; you have them. When what they said needs "
-                        "the engine, you reach it, and what comes back goes to that voice."
+                        "You are the Call Agent, the backend executor behind the Voice, which "
+                        "has no tools. You use this engine to act on the user's requests. The "
+                        "user does not talk to you directly. Any response you produce will be "
+                        "consumed by the Voice and may be summarized before the user hears it."
                     ),
                 ),
                 Block(
-                    covers=("agent.cli.one-generated-command",),
                     text=(
-                        "The engine is one command on this machine:\n\n"
-                        f"    {context.cli.invocation} <action> [arguments]\n\n"
-                        f"That is engine version {context.cli.version}. Pass arguments as "
-                        "arguments; never build a shell string out of the user's words, and "
-                        "never edit the path."
+                        "When invoked, you receive the latest conversation transcript and any "
+                        "relevant mode or metadata. The Voice may invoke you even when backend "
+                        "help is not actually needed. Use the transcript to decide whether you "
+                        "should do work. If backend help is unnecessary, avoid verbose "
+                        "responses that add user-visible latency."
                     ),
                 ),
                 Block(
-                    covers=("agent.verbs.only-the-six-forms",),
-                    text="These are the forms you may run, and there are no others:\n\n"
-                    + _command_card(),
+                    text=(
+                        "When user text is routed from realtime, treat it as a transcript. It "
+                        "may be unpunctuated or contain recognition errors."
+                    ),
+                ),
+                Block(
+                    covers=(
+                        "agent.output.returns-it-whole",
+                        "agent.outcome.only-a-successful-call-is-success",
+                    ),
+                    text=(
+                        "For updates without an engine result, keep responses concise and "
+                        "action-oriented so the Voice can respond to the user. Return an engine "
+                        "result whole, in its original order; the Voice handles its spoken "
+                        "presentation. Report a refused or failed command and stop: no retry, "
+                        "alternate Session or compensating action. Claim an action succeeded "
+                        "only after its command returns successfully."
+                    ),
                 ),
             ),
         ),
         Section(
-            title="How you run them",
+            title="Engine tools",
             blocks=(
                 Block(
-                    covers=("agent.identity.copies-the-address-unchanged",),
+                    covers=(
+                        "agent.cli.one-generated-command",
+                        "agent.verbs.only-the-six-forms",
+                        "agent.identity.copies-the-address-unchanged",
+                        "agent.read.now-every-time",
+                    ),
                     text=(
-                        "An address comes from a reply the engine already gave you, and you "
-                        "copy it into the next call unchanged. An address you assembled from "
-                        "what you heard is an address you guessed."
+                        "## Engine tools\n\n"
+                        f"Invoke the engine with `{context.cli.invocation} <action> "
+                        f"[arguments]` (engine version {context.cli.version}). Pass arguments "
+                        "as arguments; never build a shell string from the user's words or "
+                        "edit the invocation path. Use only the engine forms below. Copy "
+                        "Session addresses unchanged from engine replies. For a requested "
+                        "read, query now rather than reuse an earlier answer."
                     ),
                 ),
-                Block(
-                    covers=("agent.read.now-every-time",),
-                    text=(
-                        "Read now, every time, and report what came back and nothing more. "
-                        "An answer from earlier in this call is not this answer, and a "
-                        "reading reaches no session and changes nothing."
-                    ),
-                ),
-                # **Two reads, told apart by what the user asked.** #277: asked
-                # what a Session needed decided, the Call Agent ran `history`
-                # twice and reported no options, while `brief <address>` held
-                # the question and all four. A pending question reaches the
-                # engine by hook before the transcript holds it, so the record
-                # cannot answer that ask by design — and nothing on the card
-                # said so. The gist above names the two facts; this is the
-                # "which, when", which the gist rule keeps out of the card.
+                # #277: asked what a Session needed decided, the Call Agent ran
+                # `history` twice and reported no options, while `brief <address>`
+                # held the question and all four. The entry says which read
+                # answers which ask.
                 Block(
                     covers=("agent.brief.is-the-session-now",),
-                    text=(
-                        "Asked what a session is waiting on, what it needs decided, or how "
-                        "it is doing, read `brief <address>`: that is the session now, and "
-                        "when it holds a question, the options are in it. Asked what it said "
-                        "before that, or for more than its newest message, read "
-                        "`history <address>`: the record, a page at a time."
+                    text=_entry(
+                        Action.BRIEF,
+                        "Current decision details belong here, not in History.",
                     ),
                 ),
                 Block(
                     covers=("agent.history.pages-older-on-request",),
-                    text=(
-                        "A page of what a session said holds five entries. To reach what came "
-                        "before a page you were given, ask again with the smallest ordinal on "
-                        "it; there is no other way back, and nothing older arrives unasked."
+                    text=_entry(
+                        Action.HISTORY,
+                        "Request the latest page without `--before`. When the user asks to "
+                        "continue further back, use the `--before` value supplied by the "
+                        "previous page. Fetch further pages only on request.",
                     ),
                 ),
                 Block(
                     covers=("agent.relay.carries-the-users-words",),
-                    text=(
-                        "The words you put into a session are the user's own, as the other "
-                        "half handed them over. Do not tidy a decision into them, do not "
-                        "choose between options on their behalf, and do not add a decision "
-                        "they did not make."
+                    text=_entry(
+                        Action.RELAY,
+                        "Gather the spoken pieces into one complete Relayed Instruction in the "
+                        "user's own meaning, removing fillers, stutters, overruled "
+                        "self-corrections and framing addressed to the Voice; add, expand, "
+                        "decide and choose nothing on the user's behalf. The receipt "
+                        "determines the delivery outcome: only `delivered` means the words "
+                        "arrived; otherwise report the returned status and reason.",
                     ),
                 ),
-                Block(
-                    covers=("agent.outcome.only-a-successful-call-is-success",),
-                    text=(
-                        "Nothing happened until the exact command returned successfully. "
-                        "Sending words back gives you a grade and, when it is not a plain "
-                        "arrival, one reason — that receipt is the whole truth about the "
-                        "attempt, and delivered is the only grade that means it arrived. On a "
-                        "refusal or a failure, report it and stop: no second attempt, no other "
-                        "session tried instead, nothing done to make up for it."
-                    ),
-                ),
+                Block(text=_entry(Action.APPROVE)),
                 Block(
                     covers=("agent.live.ends-the-call",),
-                    text=(
-                        "When the user asks to hang up, that is yours to do: the other half "
-                        f"has no way to. Run `{USAGE[Action.LIVE]}`, and nothing else — the "
-                        "engine ends a call off a command it can see, never off anybody's "
-                        "claim to have ended one, so saying goodbye is not hanging up."
-                    ),
-                ),
-                Block(
-                    covers=("agent.output.returns-it-whole",),
-                    text=(
-                        "Hand back what the engine returned, whole. Do not shorten it, "
-                        "reorder it or pick out the part that seems to matter: choosing what "
-                        "the person hears is the other half's job, and it has the rules for it."
-                    ),
+                    text=_entry(Action.LIVE, "A spoken goodbye does not end it."),
                 ),
             ),
         ),

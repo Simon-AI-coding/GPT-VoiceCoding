@@ -712,31 +712,30 @@ def _said(words: str) -> str:
     )
 
 
-RECEIPTS = live_call_step.RECEIPT_SPOKEN_PATTERNS
 RECEIPT = _said("好的，已转达给二号工位。")
 
 
 def test_a_receipt_and_nothing_after_it_leaves_nothing_unaccounted() -> None:
-    assert live_call_step._unaccounted_voice_turns([_said("在的"), RECEIPT], RECEIPTS) == 0
+    assert live_call_step._unaccounted_voice_turns([_said("在的"), RECEIPT]) == 0
 
 
 def test_the_voice_going_on_by_itself_is_what_the_rule_counts() -> None:
     """The ticket's own sentence: the receipt, and then the Voice stops (#198)."""
     lines = [RECEIPT, _said("还有别的事吗"), _said("我再说一遍")]
 
-    assert live_call_step._unaccounted_voice_turns(lines, RECEIPTS) == 2
+    assert live_call_step._unaccounted_voice_turns(lines) == 2
 
 
 def test_an_announcement_the_engine_handed_over_accounts_for_its_own_turn() -> None:
     """#196's mid-call payment is not the Voice going on by itself (#198)."""
     lines = [RECEIPT, SPOKEN, _said("二号工位说它可以继续了")]
 
-    assert live_call_step._unaccounted_voice_turns(lines, RECEIPTS) == 0
+    assert live_call_step._unaccounted_voice_turns(lines) == 0
 
 
 def test_a_payment_whose_turn_has_not_landed_yet_is_not_a_violation() -> None:
     """The `speak` line is written when the brief is handed over, not when it is said."""
-    assert live_call_step._unaccounted_voice_turns([RECEIPT, SPOKEN], RECEIPTS) == -1
+    assert live_call_step._unaccounted_voice_turns([RECEIPT, SPOKEN]) == -1
 
 
 def test_turns_before_the_receipt_are_not_counted_against_it() -> None:
@@ -750,19 +749,19 @@ def test_turns_before_the_receipt_are_not_counted_against_it() -> None:
     """
     lines = [_said("好的"), _said("我来处理"), RECEIPT]
 
-    assert live_call_step._unaccounted_voice_turns(lines, RECEIPTS) == 0
+    assert live_call_step._unaccounted_voice_turns(lines) == 0
 
 
 def test_a_queued_receipt_is_a_receipt_too() -> None:
     """A Session that happens to be mid-turn queues the relay, and the run cannot choose."""
     lines = [_said("收到，等它这一轮结束就转达。"), _said("还有别的事吗")]
 
-    assert live_call_step._unaccounted_voice_turns(lines, RECEIPTS) == 1
+    assert live_call_step._unaccounted_voice_turns(lines) == 1
 
 
 def test_a_receipt_the_recogniser_put_a_space_inside_is_still_a_receipt() -> None:
     """Run `20260902T093755Z`'s inserted space, on the Voice's side (#181)."""
-    assert live_call_step._unaccounted_voice_turns([_said("已转 达了")], RECEIPTS) == 0
+    assert live_call_step._unaccounted_voice_turns([_said("已转 达了")]) == 0
 
 
 def test_a_refusal_to_bind_says_what_the_machine_was_doing() -> None:
@@ -786,7 +785,7 @@ def test_a_refusal_to_bind_says_what_the_machine_was_doing() -> None:
 
 def test_a_window_with_no_receipt_in_it_is_not_this_rules_complaint() -> None:
     """A relay nobody was told about fails on the receipt line, before this one reads."""
-    assert live_call_step._unaccounted_voice_turns([_said("在的")], RECEIPTS) is None
+    assert live_call_step._unaccounted_voice_turns([_said("在的")]) is None
 
 
 def test_the_other_spelling_of_delivered_is_the_same_receipt() -> None:
@@ -798,13 +797,61 @@ def test_the_other_spelling_of_delivered_is_the_same_receipt() -> None:
     """
     lines = [_said("已送达。"), _said("还有别的事吗")]
 
-    assert live_call_step._unaccounted_voice_turns(lines, RECEIPTS) == 1
+    assert live_call_step._unaccounted_voice_turns(lines) == 1
 
 
 def test_a_receipt_is_not_read_out_of_a_sentence_that_only_mentions_delivery() -> None:
-    """The pattern is the two verbs of *this* statement, not the word 送 anywhere."""
-    assert live_call_step._unaccounted_voice_turns([_said("还没送到")], RECEIPTS) is None
-    assert live_call_step._unaccounted_voice_turns([_said("我送你一句话")], RECEIPTS) is None
+    """The shape is a completed verb of *this* statement, not the word 送 anywhere."""
+    assert live_call_step._unaccounted_voice_turns([_said("还没送到")]) is None
+    assert live_call_step._unaccounted_voice_turns([_said("我送你一句话")]) is None
+
+
+# --- how a receipt is recognised without a dictated wording (#299) ---------------
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # Every arrival the acceptance journals on this machine record, verbatim.
+        "已转达。",
+        "已送达。",
+        "已找到对应会话,内容“收到”已原样送出,等这轮结束后交给它。已转达。",
+        # The same statement in other words the Voice may choose.
+        "已经转达给它了。",
+        "你的话送进去了。",
+        "都交给它了。",
+        # Waiting for the Session's next turn, in the two recorded forms.
+        "收到,等它这轮结束送进去。",
+        "等这轮结束后交给它。",
+        "在排队,等它下一轮。",
+    ],
+)
+def test_a_relay_receipt_is_read_by_its_shape_however_the_voice_words_it(said: str) -> None:
+    """The Voice says the engine's grade in the user's language, so no wording is pinned."""
+    assert live_call_step._spoken_as_receipt(said)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # #221's premature receipt: the words going, not gone (run `20260903T233723Z`).
+        "收到,在转达。",
+        "正在转达。",
+        "好的,我来转达。",
+        # The other receipt — the words did not arrive — is never this one.
+        "还没送到。",
+        "上次回复没送达,因为超时了。",
+        "你的回复冇送到。",
+        # A verb of delivery in a sentence about something else.
+        "我送你一句话。",
+        "它问你要不要转达回去。",
+        # What the walk dictates and reads elsewhere.
+        "那我就接着往下做。",
+        "可以继续",
+    ],
+)
+def test_what_is_not_a_relay_receipt_is_not_read_as_one(said: str) -> None:
+    assert not live_call_step._spoken_as_receipt(said)
 
 
 # --- the two readings phase 3a compares the Voice against (#198) --------------

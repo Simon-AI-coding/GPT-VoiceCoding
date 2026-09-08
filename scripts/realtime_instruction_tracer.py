@@ -47,6 +47,11 @@ script and against this same record:
 Whatever is sent is written into the record whole, so two runs can be compared
 without trusting anyone's memory of what was in them.
 
+An agent instruction file may use `{{ tracer_cli_invocation }}` for this run's
+stand-in command (including its control socket), and `{{ engine_version }}` for
+the engine version. The tracer fills these two slots before recording and sending
+the text. Files without these slots are sent unchanged.
+
 **`bridgectl` is replaced by a stand-in** (the #179 device), and the stand-in is
 a forwarder rather than a wall: every read — `brief`, `history`, `live` — is
 passed to the real control plane, so the Call Agent chooses among the Sessions
@@ -234,6 +239,15 @@ def prose_for(arguments: argparse.Namespace, cli: ControlPlaneCli) -> Prose:
     if arguments.agent_instructions:
         path = Path(arguments.agent_instructions).expanduser().resolve()
         agent, agent_from = path.read_text(encoding="utf-8"), str(path)
+        slots = {
+            "{{ tracer_cli_invocation }}": cli.invocation,
+            "{{ engine_version }}": cli.version,
+        }
+        agent = re.sub(
+            "|".join(re.escape(slot) for slot in slots),
+            lambda match: slots[match.group()],
+            agent,
+        )
 
     if not voice.strip() or not agent.strip():
         raise SystemExit("both halves have to carry prose; one of them is empty")

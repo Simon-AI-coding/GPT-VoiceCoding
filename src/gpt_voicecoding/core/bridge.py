@@ -389,7 +389,7 @@ class RosterBriefer:
         return (
             briefing.for_call(
                 sessions,
-                self._sessions.focus,
+                self._sessions.spoken_first,
                 occasion=occasion,
                 answerable=tuple(
                     session.target for session in sessions if self._answerable_for(session)
@@ -1164,8 +1164,8 @@ class BridgeCore:
         # **One wake per wake-worthy event, and it carries no content.** Whether
         # this Session still needs the user is read again by the Briefer at the
         # moment the Keeper acts (ADR 0017); `focus` says only whether the event
-        # concerns the Focus Session, which is #196's to read.
-        await self.keeper.wake(focus=self._state.sessions.focus == event.target)
+        # concerns the Session spoken first, which is #196's to read.
+        await self.keeper.wake(focus=self._state.sessions.spoken_first == event.target)
 
     async def _announce_waiting(
         self,
@@ -1776,7 +1776,7 @@ class BridgeCore:
         # One wake, carrying no content: whether that Session still needs the
         # user is read again by the Briefer at the moment the Keeper acts (ADR
         # 0017). `focus` is judged now, not when the words were queued.
-        await self.keeper.wake(focus=self._state.sessions.focus == outcome.target)
+        await self.keeper.wake(focus=self._state.sessions.spoken_first == outcome.target)
 
     def _fold_undelivered(
         self, target: SessionTarget, undelivered: UndeliveredRelay | None, *, relay: RequestId

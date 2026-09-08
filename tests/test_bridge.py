@@ -815,8 +815,15 @@ class TestTheLiveCallSilenceCeiling:
         voice side, so the only thing a Stop does here is reach the Companion
         Channel. What keeps the call alive is somebody speaking, which arrives
         on its own as a speaking edge (#184).
+
+        Two Sessions, because news that *is* spoken is a different event: a
+        roster of one has no Session to ring about, so its Stop earns the word
+        that the sibling test below holds the ceiling open with.
         """
-        hub = Hub(silence_end_seconds=60.0)
+        hub = Hub(
+            silence_end_seconds=60.0,
+            sessions=((CODEX, "port the log"), (CLAUDE, "the other one")),
+        )
         started = hub.toggle()
         assert started.call_id is not None
         hub.emit(CallStarted(call_id=started.call_id))
@@ -830,6 +837,27 @@ class TestTheLiveCallSilenceCeiling:
         assert hub.call.calls_started == 1
         assert hub.channel.sent
         assert hub.call.calls_ended == 1
+
+    def test_the_sole_sessions_spoken_news_holds_the_ceiling_open(self) -> None:
+        """The other half of the rule above: a brief in the voice's hands is the call working.
+
+        With one Session on the roster its Stop is spoken rather than rung
+        (#196 as amended), and a Session Brief handed to the voice starts the
+        silent stretch afresh. So the same 60 s that ends the call above does
+        not end it here — the news was said, not swallowed.
+        """
+        hub = Hub(silence_end_seconds=60.0)
+        started = hub.toggle()
+        assert started.call_id is not None
+        hub.emit(CallStarted(call_id=started.call_id))
+
+        hub.now += 50.0
+        hub.emit(SessionStopped(target=CODEX))
+        hub.now += 10.0
+        hub.tick()
+
+        assert len(hub.call.spoken) == 1
+        assert hub.call.calls_ended == 0, "the brief restarted the stretch"
 
     def test_the_voice_speaking_holds_the_ceiling_open(self) -> None:
         """A 75 s answer generated in 10 s is still a call somebody is talking on."""
@@ -3127,6 +3155,82 @@ class TestARelayThatFinallyFailedReachesTheUser:
         assert hub.call.spoken == []
         assert hub.call.cues.count(Cue.EVENT) == 1
         assert hub.state.sessions.resolve(self.OTHER).undelivered is not None
+
+
+class TestTheSoleLiveSessionWithNoFocus:
+    """The EVENT Cue says "another Session wants you". With one Session there is no other.
+
+    `focus` reaching the Keeper as False carries two states that are not the
+    same news: the Focus Session is some *other* Session, or there is **no**
+    Focus Session at all. In the second, on a roster holding one main Session,
+    the ring names a Session the user cannot be told apart from the one they
+    are already in, and the word they are owed waits on a Relay they have no
+    reason to send — the user sitting at that Session's own terminal never
+    sends one. The Focus Session, once set, still decides alone.
+    """
+
+    OTHER = SessionTarget(agent=AgentKind.CLAUDE, session_id="def", pid=100)
+
+    def hub_on_a_call(self, sessions: tuple[tuple[SessionTarget, str], ...]) -> Hub:
+        hub = Hub(sessions=sessions)  # type: ignore[arg-type]
+        hub.toggle()
+        return hub
+
+    def gap(self, hub: Hub) -> None:
+        hub.now += 5.0
+        hub.tick()
+
+    def stopped(self, target: SessionTarget) -> SessionStopped:
+        return SessionStopped(
+            target=target,
+            waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt="Which base?"),
+        )
+
+    def test_the_only_session_is_spoken_about_though_no_relay_ever_set_the_focus(self) -> None:
+        hub = self.hub_on_a_call(((CODEX, "port the log"),))
+        assert hub.state.sessions.focus is None
+
+        hub.emit(self.stopped(CODEX))
+        self.gap(hub)
+
+        (spoken,) = hub.call.spoken
+        assert "port the log" in str(spoken.name)
+        assert "Which base?" in " ".join(spoken.decision)
+        assert hub.call.cues.count(Cue.EVENT) == 0, "a word was said, so nothing was owed a ring"
+
+    def test_two_live_sessions_with_no_focus_still_only_ring(self) -> None:
+        """The user must have replied to one of them for either to be spoken first."""
+        hub = self.hub_on_a_call(((CODEX, "port the log"), (self.OTHER, "the other one")))
+
+        hub.emit(self.stopped(CODEX))
+        self.gap(hub)
+
+        assert hub.call.spoken == []
+        assert hub.call.cues.count(Cue.EVENT) == 1
+
+    def test_the_last_session_left_standing_is_spoken_about(self) -> None:
+        """A focus cleared by its Session ending leaves the survivor sole, not silent."""
+        hub = self.hub_on_a_call(((CODEX, "port the log"), (self.OTHER, "the other one")))
+        hub.state.sessions.set_focus(self.OTHER)
+        hub.state.sessions.mark_ended(self.OTHER)
+        assert hub.state.sessions.focus is None, "ended is ended"
+
+        hub.emit(self.stopped(CODEX))
+        self.gap(hub)
+
+        (spoken,) = hub.call.spoken
+        assert "port the log" in str(spoken.name)
+
+    def test_a_held_focus_still_decides_alone(self) -> None:
+        """The sole-Session reading is the empty case only; it never overrules a focus."""
+        hub = self.hub_on_a_call(((CODEX, "port the log"), (self.OTHER, "the other one")))
+        hub.state.sessions.set_focus(self.OTHER)
+
+        hub.emit(self.stopped(CODEX))
+        self.gap(hub)
+
+        assert hub.call.spoken == []
+        assert hub.call.cues.count(Cue.EVENT) == 1
 
 
 class TestTheAnchorTableEndToEnd:

@@ -65,7 +65,8 @@ and goes to the log.
 **A button never crosses the seam** (ADR 0021 §4). A press arrives from Telegram
 as a `callback_query`; it leaves here as the numeral the button stood for, in a
 reply to the message the button was under — `InboundText(text=<data>,
-in_reply_to=<that message's id>)` — with an `origin` only this adapter can read,
+in_reply_to=<that message's id>, message_id="")` — with an `origin` only this
+adapter can read,
 carrying the callback's id. When Bridge Core replies to that origin, the words
 are shown as a **toast** through `answerCallbackQuery`, which is no chat message
 and so lands under no id. A callback can be answered once and a toast holds 200
@@ -83,9 +84,10 @@ button alone. The bot's command menu is set at first contact from
 accepts and this file holds no command list of its own.
 
 **The adapter reports facts about a message, never what it means.** Which message
-the user replied to (`reply_to_message.message_id`), and which ids a push landed
-under (`sendMessage`'s `message_id`, one per part), are read off the wire and
-handed up as opaque strings. A message from the user's chat that carries no text
+the user replied to (`reply_to_message.message_id`), which id the user's own
+message carries (`message_id`, what a receipt reacts on — #321), and which ids a
+push landed under (`sendMessage`'s `message_id`, one per part), are read off the
+wire and handed up as opaque strings. A message from the user's chat that carries no text
 at all — a voice note, a photo — is handed up as empty text, so that Core's
 own cannot-classify path answers it; this channel is text only.
 """
@@ -281,6 +283,7 @@ class TelegramCompanionChannel:
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> ChannelReceipt:
         """Push one message, in as many parts as the API's cap requires.
 
@@ -307,6 +310,11 @@ class TelegramCompanionChannel:
         not sent: it is the same words in the shape a surface with no layout
         prints. `split_message` is never reached by a notice.
 
+        **A reply hangs under the user's own message** (ADR 0021, *a receipt is
+        a reaction*). `reply_to` is that message's id, and it becomes
+        `reply_parameters` on the **first** part — the one answering — so a
+        receipt sentence says which words it is about in a chat holding several.
+
         **A reply bar rides the last part** (ADR 0021 §7). `reply_bar` is Core's
         placeholder words; they become a `ForceReply` on the final `sendMessage`
         of the send, because that is the message the bar sits under — put on an
@@ -327,7 +335,11 @@ class TelegramCompanionChannel:
         state; this adapter never replays the notice object.
         """
         parts = _parts(
-            text, notice, label_width=self._settings.button_label_width, reply_bar=reply_bar
+            text,
+            notice,
+            label_width=self._settings.button_label_width,
+            reply_bar=reply_bar,
+            reply_to=reply_to,
         )
         if revises:
             return await self._revise(parts, request_id=request_id, revises=revises)
@@ -492,6 +504,45 @@ class TelegramCompanionChannel:
             return False
         return fits
 
+    async def react(self, message_id: str, reaction: str | None) -> bool:
+        """Put one emoji on a message the user sent, or take it away (#321).
+
+        `setMessageReaction` on the configured chat, with the emoji in the one
+        shape the Bot API takes — a list of one `{"type": "emoji", "emoji": …}`
+        — and the empty list, which is how the API spells "no reaction". One
+        reaction per message is a bot's cap, so a second call replaces the
+        first; nothing here has to clear before it swaps.
+
+        The emoji is Core's, verbatim: the API accepts only the emoji on its own
+        published list, several of which carry a zero-width joiner, and an
+        adapter that normalised or re-spelt them would turn a valid reaction
+        into `REACTION_INVALID`.
+
+        **A refusal is `False`, logged, and never raised.** The caller's answer
+        to every way this can fail is the same — send the receipt as a sentence
+        instead — so the classification the seam wants is the one bit, and a
+        message Telegram no longer has reads exactly like a dead network here.
+        """
+        payload: dict[str, object] = {
+            "chat_id": self._settings.chat_id,
+            "message_id": _message_id_on_the_wire(message_id),
+            "reaction": [] if reaction is None else [{"type": "emoji", "emoji": reaction}],
+        }
+        try:
+            await self._ask(
+                "setMessageReaction",
+                payload,
+                timeout_seconds=self._settings.request_timeout_seconds,
+            )
+        except TelegramError as refused:
+            _log.warning(
+                "a reaction on message %s was refused, so its receipt goes as a sentence: %s",
+                message_id,
+                refused.detail,
+            )
+            return False
+        return True
+
     async def verify(self) -> VerifyResult:
         """Prove reachability positively, or name the layer that stopped it.
 
@@ -650,6 +701,9 @@ class TelegramCompanionChannel:
                 text=text if isinstance(text, str) else "",
                 origin=self._settings.chat_id,
                 in_reply_to=_replied_to(message),
+                # The user's own message, which is what a receipt reacts on
+                # (#321). The press path below leaves it empty on purpose.
+                message_id=_message_id_of(message),
             )
         )
 
@@ -769,7 +823,12 @@ NO_KEYBOARD: dict[str, object] = {"inline_keyboard": []}
 
 
 def _parts(
-    text: str, notice: Notice | None, *, label_width: int, reply_bar: str = ""
+    text: str,
+    notice: Notice | None,
+    *,
+    label_width: int,
+    reply_bar: str = "",
+    reply_to: str = "",
 ) -> tuple[dict[str, object], ...]:
     """What goes on the wire, as `sendMessage` bodies without the chat: one per part.
 
@@ -782,11 +841,18 @@ def _parts(
     the buttons are the thing a numeral picks from, while the bar is only a
     courtesy (ADR 0021 §7). The placeholder is Core's words, inside the seam's
     bound by the seam's own guard.
+
+    `reply_to` becomes `reply_parameters` on the **first** part, because that is
+    the one answering the user's message; the parts after it are the rest of the
+    same answer and hang under nothing. `allow_sending_without_reply` is set, so
+    a message the user has since deleted costs the thread and never the words.
     """
     if notice is not None:
         parts = (lay_out(notice, label_width=label_width).payload(),)
     else:
         parts = tuple({"text": part} for part in split_message(text))
+    if reply_to and parts:
+        parts = ({**parts[0], "reply_parameters": _reply_parameters(reply_to)}, *parts[1:])
     if not reply_bar or not parts:
         return parts
     if len(reply_bar) > PLACEHOLDER_LIMIT:
@@ -806,6 +872,19 @@ def _parts(
     if "reply_markup" in last:
         return parts
     return (*parts[:-1], {**last, "reply_markup": _force_reply(reply_bar)})
+
+
+def _reply_parameters(message_id: str) -> dict[str, object]:
+    """The Bot API's `ReplyParameters`, hanging one message under another.
+
+    `allow_sending_without_reply` because the message being answered is the
+    user's own and they may have deleted it: a receipt that refused to send
+    rather than lose its thread would be a receipt that went missing.
+    """
+    return {
+        "message_id": _message_id_on_the_wire(message_id),
+        "allow_sending_without_reply": True,
+    }
 
 
 def _force_reply(placeholder: str) -> dict[str, object]:

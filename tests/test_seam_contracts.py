@@ -453,15 +453,22 @@ class TestTheCompanionChannelContract:
     def test_inbound_text_arrives_unclassified(self) -> None:
         """The channel never decides whether this is a command, an answer or a delegation.
 
-        Three fields, every one a fact the adapter can see and none an opinion
-        about meaning: the words, where they came from, and which message they
-        answered (ADR 0021 §4). A field that could carry a classification would
+        Four fields, every one a fact the adapter can see and none an opinion
+        about meaning: the words, where they came from, which message they
+        answered, and which message they *are* — the one a receipt reacts on
+        (ADR 0021 §4, #321). A field that could carry a classification would
         fail this set on purpose.
         """
         event = InboundText(text="turn duty off", origin="chat:1")
-        assert {field.name for field in fields(InboundText)} == {"text", "origin", "in_reply_to"}
+        assert {field.name for field in fields(InboundText)} == {
+            "text",
+            "origin",
+            "in_reply_to",
+            "message_id",
+        }
         assert event.text == "turn duty off"
         assert event.in_reply_to == ""
+        assert event.message_id == ""
 
     def test_a_failed_push_is_never_mistaken_for_delivery(self) -> None:
         channel = FakeCompanionChannel(outcome=Delivery.FAILED, reason="network down mid-send")
@@ -493,7 +500,6 @@ class TestTheDial:
             "decision",
             "answerable_here",
             "last_activity_at",
-            "undelivered",
         }
 
     def test_a_hand_over_over_the_item_cap_is_refused_here(self) -> None:

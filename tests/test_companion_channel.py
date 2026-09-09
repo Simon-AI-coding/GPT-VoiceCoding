@@ -92,6 +92,12 @@ FAKE_POLL_SECONDS = 0.05
 #: longer than the poll, so slowness is never mistaken for absence.
 PATIENCE_SECONDS = 5.0
 
+#: Two of the reactions Core sets, spelt as Telegram's own list spells them. The
+#: adapter chooses none of them — these are here so an adapter test can say what
+#: went on the wire without importing Core's table (#321).
+OK_HAND = "\N{OK HAND SIGN}"
+TECHNOLOGIST = "\U0001f468\u200d\U0001f4bb"
+
 
 class Sink:
     """Bridge Core's end of the seam, reduced to the one thing it promises."""
@@ -147,6 +153,22 @@ class FakeTelegram:
             if method == "editMessageText"
         ]
 
+    def reactions(self) -> list[tuple[str, str | None]]:
+        """Every `setMessageReaction`, as (message id, emoji) — `None` for a clear.
+
+        One emoji at a time is Telegram's cap for a bot, so a call carrying more
+        than one is a defect this journal refuses to flatten.
+        """
+        journalled: list[tuple[str, str | None]] = []
+        for method, payload in self.calls:
+            if method != "setMessageReaction":
+                continue
+            reaction = payload.get("reaction") or []
+            assert len(reaction) <= 1, f"a bot sets one reaction at a time, not {reaction}"
+            emoji = reaction[0]["emoji"] if reaction else None
+            journalled.append((str(payload["message_id"]), emoji))
+        return journalled
+
     def toasts(self) -> list[tuple[str, str]]:
         """Every `answerCallbackQuery`, as (callback id, text)."""
         return [
@@ -180,6 +202,8 @@ class FakeTelegram:
         if method == "editMessageText":
             return {"message_id": payload["message_id"], "text": payload["text"]}
         if method == "answerCallbackQuery":
+            return True
+        if method == "setMessageReaction":
             return True
         if method == "setMyCommands":
             return True
@@ -311,6 +335,14 @@ class TestTheNullChannel:
         with pytest.raises(TypeError):
             null_channel(sink=None, settings={"chat_id": CHAT})
 
+    def test_a_reaction_is_accepted_and_does_nothing(self) -> None:
+        """There is no surface to put an emoji on, and nothing here ever has an id
+        to react to: the verb exists so the seam is whole (#321)."""
+        channel = NullCompanionChannel()
+
+        assert asyncio.run(channel.react("7", "\N{OK HAND SIGN}")) is True
+        assert asyncio.run(channel.react("7", None)) is True
+
     def test_the_reference_the_refusal_names_really_builds_one(self) -> None:
         """A refusal that sends the operator to a reference that does not exist is worse
         than no refusal. The spelling in `config` and the adapter's own are one string."""
@@ -325,6 +357,10 @@ class TestTheSeamsFields:
 
     def test_inbound_text_replied_to_nothing_by_default(self) -> None:
         assert InboundText(text="words", origin=CHAT).in_reply_to == ""
+
+    def test_inbound_text_carries_no_message_id_by_default(self) -> None:
+        """The user's own message id, empty for a surface that has none (#321)."""
+        assert InboundText(text="words", origin=CHAT).message_id == ""
 
     def test_a_channel_receipt_is_a_delivery_receipt_with_ids(self) -> None:
         """Existing `send` sites keep reading `is_delivered`; new ones read the ids."""
@@ -548,16 +584,6 @@ class TestLayingOutANotice:
 
         assert entity(laid_out, "bold") == "🙂🙂 which?"
         assert entity(laid_out, "expandable_blockquote") == "🙂 done"
-
-    def test_an_undelivered_line_sits_below_the_fold_and_outside_it(self) -> None:
-        laid_out = lay_out(
-            notice(undelivered="your last reply did not arrive, because ceiling_passed")
-        )
-
-        assert laid_out.text.endswith(
-            "I rebuilt the index.\nyour last reply did not arrive, because ceiling_passed"
-        )
-        assert entity(laid_out, "expandable_blockquote") == "I rebuilt the index."
 
     def test_a_terminal_only_answer_is_said_below_the_fold(self) -> None:
         laid_out = lay_out(notice(answerable_here=False, answer_wording="answer at the terminal"))
@@ -850,6 +876,53 @@ class TestWhatAPushLandedUnder:
         """The two Core sends today. A longer one would silently lose its reply bar."""
         for placeholder in (ASSISTANT_REPLY_PLACEHOLDER, SAY_TO_PLACEHOLDER):
             assert len(placeholder) <= PLACEHOLDER_LIMIT
+
+    def test_a_reply_hangs_under_the_message_it_answers(self) -> None:
+        """ADR 0021: a receipt sentence is a reply to the user's own message (#321)."""
+        api = FakeTelegram()
+
+        asyncio.run(
+            channel(api).send("Your words arrived.", request_id=new_request_id(), reply_to="41")
+        )
+
+        (payload,) = api.method_calls("sendMessage")
+        assert payload["reply_parameters"] == {
+            "message_id": 41,
+            "allow_sending_without_reply": True,
+        }
+
+    def test_the_reply_rides_the_first_part_of_a_split_send(self) -> None:
+        """The first part is the one answering; the rest are the same answer."""
+        api = FakeTelegram()
+        long_words = "x" * (MESSAGE_LIMIT_UTF16_UNITS + 10)
+
+        asyncio.run(channel(api).send(long_words, request_id=new_request_id(), reply_to="41"))
+
+        sent = api.method_calls("sendMessage")
+        assert len(sent) == 2
+        assert "reply_parameters" in sent[0]
+        assert "reply_parameters" not in sent[1]
+
+    def test_a_send_that_answers_nothing_hangs_under_nothing(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).send("a stop notice", request_id=new_request_id()))
+
+        assert "reply_parameters" not in api.method_calls("sendMessage")[0]
+
+    def test_a_reply_and_a_bar_ride_different_parts_of_one_split_send(self) -> None:
+        api = FakeTelegram()
+        long_words = "x" * (MESSAGE_LIMIT_UTF16_UNITS + 10)
+
+        asyncio.run(
+            channel(api).send(
+                long_words, request_id=new_request_id(), reply_to="41", reply_bar="say more"
+            )
+        )
+
+        sent = api.method_calls("sendMessage")
+        assert "reply_parameters" in sent[0] and "reply_markup" not in sent[0]
+        assert "reply_markup" in sent[-1] and "reply_parameters" not in sent[-1]
 
     def test_a_send_with_no_reply_bar_opens_none(self) -> None:
         api = FakeTelegram()
@@ -1272,6 +1345,92 @@ class TestAnsweringAPressAsAToast:
         assert api.sent() == ["words"]
 
 
+class TestReactingOnTheUsersOwnMessage:
+    """The receipt as an emoji on the message the user sent (ADR 0021, #321).
+
+    One reaction at a time, swapped as the Relay's state changes and cleared
+    with an empty list — Telegram's own shape for `setMessageReaction`, and the
+    only place in this adapter where a message the *user* sent is addressed.
+    """
+
+    def test_a_reaction_is_set_on_the_users_message_in_the_configured_chat(self) -> None:
+        api = FakeTelegram()
+
+        assert asyncio.run(channel(api).react("41", OK_HAND)) is True
+
+        (payload,) = api.method_calls("setMessageReaction")
+        assert payload["chat_id"] == CHAT
+        assert payload["message_id"] == 41
+        assert payload["reaction"] == [{"type": "emoji", "emoji": OK_HAND}]
+
+    def test_a_swap_is_a_second_call_that_replaces_the_first(self) -> None:
+        """One reaction per message is the bot's cap, so a swap is not two emoji."""
+        api = FakeTelegram()
+
+        async def swapping() -> None:
+            surface = channel(api)
+            await surface.react("41", TECHNOLOGIST)
+            await surface.react("41", OK_HAND)
+
+        asyncio.run(swapping())
+
+        assert api.reactions() == [("41", TECHNOLOGIST), ("41", OK_HAND)]
+
+    def test_clearing_sends_the_empty_list(self) -> None:
+        """`None` is "no reaction", and Telegram spells that an empty list."""
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).react("41", None))
+
+        (payload,) = api.method_calls("setMessageReaction")
+        assert payload["reaction"] == []
+
+    def test_the_zero_width_joiner_of_the_technologist_survives(self) -> None:
+        """Telegram's list spells this emoji with a ZWJ, and a stripped one is
+        `REACTION_INVALID` on the wire."""
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).react("41", TECHNOLOGIST))
+
+        (payload,) = api.method_calls("setMessageReaction")
+        assert payload["reaction"][0]["emoji"] == "\U0001f468\u200d\U0001f4bb"
+
+    def test_an_id_round_trips_as_the_integer_the_api_wants(self) -> None:
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).react("-1004", OK_HAND))
+
+        assert api.method_calls("setMessageReaction")[0]["message_id"] == -1004
+
+    def test_a_refusal_is_false_and_logged_rather_than_raised(self, caplog) -> None:
+        """The caller's fallback is a sentence, so a refusal is an answer and never
+        an exception the engine loop has to hold."""
+        caplog.set_level("WARNING", logger="gpt_voicecoding.adapters.companion_channel.telegram")
+        api = FakeTelegram()
+        api.refuse("setMessageReaction", TelegramError(FailureLayer.API, "REACTION_INVALID"))
+
+        stood = asyncio.run(channel(api).react("41", OK_HAND))
+
+        assert stood is False
+        assert "REACTION_INVALID" in caplog.text
+
+    def test_a_message_telegram_no_longer_has_is_a_refusal_and_not_a_crash(self) -> None:
+        api = FakeTelegram()
+        api.refuse(
+            "setMessageReaction", TelegramError(FailureLayer.API, "message to react not found")
+        )
+
+        assert asyncio.run(channel(api).react("41", OK_HAND)) is False
+
+    def test_a_reaction_sends_no_message(self) -> None:
+        """The whole point: a good outcome costs no message in the chat."""
+        api = FakeTelegram()
+
+        asyncio.run(channel(api).react("41", OK_HAND))
+
+        assert api.method_calls("sendMessage") == []
+
+
 class TestAnsweringForItself:
     def test_a_working_channel_proves_both_halves(self) -> None:
         api = FakeTelegram()
@@ -1330,7 +1489,7 @@ class TestListening:
 
         asyncio.run(listening())
 
-        assert sink.events == [InboundText(text="turn duty off", origin=CHAT)]
+        assert sink.events == [InboundText(text="turn duty off", origin=CHAT, message_id="1")]
 
     def test_a_reply_names_the_message_it_answered(self) -> None:
         """`reply_to_message.message_id` → `in_reply_to`, a fact and not a meaning."""
@@ -1346,7 +1505,9 @@ class TestListening:
 
         asyncio.run(listening())
 
-        assert sink.events == [InboundText(text="ship it", origin=CHAT, in_reply_to="5")]
+        assert sink.events == [
+            InboundText(text="ship it", origin=CHAT, in_reply_to="5", message_id="9")
+        ]
 
     def test_a_press_is_a_numeral_reply_to_the_pressed_message(self) -> None:
         """A button never crosses the seam: a press arrives as the numeral typed in a
@@ -1368,6 +1529,9 @@ class TestListening:
         assert event.in_reply_to == "5"
         assert CALLBACK_ID in event.origin
         assert event.origin != CHAT
+        # A press is no message of the user's, so there is nothing to react on
+        # and its receipt stays the toast it is (#321).
+        assert event.message_id == ""
 
     def test_the_reader_asks_for_presses_by_name(self) -> None:
         """A set `allowed_updates` list persists on the bot (#247): the one this
@@ -1421,7 +1585,7 @@ class TestListening:
 
         asyncio.run(listening())
 
-        assert sink.events == [InboundText(text="", origin=CHAT)]
+        assert sink.events == [InboundText(text="", origin=CHAT, message_id="9")]
 
     def test_a_message_with_no_text_from_a_stranger_is_silence(self) -> None:
         api, sink = FakeTelegram(), Sink()
@@ -1437,7 +1601,7 @@ class TestListening:
 
         asyncio.run(listening())
 
-        assert sink.events == [InboundText(text="this one is mine", origin=CHAT)]
+        assert sink.events == [InboundText(text="this one is mine", origin=CHAT, message_id="8")]
         assert api.sent() == []
 
     def test_a_stranger_is_met_with_silence(self) -> None:

@@ -262,7 +262,6 @@ def pending_relay_document(pending: PendingRelay) -> dict[str, Any]:
         "text": pending.text,
         "route": str(pending.route),
         "queued_at": pending.queued_at,
-        "expires_at": pending.expires_at,
         # The grade of the last attempt, or nothing at all when none was made.
         # `null` rather than `unknown`: the absence of an attempt is not an
         # attempt that proved nothing.

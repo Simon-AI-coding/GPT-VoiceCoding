@@ -64,7 +64,7 @@ from enum import StrEnum
 from typing import Final
 
 from gpt_voicecoding.core.call_keeper import Occasion
-from gpt_voicecoding.core.sessions import Session, UndeliveredRelay, spoken_name
+from gpt_voicecoding.core.sessions import Session, spoken_name
 from gpt_voicecoding.seams.agent import (
     ProgressAvailability,
     ProgressObservation,
@@ -439,9 +439,6 @@ class SessionBrief:
     #: Whether the user can answer this from here, rather than at the terminal.
     answerable_here: bool
     last_activity_at: datetime | None
-    #: The last Relay to this Session that finally failed, or `None` when the
-    #: user's words have all landed (`CONTEXT.md`, *Session Brief*).
-    undelivered: UndeliveredRelay | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,7 +548,6 @@ def session(
         decision=_decision(session),
         answerable_here=_answerable_here(session, question_answerable=question_answerable),
         last_activity_at=session.last_activity,
-        undelivered=session.undelivered,
     )
 
 
@@ -575,15 +571,17 @@ def earns_a_brief(session: Session) -> bool:
     to agree about it: a call that briefed one set of Sessions and spoke about
     another would be two answers to one question (#209, #213).
 
-    Two ways to earn one. A row that has **stopped** is asking something of the
-    user — a running Session is in the roster and asking nobody anything, so it
-    gets its header row and nothing more. And a row carrying an **undelivered
-    Relay** earns one whatever it is doing (#197): the user's own words did not
-    reach it, and that is news about the Session rather than a state of it, so
-    a Session that went straight back to work is a Session the user still has
-    to be told about — `CONTEXT.md`'s *Session Brief* promises exactly that.
+    One way to earn one: a row that has **stopped** is asking something of the
+    user. A running Session is in the roster and asking nobody anything, so it
+    gets its header row and nothing more.
+
+    A row carrying an **undelivered Relay** used to earn one too (#197), on a
+    field only the Relay ceiling ever wrote. The ceiling is abolished (#321), so
+    nothing can write it and the field is gone with it: the user's words now
+    wait for the Session's turn rather than being dropped, and what became of
+    them is said on the message they sent (ADR 0021, *a receipt is a reaction*).
     """
-    return _state(session) is not BriefState.RUNNING or session.undelivered is not None
+    return _state(session) is not BriefState.RUNNING
 
 
 def omitting_newest(brief: SessionBrief) -> SessionBrief:
@@ -623,7 +621,6 @@ def spoken(brief: SessionBrief) -> SpokenBrief:
         decision=tuple(line.strip() for line in _decision_lines(brief)),
         answerable_here=_answer_wording(brief.answerable_here),
         last_activity_at=_when(brief.last_activity_at),
-        undelivered=_undelivered_wording(brief.undelivered),
     )
 
 
@@ -657,7 +654,6 @@ def notice(brief: SessionBrief) -> SessionNotice:
         cut_marker=NOTICE_WORDING[NoticeWord.TRUNCATED],
         answerable_here=brief.answerable_here,
         answer_wording=f"answer {_answer_wording(brief.answerable_here)}",
-        undelivered=_undelivered_wording(brief.undelivered),
     )
 
 
@@ -695,7 +691,6 @@ def for_call(
     Opening carries one brief alone for one waiting Session; with several it
     carries the waiting Focus Session first, then the Roster Brief, or only the
     roster without a waiting Focus. Mid-call carries only the waiting Focus.
-    Running Sessions with an undelivered reply still earn a brief (#197).
     No waiting Sessions means no answer.
 
     Fitting gives up newest bodies from the back (with omission words), then
@@ -1136,39 +1131,12 @@ def _session_lines(brief: SessionBrief) -> list[str]:
     lines.extend(_decision_lines(brief))
     lines.append(f"  answer: {_answer_wording(brief.answerable_here)}")
     lines.append(f"  last activity: {_when(brief.last_activity_at)}")
-    if brief.undelivered is not None:
-        lines.append(f"  undelivered: {_undelivered_wording(brief.undelivered)}")
     return lines
 
 
 def _answer_wording(answerable_here: bool) -> str:
     """Where the user answers this, in the two phrases both carriers use."""
     return "from here" if answerable_here else "at the terminal"
-
-
-def _undelivered_wording(undelivered: UndeliveredRelay | None) -> str:
-    """The user's last reply to this Session, and why it never arrived.
-
-    `CONTEXT.md`'s *Session Brief* promise, worded here because this module is
-    the one place the user's vocabulary lives (#175). Empty when nothing is
-    undelivered — the ordinary case, and one an adapter writes no line for.
-
-    **The verb is the grade's.** An attempt that proved nothing arrived may be
-    reported as not having arrived; one that proved nothing either way — an
-    `UNKNOWN` on a route where an accepted write is not a receipt (ADR 0013), or
-    words parked in front of a person on the far side — may only be reported as
-    *may not have*. That is the same rule the four deleted ceiling reports came
-    in proven and unproven pairs for, kept in one sentence instead of four
-    (`core/relays.py::RelayReason`).
-
-    The reason travels as its code rather than as a phrase per code: it is the
-    receipt's own word, the same one `status` and the CLI print, and the Voice
-    composes the sentence the user hears from it (#173 §6).
-    """
-    if undelivered is None:
-        return ""
-    arrival = "did not arrive" if undelivered.proven_not_to_have_arrived else "may not have arrived"
-    return f"your last reply {arrival}, because {undelivered.reason}"
 
 
 def _when(last_activity_at: datetime | None) -> str:

@@ -14,9 +14,12 @@ Nothing here is durable. The durable subset is switch state and the Session
 registry (ADR 0001); a queue that survived a restart would be re-delivering words
 whose moment has passed.
 
-Policy lives elsewhere. The queue holds the deadline it is handed — the
-ten-minute ceiling is the pipelines issue's number, not a constant here — reports
-what has passed it, and never decides what to do about it.
+Nothing expires. The queue held a deadline it was handed and reported what had
+passed it; the ceiling that number stood for is abolished (#321), and an entry
+now leaves only when something proves it delivered, when the Session it was for
+ends, or when the queue is asked to let it go. A queue that dropped the user's
+words on a clock of this system's own was the one way words could be lost
+without anybody being told.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from gpt_voicecoding.core.errors import DuplicateRelayError, UnknownRelayError
+from gpt_voicecoding.core.lifecycle import RelayAuthority
 from gpt_voicecoding.seams.agent import RelayRoute
 from gpt_voicecoding.seams.delivery import DeliveryReceipt
 from gpt_voicecoding.seams.identity import RequestId, SessionTarget
@@ -54,7 +58,6 @@ class PendingRelay:
     kind: RelayKind
     text: str
     queued_at: float
-    expires_at: float
     route: RelayRoute = RelayRoute.DELIVER
     #: The last attempt, whole — its grade and the evidence behind it — or
     #: `None` for an entry nothing has been attempted for yet.
@@ -68,18 +71,33 @@ class PendingRelay:
     #: "never left this process".
     #:
     #: **The whole receipt rather than the grade alone**, because an entry can
-    #: end minutes after its attempt — at the ceiling, or when the Session goes
-    #: — and what the surface owes the user then is that attempt's grade with
+    #: end minutes after its attempt — when the Session goes — and what the
+    #: surface owes the user then is that attempt's grade with
     #: the evidence the seam requires beside it (`seams/delivery.py`). A queue
     #: that kept only the grade left the pipeline writing a sentence about the
     #: attempt instead of carrying it.
     receipt: DeliveryReceipt | None = None
+    #: The channel's opaque id of the user's own message these words came from,
+    #: empty when there is none. Held so that the receipt for this entry — a
+    #: reaction on that message (ADR 0021) — can be re-rendered on every
+    #: settlement, including the one that takes the entry out.
+    message_id: str = ""
+    #: The channel's opaque reference to where the words came from, echoed onto
+    #: a receipt sent later so it goes back the way they came (ADR 0021 §4).
+    #: Held beside the id for the same reason: this entry can settle minutes
+    #: after the call that queued it returned, and the surface that answers then
+    #: has nothing else to read it off.
+    origin: str = ""
+    #: What the route made of these words when they were taken (ADR 0013 §3).
+    #: Held for the same reason as the id: a receipt sent minutes later carries
+    #: the no-authority clause on the same test as the one sent at once, and a
+    #: pipeline that had to re-derive it would be reading a Session that has
+    #: moved on since.
+    authority: RelayAuthority = RelayAuthority.WORDS
 
     def __post_init__(self) -> None:
         if not self.text.strip():
             raise ValueError("a Relay carries words; there are none here")
-        if self.expires_at <= self.queued_at:
-            raise ValueError("a Relay's deadline must be after the moment it was queued")
 
 
 class RelayQueue:
@@ -101,6 +119,16 @@ class RelayQueue:
             raise DuplicateRelayError(pending.request_id)
         self._pending[pending.request_id] = pending
         return pending
+
+    def holds(self, request_id: RequestId) -> bool:
+        """Whether this queue is still holding that Relay.
+
+        The one question a reader outside the pipeline asks about an entry's
+        *life* rather than its contents: a Relay that has left the queue has
+        come to rest, and what a surface hung on it can be forgotten with it
+        (`core/bridge.py::_render_reaction`).
+        """
+        return request_id in self._pending
 
     def pending(self) -> tuple[PendingRelay, ...]:
         """Everything still waiting, in the order it arrived."""
@@ -132,10 +160,6 @@ class RelayQueue:
         for waiting in dropped:
             del self._pending[waiting.request_id]
         return dropped
-
-    def expired(self, *, now: float) -> tuple[PendingRelay, ...]:
-        """Everything past the deadline it was given. Reports; does not remove."""
-        return tuple(waiting for waiting in self._pending.values() if waiting.expires_at <= now)
 
     def _waiting(self, request_id: RequestId) -> PendingRelay:
         """The entry still queued under that id. Named for waiting, not for HELD."""

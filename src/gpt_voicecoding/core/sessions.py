@@ -53,7 +53,6 @@ from gpt_voicecoding.core.errors import (
     StaleSessionError,
     UnknownSessionError,
 )
-from gpt_voicecoding.core.lifecycle import RelayReason
 from gpt_voicecoding.core.naming import NameChoice, NameRung, choose_task, compose
 from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.seams.agent import (
@@ -70,42 +69,9 @@ from gpt_voicecoding.seams.agent import (
     WaitingKind,
     derive_reply_window,
 )
-from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
 
 _log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class UndeliveredRelay:
-    """The last Relay to this Session that finally failed: one code and one grade.
-
-    **Both, because the code alone would let a renderer claim more than the
-    receipt does.** `reason` is why the words stopped here — a fact about this
-    system's own ceiling — and `grade` is what the last attempt proved, or `None`
-    when there was no attempt. An expired `UNKNOWN` and an expired `FAILED` are
-    not the same news (`core/relays.py::RelayReason`), and the pair is what lets
-    Briefing word "did not arrive" for one and "may not have arrived" for the
-    other without either half hedging on the other's behalf.
-
-    Both are closed vocabularies rather than free strings: `RelayReason` lives
-    in `core/lifecycle.py` beside `Lifecycle` precisely so a row can hold one
-    without the registry importing the pipeline that is built on it (ADR 0001).
-    """
-
-    #: Why the words stopped here. A terminal code, and only ever a terminal one.
-    reason: RelayReason
-    #: What the last attempt proved, or `None` when nothing was attempted.
-    grade: Delivery | None = None
-
-    @property
-    def proven_not_to_have_arrived(self) -> bool:
-        """Whether the words are *known* not to have landed (P9's own split).
-
-        Nothing was attempted, or an attempt proved nothing arrived. `UNKNOWN`
-        and `HELD` are both "it may have", and no surface may say otherwise.
-        """
-        return self.grade is None or self.grade is Delivery.FAILED
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,10 +102,6 @@ class Session:
     #: tier below is decided from, held here rather than re-derived by every
     #: reader — and merged rather than taken, by `climbed_to`.
     has_controlling_terminal: bool | None = None
-    #: The last Relay to this Session that finally failed, or `None` when the
-    #: user's words have all landed. A field beside the wait and not a state:
-    #: it says nothing about what the Session is doing (#197).
-    undelivered: UndeliveredRelay | None = None
 
     @property
     def reply_window(self) -> ReplyWindow:
@@ -495,21 +457,17 @@ class SessionRegistry:
         under one pid is `/new` in that TUI — **a different Session** on the
         same process (#77).
 
-        Two things turn on that, and they are the same rule twice. The focus
-        does not follow a `/new`: it would name a Session the user has never
-        replied to, which is the one way the Focus Session must not be set (#165
-        Q2). Neither does `undelivered` (#197): the words that never arrived
-        were for the thread that has gone, and carrying the reason onto the new
-        one would tell the user their last reply to *this* Session failed when
-        they have never sent it one.
+        One thing turns on that: the focus does not follow a `/new`, because it
+        would name a Session the user has never replied to, which is the one way
+        the Focus Session must not be set (#165 Q2).
 
         Everything else on the row is the lane's own reading of the process and
-        is true of it either way; these two are facts about the conversation.
+        is true of it either way; the focus is a fact about the conversation.
         """
         same_session = held.session_id is None
         if self._focus == held:
             self._focus = target if same_session else None
-        return updated if same_session else replace(updated, undelivered=None)
+        return updated
 
     # -- observation ----------------------------------------------------
 
@@ -749,25 +707,6 @@ class SessionRegistry:
         """
         held = self._held_row(target)
         updated = replace(held, state=state)
-        self._sessions[held.target] = updated
-        return updated
-
-    def set_undelivered(
-        self, target: SessionTarget, undelivered: UndeliveredRelay | None
-    ) -> Session:
-        """Record — or clear — the last Relay to this Session that never arrived.
-
-        One field with one writer. `None` clears it, which is what a Relay that
-        finally reached the Session means; a second failure replaces the first,
-        because the field says what the *last* undelivered Relay was and not how
-        many there have been.
-
-        A field beside the wait, never a state: it goes nowhere near
-        `with_waiting_for`'s not-caught-up rule (#209) or `stopped_state`
-        (#213), and it changes no Reply Window.
-        """
-        held = self._held_row(target)
-        updated = replace(held, undelivered=undelivered)
         self._sessions[held.target] = updated
         return updated
 

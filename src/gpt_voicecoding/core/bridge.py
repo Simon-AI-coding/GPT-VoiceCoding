@@ -77,12 +77,13 @@ from gpt_voicecoding.core.relays import (
     RelayAuthority,
     RelayOutcome,
     RelayPipeline,
-    RelayReason,
+    reaction_for,
     reason_for,
     receipt_sentence,
+    sentence_stands_alone,
 )
 from gpt_voicecoding.core.router import Classification, InboundClass, InboundRouter, TextGrammar
-from gpt_voicecoding.core.sessions import Session, SessionRegistry, UndeliveredRelay
+from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.core.state import BridgeState
 from gpt_voicecoding.core.switches import SwitchSnapshot
 from gpt_voicecoding.core.turns import (
@@ -465,17 +466,19 @@ class BridgeCore:
             clock=clock,
         )
         self.relays = RelayPipeline(
-            agents=agents,
-            sessions=state.sessions,
-            relays=state.relays,
-            policy=self._policy,
-            clock=clock,
+            agents=agents, sessions=state.sessions, relays=state.relays, clock=clock
         )
         #: The Delegated Turns in flight, and the replies queued behind each
         #: conversation (#268). Beside the Anchor Table for the same reason and
         #: with the same lifetime: memory only, and gone with the process that
         #: holds the threads they resume.
         self.turns = DelegatedTurns(run=self._run_turn, events=self._events)
+        #: The emoji standing on each Relay's own message, keyed by Relay
+        #: (ADR 0021, *a receipt is a reaction*; #321). The bot cannot read a
+        #: reaction back out of a private chat, so a swap is made from what this
+        #: engine last set rather than from what is there. Memory only, like the
+        #: Relay queue it shadows, and an entry goes when its Relay does.
+        self._relay_reactions: dict[RequestId, str | None] = {}
         #: The Anchor Table (ADR 0021 §2): memory only, never persisted, empty
         #: after every restart. Held here beside the router that reads it and
         #: the send path that fills it, and deliberately **not** on
@@ -819,7 +822,12 @@ class BridgeCore:
         return outcome
 
     async def answer_approval(
-        self, approval_id: str, verdict: ApprovalVerdict
+        self,
+        approval_id: str,
+        verdict: ApprovalVerdict,
+        *,
+        message_id: str = "",
+        origin: str = "",
     ) -> RelayOutcome | None:
         """Carry the user's verdict. None when no live row carries that handle.
 
@@ -877,6 +885,11 @@ class BridgeCore:
             # A verdict is nothing but the user's own decision (ADR 0013's
             # amendment): the one route besides the held hook that carries it.
             authority=RelayAuthority.AS_THE_USER,
+            # The message the numeral was typed in, where it was typed at all —
+            # what the receipt's reaction goes on — and where it came from, so a
+            # receipt sent later goes back the same way (#321).
+            message_id=message_id,
+            origin=origin,
         )
         # An Approval Relay is the user's own words arriving too (#165 Q2 sets
         # the focus from it for that reason), so a verdict that lands clears
@@ -993,14 +1006,18 @@ class BridgeCore:
             await self.dispatch(event)
         return len(waiting)
 
-    async def tick(self) -> tuple[RelayOutcome, ...]:
+    async def tick(self) -> None:
         """Advance the time-driven ceilings. The composition root calls this on a timer.
 
-        Deliberately the only time-driven thing in the hub, and there are two of
-        them left: the undelivered Relay ceiling, which is this method's, and
-        the Call Keeper's own clock — Cool-down expiry, the Silence Ceiling and
-        the settle window — which is handed the same instant and decides for
-        itself what is due. Stop Notices are not replayed here.
+        Deliberately the only time-driven thing in the hub, and there is one of
+        them left: the Call Keeper's own clock — Cool-down expiry, the Silence
+        Ceiling and the settle window — which is handed the instant and decides
+        for itself what is due. Stop Notices are not replayed here.
+
+        **A queued Relay has no clock at all** (#321). This method used to sweep
+        the Relay ceiling and report every entry past ten minutes as a failure,
+        which is how words were dropped ten seconds before the turn they were
+        waiting for. They wait for that turn now, or for the Session's end.
 
         **No clock runs on a held dialog** (ADR 0015, amended by #191). A parked
         permission or question is bounded by the wire that holds it — Claude Code
@@ -1026,12 +1043,8 @@ class BridgeCore:
         call open. The user's speaking span joins the pair the moment the seam
         raises one (#195).
         """
-        expired = self.relays.sweep_expired()
-        for outcome in expired:
-            await self._settle(outcome)
         if not self.events.unread(UserSpeech, UserSpeaking, VoiceSpeech):
             await self.keeper.tick(self._clock())
-        return expired
 
     async def discover(self) -> tuple[SessionTarget, ...]:
         """Ask every lane what Sessions exist, and make the roster agree.
@@ -1104,7 +1117,7 @@ class BridgeCore:
             case ReplyWindowChanged():
                 await self._reply_window_changed(event)
             case RelayReceipt():
-                self._relay_receipt(event)
+                await self._relay_receipt(event)
             case CallStarted() | CallEnded() | CallDropped():
                 # The Keeper owns every one of these: it adopts a call the user
                 # opened, releases the one it held, paces the Cool-down that
@@ -1347,23 +1360,32 @@ class BridgeCore:
         # notice carried can no longer be answered from this surface.
         await self._close_open_notices(event.target)
 
-    def _relay_receipt(self, event: RelayReceipt) -> None:
+    async def _relay_receipt(self, event: RelayReceipt) -> None:
         """A receipt that arrived after the call returned. The ledger records it.
 
-        **And a late proof of delivery clears the row's `undelivered` too**
-        (#197). The field says what the last Relay that did not arrive was, and
-        a receipt proving one did arrive is exactly the news that ends it — it
-        makes no difference to the user whether the proof came back inside the
-        call or minutes later on the Claude inbox's own acknowledgement route
-        (ADR 0013).
+        **And a late proof of delivery re-renders the receipt on the user's own
+        message** (#321). It makes no difference to the user whether the proof
+        came back inside the call or minutes later on the Claude inbox's own
+        acknowledgement route (ADR 0013): what they see is the same message
+        wearing the standing the words are actually in, so this is a settlement
+        like any other and goes through the one place that renders them.
         """
         try:
             classified = self._state.relays.classify(event.receipt.request_id, event.receipt)
         except UnknownRelayError:
             _log.info("a receipt arrived for a Relay that is no longer pending")
             return
-        if event.receipt.is_delivered:
-            self._fold_undelivered(classified.target, None, relay=event.receipt.request_id)
+        await self._settle(
+            RelayOutcome(
+                request_id=event.receipt.request_id,
+                target=classified.target,
+                state=(Lifecycle.DELIVERED if event.receipt.is_delivered else Lifecycle.RETAINED),
+                route=classified.route,
+                reason=reason_for(event.receipt),
+                receipt=event.receipt,
+                message_id=classified.message_id,
+            )
+        )
 
     async def _inbound_text(self, event: InboundText) -> None:
         """Classify one inbound line, act on it, and always answer the user."""
@@ -1384,9 +1406,9 @@ class BridgeCore:
             case InboundClass.DELEGATION:
                 await self._delegated_turn(found, origin=event.origin)
             case InboundClass.ANSWER_RELAY:
-                await self._relay_inbound(found, origin=event.origin)
+                await self._relay_inbound(found, origin=event.origin, message_id=event.message_id)
             case InboundClass.APPROVAL_RELAY:
-                await self._approve_inbound(found, origin=event.origin)
+                await self._approve_inbound(found, origin=event.origin, message_id=event.message_id)
             case InboundClass.UNKNOWN:
                 await self._reply(found.reply, origin=event.origin)
         if found.kind in (InboundClass.ANSWER_RELAY, InboundClass.APPROVAL_RELAY):
@@ -1694,23 +1716,33 @@ class BridgeCore:
         if screen.notice is not None:
             await self._correct(ids, screen.notice)
 
-    async def _relay_inbound(self, found: Classification, *, origin: str = "") -> None:
-        """Carry a typed relay in, and answer it with the receipt as one sentence.
+    async def _relay_inbound(
+        self, found: Classification, *, origin: str = "", message_id: str = ""
+    ) -> None:
+        """Carry a typed relay in, and answer it with the receipt (ADR 0021).
 
         **Every inbound relay is answered**, and from the same three facts the
         CLI prints as codes, not only the ones that had to wait. The channel
         used to hear a sentence when the words queued and silence when they
         went, which made "it worked" and "nothing was read" the same
         observation; then it heard the three codes, which is the log feel the
-        requirements page rejects. It hears `receipt_sentence` now (ADR 0021,
-        Receipts): the same facts, worded once in Core beside `receipt_line`,
-        with ADR 0013's clause when the words went without the user's
-        authority. `bridgectl relay` keeps the codes; the Voice keeps composing
-        its own sentence from the facts (#175).
+        requirements page rejects; then one sentence per outcome, worded once in
+        Core beside `receipt_line`.
+
+        **The sentence is now the exception** (#321, amended ADR 0021). A
+        sentence is a message of its own in the chat for news the user already
+        expects, so the receipt is a reaction on the message they sent —
+        rendered by `_settle`, which owns it for every settlement this Relay
+        ever has, not only this first one. What is left here is the case with no
+        message to react on: a button press, whose receipt stays the toast it
+        has always been. `bridgectl relay` keeps the codes; the Voice keeps
+        composing its own sentence from the facts (#175).
         """
         assert found.target is not None  # the router sets one for every ANSWER_RELAY
         try:
-            outcome = await self.relays.relay(found.target, found.text)
+            outcome = await self.relays.relay(
+                found.target, found.text, message_id=message_id, origin=origin
+            )
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
@@ -1722,14 +1754,17 @@ class BridgeCore:
         # from here.
         if outcome.state is Lifecycle.DELIVERED:
             await self._close_open_notices(found.target)
-        # A receipt names the Session the words went to, so it is an Anchor: a
-        # reply to it is more words for that Session (ADR 0021 §2). It offers
-        # nothing to pick, and a numeral on it is refused.
-        await self._reply(
-            receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
-        )
+        if not message_id:
+            # A receipt names the Session the words went to, so it is an Anchor:
+            # a reply to it is more words for that Session (ADR 0021 §2). It
+            # offers nothing to pick, and a numeral on it is refused.
+            await self._reply(
+                receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
+            )
 
-    async def _approve_inbound(self, found: Classification, *, origin: str = "") -> None:
+    async def _approve_inbound(
+        self, found: Classification, *, origin: str = "", message_id: str = ""
+    ) -> None:
         """A numeral on a permission notice: the user's verdict, on that dialog (ADR 0021 §6).
 
         The Approval Relay carries and nothing more (#191): whether the dialog
@@ -1737,131 +1772,147 @@ class BridgeCore:
         handle no live row carries is a dialog the keyboard already settled;
         nothing is sent, the reply sends the user to the screen, and the numeral
         is never re-read as words.
+
+        **A verdict earns the same receipt as any other Relay** (#321). A typed
+        numeral is a message the user sent and its answer is a `RelayOutcome`,
+        so the reaction goes on it exactly as it does for words; a numeral that
+        arrived as a *press* has no message and keeps its sentence, which is the
+        toast it has always been. The refusals above are sentences either way:
+        they are not receipts for a Relay, and there is no standing to show.
         """
         assert found.target is not None and found.verdict is not None
         try:
-            outcome = await self.answer_approval(found.approval_id, found.verdict)
+            outcome = await self.answer_approval(
+                found.approval_id, found.verdict, message_id=message_id, origin=origin
+            )
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
         if outcome is None:
             await self._reply(PERMISSION_ALREADY_SETTLED_HINT, origin=origin)
             return
-        await self._reply(
-            receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
-        )
+        if not message_id:
+            await self._reply(
+                receipt_sentence(outcome), origin=origin, anchor=_receipt_anchor(found.target)
+            )
 
     async def _settle(self, outcome: RelayOutcome) -> None:
-        """Land one Relay's standing on the Session's row, and wake if it is news.
+        """Render one Relay's standing as the receipt on the user's own message.
 
-        **The hub's, because only the hub can judge the Focus Session** (#197). A
-        relay can pass its ceiling minutes after it was queued, and the user may
-        have answered another Session in between (`CONTEXT.md`, *Focus Session*;
-        ADR 0017) — so `focus` is read *here*, at the moment of waking, and the
-        Relay pipeline learns nothing of the Keeper.
+        **The receipt is a reaction, and this is the one place it is put on**
+        (ADR 0021, amended 2026-09-09; #321). Every site that produces a
+        `RelayOutcome` passes through here, so a Relay's emoji is re-rendered
+        from its *current* reason at every settlement — set when the words are
+        taken, swapped when they go in or when the Session ends under them, and
+        resting on the state they finally reached. Re-sending the same one is
+        safe, so this is idempotent by construction.
 
-        Total over the outcome's reason, and every site that produces one passes
-        through it:
+        **The hub's, because only the hub knows which message to react on.** The
+        id is the channel's, learned on the `InboundText` the words arrived in
+        and carried through the queue on the outcome; a Relay from anywhere else
+        — the CLI, the Voice, a button — has none, and nothing is rendered for
+        it. Its receipt is the sentence its own caller sends, as before.
 
-        - `DELIVERED` clears the field. The user's words landed, so there is
-          nothing left undelivered to say — and no wake: an arrival is not news.
-        - `CEILING_PASSED` replaces it and wakes the Keeper once. The reason and
-          the last attempt's grade travel together, because a ceiling may not
-          claim non-delivery of an attempt that proved nothing
-          (`core/relays.py::RelayReason`).
-        - `SESSION_ENDED` and `QUESTION_UNANSWERABLE` are logged and nothing
-          else. An exited Session appears nowhere (`CONTEXT.md`, *Focus
-          Session*), so a field on its row is a field nobody reads; and a
-          question refused before the wire was answered by the receipt the
-          caller is already holding.
-        - Everything still in play — queued, retained, held — leaves the field
-          exactly as it stands. It says what the *last* Relay that did not
-          arrive was, not what the newest one is doing.
-
-        The field is folded onto the row beside the wait, never through it:
-        #209's `with_waiting_for` and #213's `stopped_state` are untouched, and
-        no Reply Window moves.
+        **What each reason wears, and which sentences are sent, is Core's
+        table** (`core/relays.py`): three outcomes are news the user must act on
+        and carry a sentence whatever the reaction did; the rest are the
+        reaction alone. A reaction the channel refused sends that reason's own
+        sentence instead, once — so a receipt is never absent, and it is never
+        retried, because the fallback already told the user what the emoji would
+        have.
         """
-        if outcome.reason is RelayReason.DELIVERED:
-            self._fold_undelivered(outcome.target, None, relay=outcome.request_id)
+        if outcome.state is Lifecycle.REPORTED_FAILED:
+            _log.info(
+                "the user's words for %s will never arrive (reason=%s grade=%s)",
+                outcome.target,
+                outcome.reason,
+                outcome.grade,
+            )
+        if not outcome.message_id:
             return
-        if outcome.reason is not RelayReason.CEILING_PASSED:
-            if outcome.state is Lifecycle.REPORTED_FAILED:
+        moved, stood = await self._render_reaction(outcome)
+        if not moved:
+            # This standing has already had its receipt — the emoji, or the
+            # sentence that stood in for one the surface refused. A late receipt
+            # that repeats a grade is not news, and saying it again is how one
+            # Relay becomes two identical messages about it.
+            return
+        if sentence_stands_alone(outcome.reason) or not stood:
+            # A reply rather than a push: this is the answer to words the user
+            # sent, so it goes back the way they came (ADR 0021 §4) and is never
+            # gated (ADR 0002). It hangs under the message those words were
+            # typed in, so a chat holding several Relays says which one this
+            # sentence is about; and it names the Session, so it is an Anchor
+            # like every receipt.
+            await self._reply(
+                receipt_sentence(outcome),
+                origin=outcome.origin,
+                anchor=_receipt_anchor(outcome.target),
+                reply_to=outcome.message_id,
+            )
+
+    async def _render_reaction(self, outcome: RelayOutcome) -> tuple[bool, bool]:
+        """Put this standing's emoji on the message. Answers two facts.
+
+        Whether the standing **moved** — a settlement at the standing already
+        rendered asks the surface nothing and owes the user nothing — and, when
+        it did, whether the reaction **stands**, which is what decides between
+        the emoji and the sentence that stands in for it.
+
+        **The state is tracked here because the bot cannot read it back.** A
+        reaction in a private chat is not something Telegram will report, so a
+        swap could only ever be made from a state this engine remembers; the
+        table holds the emoji last *rendered* per Relay — set, or attempted and
+        refused — and a standing that has not changed costs no call and no
+        second sentence. It is the Relay row's memory kept one step
+        outward, because the row is released before the last settlement renders
+        it (`core/relays.py::RelayPipeline._report_failed`).
+
+        **The entry lives exactly as long as the queue row does.** It is dropped
+        when the pipeline has released the Relay — the words went in, the
+        Session went, the question was refused before the wire — and kept while
+        the queue still holds it, which includes the two standings that are
+        terminal for *sending* and not for the entry: words parked in front of a
+        person, and words nobody can vouch for. Both stay in the queue, so both
+        can settle again on a late receipt, and an entry dropped on the reason
+        would make that second settlement re-render an emoji already standing
+        and say a sentence already said. What is left when it does go is the
+        emoji resting on the message, which is the receipt.
+
+        Not persisted, like the queue it shadows — an engine that restarts
+        leaves whatever it last set standing there, and no reader here rebuilds
+        it (#321: the Relay queue is not durable either, and persistence is not
+        reopened by this).
+        """
+        wanted = reaction_for(outcome.reason)
+        # **Never rendered and rendered as nothing are different.** A Relay this
+        # table has no row for has had no receipt at all, and a row holding
+        # `None` is one whose standing wears no emoji and has already been
+        # answered in words. Reading the absence as `None` would swallow the
+        # first receipt of the two standings that wear nothing.
+        rendered = self._relay_reactions.get(outcome.request_id)
+        moved = outcome.request_id not in self._relay_reactions or rendered != wanted
+        stood = True
+        if moved and not (wanted is None and rendered is None):
+            # There is an emoji to set, or one standing to take away. A standing
+            # that wears none, on a message that wears none, asks the surface
+            # for nothing.
+            stood = await self._channel.react(outcome.message_id, wanted)
+            if not stood:
                 _log.info(
-                    "the user's words for %s will never arrive (reason=%s grade=%s), and "
-                    "nothing is briefed about it",
-                    outcome.target,
+                    "the receipt for relay %s could not be a reaction, so it is a sentence: "
+                    "reason=%s",
+                    outcome.request_id,
                     outcome.reason,
-                    outcome.grade,
                 )
-            return
-        undelivered = UndeliveredRelay(
-            reason=outcome.reason,
-            grade=None if outcome.receipt is None else outcome.receipt.outcome,
-        )
-        if not self._fold_undelivered(outcome.target, undelivered, relay=outcome.request_id):
-            return
-        # One wake, carrying no content: whether that Session still needs the
-        # user is read again by the Briefer at the moment the Keeper acts (ADR
-        # 0017). `focus` is judged now, not when the words were queued.
-        await self.keeper.wake(focus=self._state.sessions.spoken_first == outcome.target)
-
-    def _fold_undelivered(
-        self, target: SessionTarget, undelivered: UndeliveredRelay | None, *, relay: RequestId
-    ) -> bool:
-        """Write the field, and say whether there was a live row to write it on.
-
-        A Session that ended while the words waited gets nothing: it appears in
-        no brief, so the reason has nowhere to be read from and the log is the
-        record. Same answer for a row the roster never held.
-
-        **Every change to the field is written down, and this is the one place
-        both of them pass through** (#226). The field is read twice — once by
-        `bridgectl brief` and once by the Stop Notice rendered from the same
-        row — and a late proof of delivery legitimately clears it between the
-        two, so the two readings can disagree while both are honest. Nothing
-        distinguished that from the defect until these lines existed: a reader
-        holding two disagreeing readings and no record of the write between them
-        cannot attribute either. It is #75's rule on the announcement side, kept
-        here — an engine silent about the one event that changes a user-visible
-        field leaves the run nothing to attribute.
-
-        Both lines name the Session and the Relay: the Session because the log
-        carries every Session on the machine, and the Relay because "which
-        words" is the whole of what changed. An **unchanged** write says
-        nothing, which is the common case and the reason the silence is worth
-        keeping — a line per delivered Relay would bury the two that matter.
-        """
-        try:
-            session = self._state.sessions.resolve(target)
-        except BridgeCoreError:
-            _log.info("a Relay settled for a Session this roster does not hold: %s", target)
-            return False
-        if not session.is_live:
-            _log.info("a Relay settled for a Session that has ended: %s", target)
-            return False
-        if session.undelivered == undelivered:
-            # Nothing to write. The common case by far — every delivered Relay
-            # to a Session with nothing outstanding lands here — and a write
-            # that changes nothing is a write a reader has to rule out.
-            return True
-        if undelivered is None:
-            _log.info(
-                "a Relay to %s arrived after all, and its brief no longer says so: relay=%s",
-                session.target,
-                relay,
-            )
-        else:
-            _log.info(
-                "a Relay to %s did not arrive, and its brief now says so: "
-                "relay=%s reason=%s grade=%s",
-                session.target,
-                relay,
-                undelivered.reason,
-                undelivered.grade,
-            )
-        self._state.sessions.set_undelivered(session.target, undelivered)
-        return True
+        if moved:
+            # Recorded whether or not it stood, because "not retried" is what
+            # the fallback buys: a standing that has been attempted has had its
+            # receipt, in the emoji or in the sentence.
+            self._relay_reactions[outcome.request_id] = wanted
+        if not self._state.relays.holds(outcome.request_id):
+            self._relay_reactions.pop(outcome.request_id, None)
+        return moved, stood
 
     async def _push(
         self, text: str, *, notice: Notice | None = None, anchor: Anchor | None = None
@@ -1967,6 +2018,7 @@ class BridgeCore:
         notice: Notice | None = None,
         anchor: Anchor | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> None:
         """Answer text the user sent. **Never gated** — a reply is not a push.
 
@@ -1995,7 +2047,12 @@ class BridgeCore:
         if not text:
             return
         receipt = await self._send(
-            text, origin=origin, notice=notice, anchor=anchor, reply_bar=reply_bar
+            text,
+            origin=origin,
+            notice=notice,
+            anchor=anchor,
+            reply_bar=reply_bar,
+            reply_to=reply_to,
         )
         if receipt.is_delivered:
             return
@@ -2014,6 +2071,7 @@ class BridgeCore:
         notice: Notice | None = None,
         anchor: Anchor | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> ChannelReceipt:
         """One Companion Channel send, the one record every send writes — and its Anchor.
 
@@ -2047,6 +2105,10 @@ class BridgeCore:
         none. `reply_bar` is Core's placeholder words for a message that asks
         for words back — the `Say to <name>:` prompt, an Assistant
         Conversation's messages — and a courtesy, never the routing (§7).
+        `reply_to` is the user's own message this one answers, empty for
+        everything that answers no message: a receipt sentence hangs under the
+        words it is about (ADR 0021, *a receipt is a reaction*), and nothing
+        else does.
 
         `revises` names the messages this send replaces rather than adds to (ADR
         0021 §8): a send that revises registers nothing, because the row it edits
@@ -2066,6 +2128,7 @@ class BridgeCore:
             revises=revises,
             notice=notice,
             reply_bar=reply_bar,
+            reply_to=reply_to,
         )
         _log.info(
             "sent Companion Channel message request=%s outcome=%s message_ids=%s",

@@ -1204,11 +1204,10 @@ class TestDeathReachesBridgeCoreEndToEnd:
         assert hub.state.sessions.all()[0].lifecycle is SessionLifecycle.ENDED
         assert hub.state.relays.pending() == ()
         assert hub.agent.calls == []
-        # A Session that ended while the words waited gets no field and no wake:
-        # exited Sessions appear nowhere (`CONTEXT.md` *Focus Session*), so the
-        # reason is logged and nothing is pushed or spoken (#197).
+        # A Session that ended while the words waited is spoken about nowhere:
+        # exited Sessions appear in no brief (`CONTEXT.md` *Focus Session*), so
+        # the reason is logged and nothing is pushed or spoken (#197, #321).
         assert hub.call.spoken == []
-        assert hub.state.sessions.all()[0].undelivered is None
         assert "session_ended" not in " ".join(hub.channel.sent)
 
 

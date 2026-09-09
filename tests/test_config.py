@@ -68,7 +68,6 @@ class TestACompleteConfiguration:
     def test_the_durations_are_the_locked_defaults_until_configured(self, tmp_path: Path) -> None:
         config = load(written(tmp_path, COMPLETE))
 
-        assert config.policy.relay_ceiling_seconds == 600.0
         # legacy@1d32845:config.plist:74-78 — one 60-second heartbeat.
         assert config.policy.silence_end_seconds == 60.0
         # #171: five entries read out in one breath. Legacy's fixed 12/32 KB tail
@@ -79,12 +78,18 @@ class TestACompleteConfiguration:
         config = load(
             written(
                 tmp_path,
-                COMPLETE + "\n[policy]\nrelay_ceiling_seconds = 90\nsilence_end_seconds = 12.5\n",
+                COMPLETE + "\n[policy]\nsilence_end_seconds = 12.5\n",
             )
         )
 
-        assert config.policy.relay_ceiling_seconds == 90.0
         assert config.policy.silence_end_seconds == 12.5
+
+    def test_a_retired_dial_left_in_a_table_still_loads(self, tmp_path: Path) -> None:
+        """#321 abolished `relay_ceiling_seconds`; a config that still sets it must
+        not refuse to load, because the user's engine would stop starting."""
+        config = load(written(tmp_path, COMPLETE + "\n[policy]\nrelay_ceiling_seconds = 90\n"))
+
+        assert not hasattr(config.policy, "relay_ceiling_seconds")
 
     def test_the_history_page_size_may_be_dialled(self, tmp_path: Path) -> None:
         config = load(written(tmp_path, COMPLETE + "\n[policy]\nhistory_page_entries = 3\n"))
@@ -144,7 +149,7 @@ class TestACompleteConfiguration:
 
     def test_a_duration_that_would_expire_everything_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
-            load(written(tmp_path, COMPLETE + "\n[policy]\nrelay_ceiling_seconds = 0\n"))
+            load(written(tmp_path, COMPLETE + "\n[policy]\ncool_down_seconds = 0\n"))
 
         with pytest.raises(ConfigError):
             load(written(tmp_path, COMPLETE + "\n[policy]\nsilence_end_seconds = 0\n"))

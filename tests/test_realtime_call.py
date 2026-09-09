@@ -143,7 +143,6 @@ HANDOVER_ITEM_EXAMPLES = (
         decision=("asked: Which base?",),
         answerable_here="from here",
         last_activity_at="not read",
-        undelivered="your last reply did not arrive, because ceiling_passed",
     ),
 )
 
@@ -423,15 +422,6 @@ class TestBringingACallUp:
         """
         assert CALL_AGENT_REMARK_ALLOWANCE_BYTES >= 70
         assert RETURN_LEG_BUDGET_BYTES < HANDOVER_BUDGET_BYTES
-
-    def test_a_brief_that_carries_an_undelivered_reply_writes_it_as_its_own_line(self) -> None:
-        """#197: the sentence is Briefing's; this assembles it under a label."""
-        rendered = _item_text(HANDOVER_ITEM_EXAMPLES[-1])
-
-        assert "  undelivered: your last reply did not arrive, because ceiling_passed" in rendered
-
-    def test_a_brief_with_nothing_undelivered_writes_no_such_line(self) -> None:
-        assert "undelivered" not in _item_text(brief("it stopped on a question"))
 
     def test_a_user_opened_dial_carries_exactly_one_item(self, socket_path: Path) -> None:
         """#167 Q6: a call the user opened gets no hand-over, only why it exists."""

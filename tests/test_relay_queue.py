@@ -21,8 +21,6 @@ from gpt_voicecoding.seams.identity import AgentKind, RequestId, SessionTarget, 
 CODEX = SessionTarget(agent=AgentKind.CODEX, session_id="abc")
 CLAUDE = SessionTarget(agent=AgentKind.CLAUDE, session_id="def", pid=100)
 
-TEN_MINUTES = 600.0
-
 
 def answer(
     target: SessionTarget = CODEX,
@@ -31,6 +29,7 @@ def answer(
     queued_at: float = 1_000.0,
     text: str = "yes, go ahead",
     route: RelayRoute = RelayRoute.DELIVER,
+    message_id: str = "",
 ) -> PendingRelay:
     return PendingRelay(
         request_id=request_id or new_request_id(),
@@ -38,8 +37,8 @@ def answer(
         kind=RelayKind.ANSWER,
         text=text,
         queued_at=queued_at,
-        expires_at=queued_at + TEN_MINUTES,
         route=route,
+        message_id=message_id,
     )
 
 
@@ -92,23 +91,11 @@ class TestEnqueueing:
             kind=RelayKind.ANSWER,
             text="yes, go ahead",
             queued_at=1_000.0,
-            expires_at=1_600.0,
             receipt=graded(RequestId("r-1"), Delivery.DELIVERED),
         )
         with pytest.raises(ValueError):
             queue.enqueue(already)
         assert queue.pending() == ()
-
-    def test_a_deadline_before_the_queueing_moment_is_refused(self) -> None:
-        with pytest.raises(ValueError):
-            PendingRelay(
-                request_id=new_request_id(),
-                target=CODEX,
-                kind=RelayKind.ANSWER,
-                text="hello",
-                queued_at=1_000.0,
-                expires_at=999.0,
-            )
 
     def test_empty_text_is_refused(self) -> None:
         with pytest.raises(ValueError):
@@ -195,21 +182,22 @@ class TestSelecting:
         fork = SessionTarget(agent=AgentKind.CLAUDE, session_id="def", pid=101)
         assert queue.pending_for(fork) == ()
 
-    def test_expired_entries_are_the_ones_past_their_deadline(self) -> None:
-        queue = RelayQueue()
-        old = queue.enqueue(answer(queued_at=0.0))
-        queue.enqueue(answer(queued_at=1_000.0))
-
-        assert queue.expired(now=TEN_MINUTES) == (old,)
-
-    def test_an_entry_is_not_expired_a_moment_before_its_deadline(self) -> None:
+    def test_nothing_ever_expires(self) -> None:
+        """#321: the ceiling is abolished, so a queue has no deadline to report."""
         queue = RelayQueue()
         queue.enqueue(answer(queued_at=0.0))
-        assert queue.expired(now=TEN_MINUTES - 0.001) == ()
 
-    def test_expiring_reports_but_does_not_remove(self) -> None:
-        """What to do about an expiry is policy; the queue only answers the question."""
-        queue = RelayQueue()
-        queue.enqueue(answer(queued_at=0.0))
-        queue.expired(now=TEN_MINUTES)
+        assert not hasattr(queue, "expired")
         assert len(queue) == 1
+
+    def test_an_entry_carries_the_message_its_words_were_typed_in(self) -> None:
+        """What the receipt's reaction is put on, held so it survives a release (#321)."""
+        queue = RelayQueue()
+
+        held = queue.enqueue(answer(message_id="4242"))
+
+        assert held.message_id == "4242"
+        assert queue.release(held.request_id).message_id == "4242"
+
+    def test_an_entry_from_a_surface_with_no_message_ids_carries_none(self) -> None:
+        assert answer().message_id == ""

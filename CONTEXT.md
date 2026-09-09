@@ -23,7 +23,7 @@ The automatic hang-up: a call ends after a configured stretch in which neither t
 _Avoid_: idle timeout, inactivity timer
 
 **Session Brief**:
-What the system knows about one Session, structured for telling the user: its name, its agent, its state (waiting for a decision, requesting permission, finished, running, or unreadable), its newest message, and the decision it is waiting on — the question with its options and any recommendation, or the tool awaiting permission with a one-line summary — and, when the user's last reply to it never arrived, that it did not and why. The summary the user hears and the detail they may ask for are one and the same facts.
+What the system knows about one Session, structured for telling the user: its name, its agent, its state (waiting for a decision, requesting permission, waiting on another Session or its own Child Process, finished, or running), its newest message, and the decision it is waiting on — the question with its options and any recommendation, or the tool awaiting permission with a one-line summary — and, when the user's last reply to it never arrived, that it did not and why. The summary the user hears and the detail they may ask for are one and the same facts.
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
@@ -43,7 +43,7 @@ What one Session said and was told, read on request in pages of a configured siz
 _Avoid_: progress (the retired verb), transcript, log, tail
 
 **Stop Notice**:
-A Session Brief published as text — what the Companion Channel receives whenever a Session stops, whatever it stopped on, with the Session's newest message carried whole when the surface can hold it and cut with a marker that says so when it cannot. It is an Anchor; once the decision it carried can no longer be answered from here it is marked as handled where it was sent, and it stays a reply target for the user's words. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
+A Session Brief published as text — what the Companion Channel receives whenever a Session stops, whatever it stopped on, with the Session's newest message carried whole when the surface can hold it and cut with a marker that says so when it cannot. It is an Anchor; once the decision it carried has been answered from the Companion Channel, or the Session has ended, it is marked as handled where it was sent — a question the user answered at the terminal leaves it as sent — and it stays a reply target for the user's words. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
 _Avoid_: announcement (the act, not the thing)
 
 **Cool-down**:
@@ -139,12 +139,16 @@ The one codex the machine already has, as the three facts everything on this sid
 _Avoid_: daemon as the name of the subcommand family this replaced — in code and the ADRs it is the defined short name for the shared app-server (ADR 0020, vocabulary amendment), and new prose says "shared app-server"; managed binary, standalone, bundled codex
 
 **Session**:
-One interactive terminal run of Claude Code or Codex. The system sees every Session on the machine, reads what it stopped on, and Relays into it. It sees one by recognising it from what the machine already shows — never by wrapping or instrumenting it — so a Session it cannot recognise is under-reported and said to be, never invented (ADR 0020).
+One run of Claude Code or Codex that has a controlling terminal — somewhere a person can type. The system sees every Session on the machine, reads what it stopped on, and Relays into it. It sees one by recognising it from what the machine already shows — never by wrapping or instrumenting it — so a Session it cannot recognise is under-reported and said to be, never invented (ADR 0020).
 _Avoid_: task, job, window, launched Session (the system launches nothing)
 
 **Child Process**:
 A process a Session spawns — a subagent, a review crew, a named in-process teammate. Which of those an agent builds it as is the agent's own mechanism and changes nothing here: it appears in the roster under its Session and nothing more, with no Relay, no Stop Notice and no Session Name. A child the agent addresses by a name of its own is still nameless in this sense — that address is the agent's handle on it, never something the user says to reach it.
 _Avoid_: child Session, subagent and teammate (the agent's mechanism words), crew
+
+**Headless Run**:
+One complete run of Claude Code or Codex — its own process, record and transcript — with no controlling terminal: nobody can type into it, one prompt goes in and it exits when done. Recognised by that fact alone, for both agents, never by a launch flag or the prompt's wording. It is seen and kept as an internal row so that its silence has somewhere to live, and it is otherwise silent: no Stop Notice, no ended line, no Anchor, no Relay, and no row in the Roster Brief. A run typed by hand into a shell keeps that shell's terminal and is therefore a Session.
+_Avoid_: Witness, reviewer, `--print`, batch run, one-shot (a plugin's or a flag's words for the same thing)
 
 **Session Name**:
 What the user and the system call one Session: `<project> · <task>`, where the project is the
@@ -174,5 +178,5 @@ A Relay of the user's verdict on a Session's pending permission request — one 
 _Avoid_: auto-approve (the user decides, the system only carries), permission bypass, approval budget (the engine keeps none), closing notice (retired)
 
 **Reply Window**:
-The state in which a Session will act on the next Relay as its next turn. While it is closed, Relays wait.
+The state in which a Session will act on the next Relay as its next turn. While it is closed, Relays wait — for as long as the Session lives, with no time ceiling; a waiting Relay ends only by going in or by the Session ending.
 _Avoid_: idle state (a Session can be busy yet accepting), input prompt

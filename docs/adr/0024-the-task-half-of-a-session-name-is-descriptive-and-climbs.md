@@ -46,3 +46,10 @@ is **ported**. All judgement lives in the one pure naming module; adapters carry
 facts and the resolved project name; the module lives in Bridge Core (ADR 0001:
 `core` imports no adapter), which calls it and stores the result and the rung it
 came from.
+
+## Amendment 2026-09-09: an absolute path is refused as a first-words candidate (map [#310](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/310), [#317](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/317))
+
+On 2026-09-09 seven crew workers were first named by the floor — `306-306-ed` and its siblings — and then **climbed to a path**: their first prompt was a slash command whose argument begins with a file path, cleaning stripped the wrapper to that argument, and forty characters of it, `/Users/simon/Documents/coding/GPT-VoiceC`, outranked the derived name for the rest of the day. The ladder did exactly what this document says; the candidate was the problem.
+
+The first-words rung's validation gains one refusal beside no-words, more-than-one-line and carries-the-separator: **a candidate whose first character is `/` or `~` is refused** as "a task that is an absolute path", logged like every refusal, and the ladder falls to the next rung. A relative path is kept — `crewtask/21` is the task the user handed the driver and says so. Taking a path's last component was refused as inventing a name nobody can recognise; holding the notice for a better rung was unnecessary, the floor having been in place from the first stop.
+

@@ -64,3 +64,14 @@ The two sentences together now account for every live terminal that composed no 
 **What this decision refuses.** Wrapping, launching, configuring or otherwise instrumenting the user's `codex` so that it would carry an identifier is out of scope permanently: the product does not own the user's Sessions (#68, [#83](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/83), ADR 0012), and that route is exactly what generation 1 did and what was dropped.
 
 Both the rule and its one-second allowance are adjustable where they conflict with measured behaviour ([#164](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/164)) — but only against a measurement, which is the standard the four runs above and the two probes here were held to.
+
+## Amendment 2026-09-09: three tiers of run, told apart by the controlling terminal (map [#310](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/310), [#315](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/315))
+
+The sentence above — liveness and place come from the process table, identity from the agent's own records — now sorts every recognised run of either agent into one of three tiers, in Bridge Core and for both lanes alike:
+
+- a **Session** has a controlling terminal (`ps -o tty=` names one): somewhere a person can type, so it is briefed, noticed and Relayed into;
+- a **Headless Run** has none (`??`): a complete process with its own record and transcript that nobody can type into — a `claude --print` launched detached, a future `codex exec`. It is kept as an internal row and is otherwise silent (ADR 0021 §9 as amended);
+- a **Child Process** is a Session's own spawn, as `CONTEXT.md` already has it.
+
+The controlling terminal is the definition itself, not a proxy for it, and it is a fact the machine already shows — the standard this document holds every rule to. Claude Code's registry field `entrypoint` (`cli` / `sdk-cli`) agreed with it on every one of the 24 crew-spawned runs measured on 2026-09-09 and is **refused** all the same: it names a launch route, is the vendor's to rename or drop, and Codex has no counterpart. `kind`, the inherited `tmux` pane, the opening prompt's wording (it changed mid-afternoon with a plugin upgrade) and a plugin's environment variable were refused for the same reason. A crew worker started with `tmux new-window` has its own pane's terminal and is a Session; the seventeen Witness runs started with `start_new_session=True` had none and are Headless Runs. Where the tty read fails, the run is a Session: silencing a real Session is the expensive error, an extra ended line is the cheap one.
+

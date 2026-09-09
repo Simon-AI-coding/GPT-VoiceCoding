@@ -22,6 +22,8 @@ from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
     QUESTION_TOOL,
     SUMMARY_MAX_CHARS,
     analyse,
+    is_own_relay_turn,
+    is_visible,
     summarise,
 )
 from gpt_voicecoding.seams.agent import WaitingKind
@@ -548,3 +550,46 @@ class TestRecordsThisBuildHasNeverSeen:
         """
         record = called(QUESTION_TOOL, "q1", {"questions": [{"question": "Which?"}]})
         assert analyse([*turn(), record]).kind is WaitingKind.NONE
+
+
+#: The least of an Answer Relay of ours that these two predicates read: who
+#: delivered it (`origin`), that it is this Session's own turn, and the
+#: `promptSource` that makes `is_visible` drop it. The full record shape lives in
+#: one place only — `test_claude_transcript_tail.relayed`, copied from a real
+#: delivery — and is not restated here, so upstream moving it has one place to
+#: move (#305).
+RELAY: dict[str, Any] = {
+    "type": "user",
+    "isSidechain": False,
+    "userType": "external",
+    "promptSource": "system",
+    "origin": {"kind": "peer", "from": "uds:/tmp/cc-socks/vc-relay-60460.sock"},
+}
+
+
+class TestTheVisibilityRuleItself:
+    """#305: the rule keeps its one reason, and recognition sits beside it.
+
+    Both readers that admit our own Relay do it by asking a second predicate, so
+    what `is_visible` answers about a Relay must not move. `analyse` asks it
+    alone (`TestWhereTheTailBegins.test_our_own_relay_does_not_move_the_tail`),
+    and this pins the other half of that: the answer it gets.
+    """
+
+    def test_our_own_relay_is_still_not_visible(self) -> None:
+        assert is_visible(RELAY) is False
+
+    def test_our_own_relay_is_recognised_as_ours(self) -> None:
+        assert is_own_relay_turn(RELAY) is True
+
+    def test_another_peers_message_is_not_ours(self) -> None:
+        """No `vc-relay-` basename: somebody else's peer, and plumbing to us."""
+        theirs = RELAY | {"origin": RELAY["origin"] | {"from": "uds:/tmp/cc-socks/12323.sock"}}
+        assert is_own_relay_turn(theirs) is False
+
+    @pytest.mark.parametrize("field, value", [("isSidechain", True), ("userType", "internal")])
+    def test_recognition_is_not_a_way_past_the_other_two_rules(
+        self, field: str, value: Any
+    ) -> None:
+        """A child's work and a turn that is not this Session's stay excluded."""
+        assert is_own_relay_turn(RELAY | {field: value}) is False

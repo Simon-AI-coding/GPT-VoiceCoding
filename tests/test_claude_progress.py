@@ -38,6 +38,7 @@ from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import AgentKind
 from test_claude_stop_analysis import called, said, turn
 from test_claude_stop_wiring import ROSTER_WAITING, TARGET, adapter_holding, roster, transcript
+from test_claude_transcript_tail import RELAY_TAIL, relayed
 
 __all__ = ["roster"]  # the fixture is imported, and ruff must see it used
 
@@ -358,6 +359,104 @@ def test_stopped_discovery_and_inspection_carry_raw_naming_records(tmp_path, ros
     for found in (asyncio.run(adapter.discover()).rows[0], asyncio.run(adapter.inspect(TARGET))):
         assert found.first_prompt == raw
         assert found.ai_title == "  New\n title  "
+
+
+class TestARelayedFirstTurnNamesTheSession:
+    """#305: the other `is_visible` consumer, and the same words behind it.
+
+    #222 gave History the words the user said through the phone; the Session
+    Name's first-prompt rung (ADR-0024) read past them the same way and was out
+    of that ticket's scope. A Session whose first words arrived by Relay had no
+    prompt to name itself from and fell to the derived-name floor.
+    """
+
+    def test_the_relayed_words_are_the_first_prompt(self, tmp_path, roster) -> None:
+        """The symptom exactly: a first turn that arrived down the inbox socket."""
+        adapter = adapter_holding(transcript(tmp_path, [relayed("把登录页改成深色")]))
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt == "把登录页改成深色"
+
+    def test_the_announcement_wrapper_never_reaches_the_cleaner(self, tmp_path, roster) -> None:
+        """Upstream's boilerplate is the wrapper, not the user's instruction."""
+        adapter = adapter_holding(transcript(tmp_path, [relayed("可以继续")]))
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        found = asyncio.run(adapter.inspect(TARGET))
+        assert RELAY_TAIL not in (found.first_prompt or "")
+
+    def test_an_earlier_engine_process_relay_still_names_the_session(
+        self, tmp_path, roster
+    ) -> None:
+        """The address carries a pid and a configurable directory; the shape is ours."""
+        adapter = adapter_holding(
+            transcript(
+                tmp_path,
+                [relayed("可以继续", origin_from="uds:/var/run/other/vc-relay-12323.sock")],
+            )
+        )
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt == "可以继续"
+
+    def test_another_peers_message_is_still_plumbing(self, tmp_path, roster) -> None:
+        """No `vc-relay-` basename: not ours, and the `system` exclusion stands."""
+        adapter = adapter_holding(
+            transcript(tmp_path, [relayed("可以继续", origin_from="uds:/tmp/cc-socks/12323.sock")])
+        )
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt is None
+
+    def test_an_injection_with_no_origin_is_still_plumbing(self, tmp_path, roster) -> None:
+        """A `<task-notification>` block is what the exclusion was written for."""
+        injected = said("<task-notification>done</task-notification>", role="user")
+        injected["promptSource"] = "system"
+        adapter = adapter_holding(transcript(tmp_path, [injected]))
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt is None
+
+    def test_an_unknown_wrapper_keeps_the_whole_text_rather_than_dropping_it(
+        self, tmp_path, roster
+    ) -> None:
+        """Upstream's wrapper changes; the cleaner meeting it beats losing the words."""
+        adapter = adapter_holding(
+            transcript(tmp_path, [relayed("可以继续", text="Some future wrapper: 可以继续")])
+        )
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        found = asyncio.run(adapter.inspect(TARGET))
+        assert found.first_prompt == "Some future wrapper: 可以继续"
+
+    def test_a_relay_that_is_a_child_process_record_is_still_excluded(
+        self, tmp_path, roster
+    ) -> None:
+        """Recognition adds a way in; it does not widen the sidechain rule."""
+        ours = relayed("可以继续")
+        ours["isSidechain"] = True
+        adapter = adapter_holding(transcript(tmp_path, [ours]))
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt is None
+
+    def test_a_relay_that_is_not_external_is_still_excluded(self, tmp_path, roster) -> None:
+        """Nor the `external` rule."""
+        ours = relayed("可以继续")
+        ours["userType"] = "internal"
+        adapter = adapter_holding(transcript(tmp_path, [ours]))
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt is None
+
+    def test_a_typed_first_turn_still_wins_over_a_later_relay(self, tmp_path, roster) -> None:
+        """The rung is the *first* prompt, and admitting a Relay does not reorder it."""
+        adapter = adapter_holding(
+            transcript(tmp_path, [said("typed first", role="user"), relayed("relayed second")])
+        )
+        roster(LaneDiscovery(rows=(row(SessionState.IDLE),)))
+
+        assert asyncio.run(adapter.inspect(TARGET)).first_prompt == "typed first"
 
 
 def test_missing_transcript_has_no_naming_candidates(tmp_path, roster):

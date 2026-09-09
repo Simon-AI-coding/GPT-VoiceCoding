@@ -301,6 +301,10 @@ class RelayOutcome:
     #: What the receipt's reaction is put on, carried on the outcome because
     #: every settlement re-renders it and the queue row is gone by the last one.
     message_id: str = ""
+    #: Where those words came from, as the channel names it — echoed onto a
+    #: receipt so it goes back the way they came (ADR 0021 §4). Empty from every
+    #: caller with no surface behind it, exactly as `message_id` is.
+    origin: str = ""
 
     def __post_init__(self) -> None:
         if (self.state is Lifecycle.DELIVERED) is not (
@@ -346,6 +350,7 @@ class RelayPipeline:
         route: RelayRoute = RelayRoute.DELIVER,
         request_id: RequestId | None = None,
         message_id: str = "",
+        origin: str = "",
     ) -> RelayOutcome:
         """Take the user's words for one Session. Delivers now, or queues them.
 
@@ -356,7 +361,10 @@ class RelayPipeline:
         words in, opaque here and carried onto every outcome this Relay ever
         produces, because the receipt for them is a reaction on that message
         (ADR 0021). Empty from every caller that has no message — the CLI, the
-        Voice, a button press — and those receipts stay sentences.
+        Voice, a button press — and those receipts stay sentences. `origin` is
+        that message's own origin, travelling the same way and for the same
+        reason: the receipt for these words may be sent long after this call
+        returned, and it goes back where they came from.
         """
         session = self._sessions.resolve(target)
         adapter = self._adapter(target)
@@ -392,6 +400,7 @@ class RelayPipeline:
                 route=chosen,
                 reason=RelayReason.QUESTION_UNANSWERABLE,
                 message_id=message_id,
+                origin=origin,
             )
         may_go_now = chosen is RelayRoute.SUPPLEMENT or window is ReplyWindow.OPEN
         # ADR 0015's route, and the only one here that carries the user's own
@@ -424,6 +433,7 @@ class RelayPipeline:
                     receipt=attempt,
                     authority=authority,
                     message_id=message_id,
+                    origin=origin,
                 )
             _log.info(
                 "relay %s not proven delivered (%s: %s); it waits",
@@ -441,7 +451,13 @@ class RelayPipeline:
         # Anything that did not prove delivery waits for the next window, and a
         # SUPPLEMENT that could not go mid-turn waits as an ordinary DELIVER.
         self._enqueue(
-            rid, target, text, receipt=receipt, message_id=message_id, authority=authority
+            rid,
+            target,
+            text,
+            receipt=receipt,
+            message_id=message_id,
+            origin=origin,
+            authority=authority,
         )
         return RelayOutcome(
             request_id=rid,
@@ -452,6 +468,7 @@ class RelayPipeline:
             receipt=receipt,
             authority=authority,
             message_id=message_id,
+            origin=origin,
         )
 
     async def reply_window_opened(self, target: SessionTarget) -> tuple[RelayOutcome, ...]:
@@ -501,6 +518,7 @@ class RelayPipeline:
                     reason=reason_for(receipt),
                     receipt=receipt,
                     message_id=waiting.message_id,
+                    origin=waiting.origin,
                     # What the route made of the words when they were taken
                     # (ADR 0013 §3). A receipt sent minutes later owes the user
                     # the same clause as one sent at once, and re-deriving it
@@ -551,6 +569,7 @@ class RelayPipeline:
         *,
         receipt: DeliveryReceipt | None,
         message_id: str = "",
+        origin: str = "",
         authority: RelayAuthority = RelayAuthority.WORDS,
     ) -> PendingRelay:
         return self._relays.enqueue(
@@ -563,6 +582,7 @@ class RelayPipeline:
                 route=RelayRoute.DELIVER,
                 receipt=receipt,
                 message_id=message_id,
+                origin=origin,
                 authority=authority,
             )
         )
@@ -590,6 +610,7 @@ class RelayPipeline:
             reason=reason,
             receipt=released.receipt,
             message_id=released.message_id,
+            origin=released.origin,
             authority=released.authority,
         )
 

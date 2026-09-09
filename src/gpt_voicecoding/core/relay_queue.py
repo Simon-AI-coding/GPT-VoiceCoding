@@ -82,6 +82,12 @@ class PendingRelay:
     #: reaction on that message (ADR 0021) — can be re-rendered on every
     #: settlement, including the one that takes the entry out.
     message_id: str = ""
+    #: The channel's opaque reference to where the words came from, echoed onto
+    #: a receipt sent later so it goes back the way they came (ADR 0021 §4).
+    #: Held beside the id for the same reason: this entry can settle minutes
+    #: after the call that queued it returned, and the surface that answers then
+    #: has nothing else to read it off.
+    origin: str = ""
     #: What the route made of these words when they were taken (ADR 0013 §3).
     #: Held for the same reason as the id: a receipt sent minutes later carries
     #: the no-authority clause on the same test as the one sent at once, and a
@@ -113,6 +119,16 @@ class RelayQueue:
             raise DuplicateRelayError(pending.request_id)
         self._pending[pending.request_id] = pending
         return pending
+
+    def holds(self, request_id: RequestId) -> bool:
+        """Whether this queue is still holding that Relay.
+
+        The one question a reader outside the pipeline asks about an entry's
+        *life* rather than its contents: a Relay that has left the queue has
+        come to rest, and what a surface hung on it can be forgotten with it
+        (`core/bridge.py::_render_reaction`).
+        """
+        return request_id in self._pending
 
     def pending(self) -> tuple[PendingRelay, ...]:
         """Everything still waiting, in the order it arrived."""

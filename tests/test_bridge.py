@@ -1531,6 +1531,76 @@ class TestTheReceiptIsAReactionOnTheUsersOwnMessage:
         assert hub.channel.reactions == [(self.THEIRS, self.WAITING)]
         assert len(hub.channel.sent) == 1
 
+    def test_a_repeated_duplicate_risk_receipt_says_nothing_a_second_time(self) -> None:
+        """Words nobody can vouch for stay in the queue too, so their entry stays."""
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.agent.outcome = Delivery.UNKNOWN
+        hub.agent.reason = "no readback"
+        self.said(hub)
+        (pending,) = hub.state.relays.pending()
+
+        hub.emit(
+            RelayReceipt(
+                target=CODEX,
+                receipt=DeliveryReceipt(
+                    request_id=pending.request_id,
+                    outcome=Delivery.UNKNOWN,
+                    reason="still no readback",
+                ),
+            )
+        )
+
+        assert hub.channel.reactions == []
+        assert len(hub.channel.sent) == 1
+
+    def test_a_repeated_held_receipt_neither_reacts_again_nor_says_it_twice(self) -> None:
+        """A held Relay stays in the queue, so its entry stays too (#321).
+
+        Dropping it on the reason made a second late receipt at the same grade
+        re-render an emoji already standing and repeat a sentence already sent.
+        """
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.agent.outcome = Delivery.HELD
+        hub.agent.reason = "parked for a human"
+        self.said(hub)
+        (pending,) = hub.state.relays.pending()
+
+        hub.emit(
+            RelayReceipt(
+                target=CODEX,
+                receipt=DeliveryReceipt(
+                    request_id=pending.request_id,
+                    outcome=Delivery.HELD,
+                    reason="still parked for the same human",
+                ),
+            )
+        )
+
+        assert hub.channel.reactions == [(self.THEIRS, self.HELD)]
+        assert len(hub.channel.sent) == 1
+
+    def test_a_relay_that_leaves_the_queue_leaves_no_entry_behind(self) -> None:
+        """The entry lives exactly as long as the queue row does."""
+        hub = Hub()
+        self.said(hub)
+        assert hub.core._relay_reactions
+
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        assert hub.state.relays.pending() == ()
+        assert hub.core._relay_reactions == {}
+
+    def test_a_sentence_goes_back_the_way_the_words_came(self) -> None:
+        """ADR 0021 §4: a receipt sent later echoes the origin the words arrived on."""
+        hub = Hub()
+        hub.channel.react_stands = False
+
+        hub.emit(InboundText(text="ship it", message_id=self.THEIRS, origin="chat:1"))
+        hub.emit(SessionEnded(target=CODEX))
+
+        said = hub.channel.sent.index("That Session ended before your words could go.")
+        assert hub.channel.origins[said] == "chat:1"
+
     def test_a_sentence_hangs_under_the_message_the_words_were_typed_in(self) -> None:
         """ADR 0021: the sentence is sent as a reply to the user's own message."""
         hub = Hub(window=ReplyWindow.OPEN)

@@ -77,7 +77,6 @@ from gpt_voicecoding.core.relays import (
     RelayAuthority,
     RelayOutcome,
     RelayPipeline,
-    RelayReason,
     reaction_for,
     reason_for,
     receipt_sentence,
@@ -823,7 +822,12 @@ class BridgeCore:
         return outcome
 
     async def answer_approval(
-        self, approval_id: str, verdict: ApprovalVerdict, *, message_id: str = ""
+        self,
+        approval_id: str,
+        verdict: ApprovalVerdict,
+        *,
+        message_id: str = "",
+        origin: str = "",
     ) -> RelayOutcome | None:
         """Carry the user's verdict. None when no live row carries that handle.
 
@@ -882,8 +886,10 @@ class BridgeCore:
             # amendment): the one route besides the held hook that carries it.
             authority=RelayAuthority.AS_THE_USER,
             # The message the numeral was typed in, where it was typed at all —
-            # what the receipt's reaction goes on (#321).
+            # what the receipt's reaction goes on — and where it came from, so a
+            # receipt sent later goes back the same way (#321).
             message_id=message_id,
+            origin=origin,
         )
         # An Approval Relay is the user's own words arriving too (#165 Q2 sets
         # the focus from it for that reason), so a verdict that lands clears
@@ -1734,7 +1740,9 @@ class BridgeCore:
         """
         assert found.target is not None  # the router sets one for every ANSWER_RELAY
         try:
-            outcome = await self.relays.relay(found.target, found.text, message_id=message_id)
+            outcome = await self.relays.relay(
+                found.target, found.text, message_id=message_id, origin=origin
+            )
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
@@ -1775,7 +1783,7 @@ class BridgeCore:
         assert found.target is not None and found.verdict is not None
         try:
             outcome = await self.answer_approval(
-                found.approval_id, found.verdict, message_id=message_id
+                found.approval_id, found.verdict, message_id=message_id, origin=origin
             )
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
@@ -1822,21 +1830,34 @@ class BridgeCore:
             )
         if not outcome.message_id:
             return
-        stood = await self._render_reaction(outcome)
+        moved, stood = await self._render_reaction(outcome)
+        if not moved:
+            # This standing has already had its receipt — the emoji, or the
+            # sentence that stood in for one the surface refused. A late receipt
+            # that repeats a grade is not news, and saying it again is how one
+            # Relay becomes two identical messages about it.
+            return
         if sentence_stands_alone(outcome.reason) or not stood:
             # A reply rather than a push: this is the answer to words the user
-            # sent, and the control plane is never gated (ADR 0002). It hangs
-            # under the message those words were typed in, so a chat holding
-            # several Relays says which one this sentence is about (ADR 0021);
-            # and it names the Session, so it is an Anchor like every receipt.
+            # sent, so it goes back the way they came (ADR 0021 §4) and is never
+            # gated (ADR 0002). It hangs under the message those words were
+            # typed in, so a chat holding several Relays says which one this
+            # sentence is about; and it names the Session, so it is an Anchor
+            # like every receipt.
             await self._reply(
                 receipt_sentence(outcome),
+                origin=outcome.origin,
                 anchor=_receipt_anchor(outcome.target),
                 reply_to=outcome.message_id,
             )
 
-    async def _render_reaction(self, outcome: RelayOutcome) -> bool:
-        """Put this standing's emoji on the message, and say whether it stands.
+    async def _render_reaction(self, outcome: RelayOutcome) -> tuple[bool, bool]:
+        """Put this standing's emoji on the message. Answers two facts.
+
+        Whether the standing **moved** — a settlement at the standing already
+        rendered asks the surface nothing and owes the user nothing — and, when
+        it did, whether the reaction **stands**, which is what decides between
+        the emoji and the sentence that stands in for it.
 
         **The state is tracked here because the bot cannot read it back.** A
         reaction in a private chat is not something Telegram will report, so a
@@ -1847,11 +1868,16 @@ class BridgeCore:
         outward, because the row is released before the last settlement renders
         it (`core/relays.py::RelayPipeline._report_failed`).
 
-        **Every standing but `AWAITING_REPLY_WINDOW` drops its entry**, because
-        every other one is where a Relay comes to rest: the words went in, the
-        Session went, the question closed, or they are parked somewhere this
-        system will not send them again. What is left is the emoji resting on
-        the message, which is the receipt.
+        **The entry lives exactly as long as the queue row does.** It is dropped
+        when the pipeline has released the Relay — the words went in, the
+        Session went, the question was refused before the wire — and kept while
+        the queue still holds it, which includes the two standings that are
+        terminal for *sending* and not for the entry: words parked in front of a
+        person, and words nobody can vouch for. Both stay in the queue, so both
+        can settle again on a late receipt, and an entry dropped on the reason
+        would make that second settlement re-render an emoji already standing
+        and say a sentence already said. What is left when it does go is the
+        emoji resting on the message, which is the receipt.
 
         Not persisted, like the queue it shadows — an engine that restarts
         leaves whatever it last set standing there, and no reader here rebuilds
@@ -1859,18 +1885,19 @@ class BridgeCore:
         reopened by this).
         """
         wanted = reaction_for(outcome.reason)
-        # Absent and `None` are the same standing here — no emoji on the
-        # message — so a reason that wears none never asks the surface to clear
-        # a reaction nothing ever set.
-        standing = self._relay_reactions.get(outcome.request_id)
+        # **Never rendered and rendered as nothing are different.** A Relay this
+        # table has no row for has had no receipt at all, and a row holding
+        # `None` is one whose standing wears no emoji and has already been
+        # answered in words. Reading the absence as `None` would swallow the
+        # first receipt of the two standings that wear nothing.
+        rendered = self._relay_reactions.get(outcome.request_id)
+        moved = outcome.request_id not in self._relay_reactions or rendered != wanted
         stood = True
-        if wanted != standing:
+        if moved and not (wanted is None and rendered is None):
+            # There is an emoji to set, or one standing to take away. A standing
+            # that wears none, on a message that wears none, asks the surface
+            # for nothing.
             stood = await self._channel.react(outcome.message_id, wanted)
-            # Recorded whether or not it stood, because "not retried" is what
-            # the fallback buys: a standing that has been attempted has had its
-            # receipt, in the emoji or in the sentence, and settling at the same
-            # standing again must not ask twice or say it twice.
-            self._relay_reactions[outcome.request_id] = wanted
             if not stood:
                 _log.info(
                     "the receipt for relay %s could not be a reaction, so it is a sentence: "
@@ -1878,9 +1905,14 @@ class BridgeCore:
                     outcome.request_id,
                     outcome.reason,
                 )
-        if outcome.reason is not RelayReason.AWAITING_REPLY_WINDOW:
+        if moved:
+            # Recorded whether or not it stood, because "not retried" is what
+            # the fallback buys: a standing that has been attempted has had its
+            # receipt, in the emoji or in the sentence.
+            self._relay_reactions[outcome.request_id] = wanted
+        if not self._state.relays.holds(outcome.request_id):
             self._relay_reactions.pop(outcome.request_id, None)
-        return stood
+        return moved, stood
 
     async def _push(
         self, text: str, *, notice: Notice | None = None, anchor: Anchor | None = None

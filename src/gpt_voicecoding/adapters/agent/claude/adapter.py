@@ -89,7 +89,7 @@ from gpt_voicecoding.adapters.agent.claude.bootstrap import (
     publish_address,
     withdraw_address,
 )
-from gpt_voicecoding.adapters.agent.claude.inbox import InboxError, ReplyInbox
+from gpt_voicecoding.adapters.agent.claude.inbox import ADDRESS_PREFIX, InboxError, ReplyInbox
 from gpt_voicecoding.adapters.agent.claude.recovery import (
     SessionReport,
     default_projects_directory,
@@ -98,8 +98,10 @@ from gpt_voicecoding.adapters.agent.claude.recovery import (
 from gpt_voicecoding.adapters.agent.claude.registry import (
     RegistryError,
     default_registry_directory,
+    pid_is_live,
     read_record,
 )
+from gpt_voicecoding.adapters.agent.claude.registry import records as registry_records
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import (
     TranscriptReader,
@@ -707,6 +709,8 @@ class ClaudeAgentAdapter:
             )
 
         found = base if state is SessionState.RUNNING else stop_analysis.analyse(records)
+        if state is not SessionState.RUNNING:
+            found = self._awaiting(target, found, state=state)
         waiting = base if state is SessionState.RUNNING else self._overlay(target, base, found)
         anchored_question = (
             found
@@ -875,6 +879,85 @@ class ClaudeAgentAdapter:
         base = roster if roster is not None else WaitingFor()
         reading = self._read_session(target, base, state=SessionState.IDLE)
         return StopReading(waiting_for=reading.waiting_for, progress=reading.progress)
+
+    def _awaiting(
+        self,
+        target: SessionTarget,
+        found: WaitingFor,
+        *,
+        state: SessionState,
+    ) -> WaitingFor:
+        """Who this stopped turn left the ball with, if it left it with anybody (#320).
+
+        **Two parties and one word to the user**, so they are settled together
+        and in one order. A peer send is the *turn's own tail* — the last thing
+        the Session did — and a child is something it left running behind it, so
+        a turn that ended on a peer send is announced as waiting on that peer
+        even with a background command still going: the newest fact is the one
+        the notice is about.
+
+        **The recipient is resolved here because only this side can resolve it.**
+        `stop_analysis` is pure and reads no registry, so it carries out the raw
+        `to` the Session typed; this turns it into an address of a Session the
+        engine actually knows, and a recipient that names none is **not this
+        state at all** — the ticket's own rule, and the safe one: a 🟣 naming
+        nobody tells the user less than a 🟢 does.
+
+        **The child wait enters through the existing child tracking** (ADR 0021
+        as amended), which is why there is no second reading of the transcript
+        here: `Children` already answers *what is this Session running*, and this
+        asks it that question rather than a new one of its own.
+        """
+        if found.kind is WaitingKind.PEER:
+            peer = self._peer_target(found.awaiting)
+            if peer is not None:
+                return replace(found, awaiting=str(peer))
+            _log.info(
+                "%s ended its turn messaging %r, which names no Session this engine knows; "
+                "announcing it as a turn that finished",
+                target,
+                found.awaiting,
+            )
+            found = WaitingFor()
+        if found.kind is not WaitingKind.NONE:
+            return found
+        return self._children.awaiting(
+            pid=target.pid,
+            state=state,
+            transcript=self._transcript_path(target),
+        )
+
+    def _peer_target(self, recipient: str | None) -> SessionTarget | None:
+        """The Session a `SendMessage` recipient names, if this engine knows one.
+
+        Two spellings, because a Session is addressed by either: the name Claude
+        Code publishes for it, and the socket address that name resolves to. Both
+        are written in the same registry record, so one pass answers for both.
+
+        The registry rather than this adapter's own roster, because that is where
+        a Session's *address* is written down: a Session this engine has not
+        discovered yet still has a record, and refusing it would make the state
+        depend on the cadence rather than on what the Session did. Liveness is
+        the one thing the file cannot say and is therefore asked separately
+        (`registry.pid_is_live`, the same split that module already draws): a
+        record outlives its process, and this state's whole job is to say whose
+        turn it is.
+        """
+        if not recipient:
+            return None
+        for record in registry_records(self._registry_directory):
+            if recipient not in (record.name, f"{ADDRESS_PREFIX}{record.messaging_socket}"):
+                continue
+            if not pid_is_live(record.pid):
+                # A record outlives the process that wrote it. Naming a Session
+                # off a stale file would invent one, and the whole state exists
+                # to tell the user whose turn it is — so a record with nobody
+                # behind it names nobody, and the turn reads as `finished`.
+                continue
+            return SessionTarget(
+                agent=AgentKind.CLAUDE, session_id=record.session_id, pid=record.pid
+            )
+        return None
 
     def _overlay(
         self,

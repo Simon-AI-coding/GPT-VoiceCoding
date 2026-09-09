@@ -118,14 +118,44 @@ NEWEST_WORDING: Mapping[NewestState, str] = {
     NewestState.OVERSIZE: "the newest entry is too large to carry",
 }
 
-#: How each state is said. The three spoken states are #165 Q1's own words.
+#: How each state is said. The three spoken states are #165 Q1's own words, and
+#: `waiting on {name}` is #320's — the one entry that is a **template**, because
+#: it is the one state whose word names somebody. Core fills it (`state_word`);
+#: no surface ever sees the braces.
 STATE_WORDING: Mapping[BriefState, str] = {
     BriefState.DECISION: "waiting for your decision",
     BriefState.PERMISSION: "requesting permission",
+    BriefState.WAITING_ON: "waiting on {name}",
     BriefState.FINISHED: "finished",
     BriefState.RUNNING: "running",
-    BriefState.UNREADABLE: "unreadable",
 }
+
+#: The two things `{name}` is filled with when no one party can be named, side
+#: by side because they are one decision: every user-facing word lives in this
+#: module (ADR 0021 §5), and a filler invented at a call site would be a second
+#: vocabulary.
+#:
+#: `BACKGROUND_COMMAND` is the child that has no name to give — the lane carries
+#: `awaiting=None` for it, and naming it from its command line is refused (#320:
+#: a command line is not a name, and it is not the user's word for anything).
+#: `SOMEBODY_ELSE` is the counts line, which groups Sessions by state and so has
+#: no single party to name at all.
+BACKGROUND_COMMAND: Final = "a background command"
+SOMEBODY_ELSE: Final = "somebody else"
+
+
+def state_word(state: BriefState, awaited: str | None = None) -> str:
+    """One state, in the words the user is told — with `{name}` filled.
+
+    **One filler, one place.** Five of the six readers of `STATE_WORDING` in
+    this module have a party to name and one does not, and every one of them
+    goes through here: a template rendered at a call site is a template one call
+    site will forget to render, and `waiting on {name}` printed literally is the
+    engine showing the user its own plumbing.
+    """
+    if state is not BriefState.WAITING_ON:
+        return STATE_WORDING[state]
+    return STATE_WORDING[state].format(name=awaited if awaited else BACKGROUND_COMMAND)
 
 
 class NoticeWord(StrEnum):
@@ -398,6 +428,11 @@ class SessionBrief:
     name: SessionName | None
     agent: AgentKind
     state: BriefState
+    #: Who this Session is waiting on, as the user calls them — the awaited
+    #: Session's own Session Name, or the awaited child's name. `None` on every
+    #: state but `WAITING_ON`, and on a `WAITING_ON` whose party has no name of
+    #: its own, which `state_word` says in the wording table's words (#320).
+    awaited: str | None
     newest: Newest
     #: `None` when nothing is being asked — a running or finished Session.
     decision: Decision | None
@@ -417,6 +452,10 @@ class RosterRow:
     name: SessionName | None
     agent: AgentKind
     state: BriefState
+    #: Who this row is waiting on, as `SessionBrief.awaited` carries it. The
+    #: header row says the same word as the whole brief, so it is resolved once
+    #: and carried, never re-derived by a renderer.
+    awaited: str | None = None
     #: Whether this is the Focus Session. Exactly one row may carry it.
     focus: bool = False
 
@@ -460,7 +499,7 @@ def roster(sessions: Sequence[Session], focus: SessionTarget | None) -> RosterBr
     rule is stated once rather than once per surface.
     """
     rows = tuple(
-        _row(session, focus=session.target == focus)
+        _row(session, focus=session.target == focus, peers=sessions)
         for session in sessions
         if session.is_addressable
     )
@@ -477,7 +516,12 @@ def roster(sessions: Sequence[Session], focus: SessionTarget | None) -> RosterBr
     )
 
 
-def session(session: Session, *, question_answerable: bool = False) -> SessionBrief:
+def session(
+    session: Session,
+    *,
+    question_answerable: bool = False,
+    peers: Sequence[Session] = (),
+) -> SessionBrief:
     """One Session, briefed from the row as it stands.
 
     `question_answerable` is the one fact a row cannot carry: whether the lane
@@ -486,6 +530,15 @@ def session(session: Session, *, question_answerable: bool = False) -> SessionBr
     the hub passes it in rather than this module inventing it — the default is
     the safe one, because a question announced as answerable from here and
     answerable only at the terminal is worse than no announcement at all.
+
+    `peers` is the roster this Session sits in, and it is needed for one word:
+    a Session waiting on another is announced by **that** Session's Session Name
+    (#320), which no single row carries. Handed in rather than reached for,
+    because this module is a function of what it is given; and read here rather
+    than stored at the Stop, because a Session Name climbs (ADR 0024) and a name
+    resolved minutes ago would be announced stale. An empty roster is the honest
+    default: the address the lane resolved stands in, the way it stands in for
+    every Session with no name yet.
     """
     state = _state(session)
     return SessionBrief(
@@ -493,6 +546,7 @@ def session(session: Session, *, question_answerable: bool = False) -> SessionBr
         name=session.name,
         agent=session.target.agent,
         state=state,
+        awaited=_awaited(session, peers),
         newest=_newest(session.progress),
         decision=_decision(session),
         answerable_here=_answerable_here(session, question_answerable=question_answerable),
@@ -564,7 +618,7 @@ def spoken(brief: SessionBrief) -> SpokenBrief:
     return SpokenBrief(
         name=brief.name if brief.name is not None else str(brief.target),
         agent=str(brief.agent),
-        state=STATE_WORDING[brief.state],
+        state=state_word(brief.state, brief.awaited),
         newest=brief.newest.words,
         decision=tuple(line.strip() for line in _decision_lines(brief)),
         answerable_here=_answer_wording(brief.answerable_here),
@@ -593,7 +647,7 @@ def notice(brief: SessionBrief) -> SessionNotice:
     question, options, recommendation = _asked(brief)
     return SessionNotice(
         state=brief.state,
-        state_word=STATE_WORDING[brief.state],
+        state_word=state_word(brief.state, brief.awaited),
         agent=str(brief.agent),
         name=brief.name if brief.name is not None else str(brief.target),
         question=question,
@@ -618,7 +672,7 @@ def roster_notice(brief: RosterBrief) -> RosterNotice:
         rows=tuple(
             RosterRowNotice(
                 state=row.state,
-                state_word=STATE_WORDING[row.state],
+                state_word=state_word(row.state, row.awaited),
                 agent=str(row.agent),
                 name=row.name if row.name is not None else str(row.target),
             )
@@ -652,7 +706,11 @@ def for_call(
     summary = roster(sessions, focus)
     by_target = {live.target: live for live in sessions}
     briefs = [
-        session(by_target[row.target], question_answerable=row.target in answerable)
+        session(
+            by_target[row.target],
+            question_answerable=row.target in answerable,
+            peers=sessions,
+        )
         for row in summary.rows
         if row.target in by_target and earns_a_brief(by_target[row.target])
     ]
@@ -686,14 +744,41 @@ def text(brief: SessionBrief | RosterBrief) -> str:
 # ----------------------------------------------------------------------
 
 
-def _row(session: Session, *, focus: bool) -> RosterRow:
+def _row(session: Session, *, focus: bool, peers: Sequence[Session] = ()) -> RosterRow:
     return RosterRow(
         target=session.target,
         name=session.name,
         agent=session.target.agent,
         state=_state(session),
+        awaited=_awaited(session, peers),
         focus=focus,
     )
+
+
+def _awaited(session: Session, peers: Sequence[Session]) -> str | None:
+    """Who this Session is waiting on, in the user's own word for them (#320).
+
+    **The lane names the party and Core names it to the user**, which is the
+    same split every other word here follows. `WaitingFor.awaiting` is the
+    adapter's reference: a peer Session's address as this process spells one,
+    or a child's own name. This turns the first into the Session Name the user
+    calls that Session, by finding it on the roster it was handed.
+
+    A peer the roster does not hold is announced by the address the lane
+    resolved — the honest floor under every name (`core/sessions.py`,
+    ADR 0024), and the same answer this gives a Session that has no name yet.
+    A `WAITING_ON` with nothing at all to name is a child that has none, and
+    `state_word` is where that becomes words.
+    """
+    awaiting = session.waiting_for.awaiting
+    if session.waiting_for.kind is not WaitingKind.PEER:
+        # A child's name is already the name; nothing on the roster names it,
+        # because a Child Process is never named there (#78).
+        return awaiting
+    if awaiting is None:
+        return None
+    named = next((peer for peer in peers if str(peer.target) == awaiting), None)
+    return spoken_name(named) if named is not None else awaiting
 
 
 def _state(session: Session) -> BriefState:
@@ -702,21 +787,31 @@ def _state(session: Session) -> BriefState:
     Order matters. A **running** Session stays RUNNING however its progress
     read went: the state is the lifecycle's, and the read only fills the fields
     — a Session that is working is not a Session that stopped on something.
-    Everything else has stopped, and a stop nobody could read is UNREADABLE
-    before it is anything else (#166 B7).
+    Everything else has stopped.
+
+    **A stop nobody could read is no longer a state of its own** (#320). It was
+    UNREADABLE, ahead of everything (#166 B7); the word is retired, and what
+    replaces it is not a different guess but a smaller claim. A read that failed
+    and a wait nobody could classify both fall through to the text pass, which
+    finds no question and answers FINISHED — while `ProgressAvailability` and
+    `NewestState` still carry *why* into the body's omission sentence
+    (`NEWEST_WORDING`, unchanged). The user reads "finished · could not be read"
+    instead of a bare "unreadable", and never reads "waiting for your decision"
+    for a Session nobody asked anything of.
+
+    **PEER and CHILD are one word to the user, and the difference is only who**
+    (ADR 0021 as amended): the ball is somebody else's, and the user's action —
+    none — is the same for a peer Session and for a background command.
     """
     if session.state is SessionState.RUNNING:
         return BriefState.RUNNING
-    if (
-        session.progress.availability is ProgressAvailability.UNREADABLE
-        or session.waiting_for.kind is WaitingKind.UNKNOWN
-    ):
-        return BriefState.UNREADABLE
     match session.waiting_for.kind:
         case WaitingKind.QUESTION:
             return BriefState.DECISION
         case WaitingKind.PERMISSION:
             return BriefState.PERMISSION
+        case WaitingKind.PEER | WaitingKind.CHILD:
+            return BriefState.WAITING_ON
         case _:
             return _turn_ended(session)
 
@@ -724,14 +819,25 @@ def _state(session: Session) -> BriefState:
 def _turn_ended(session: Session) -> BriefState:
     """A Session that stopped and is waiting on nothing this reader can name.
 
-    Both lanes default to DECISION and are promoted only on the evidence in
-    `_asking` (#274). Structured questions and permissions took precedence in
-    `_state`; this text pass chooses state only, never a decision's contents.
-    Adapted from Codex's #166/#188 rule; legacy's unconditional finished wording
-    (`legacy@1d32845:bridge/host.py:226-234`) no longer settles a prose question.
+    **The default is reversed, and one deterministic rule decides** (#320, ADR
+    0021 as amended). #166 B2 made DECISION the default and `_asking` a
+    promotion gate out of it; the 2026-09-09 corpus measured what that cost —
+    an unread newest message and a hand-over that asked nothing were both
+    announced as *waiting for your decision*, so the light the user was told to
+    act on was the light that meant the engine could not tell. Now the evidence
+    runs the other way: DECISION is claimed only where `_asking` finds a
+    question, and everything else — including `answer is None`, which is a turn
+    nobody read — is FINISHED. A Session that really is asking still has its
+    structured question, which `_state` settled before reaching here.
+
+    Structured questions and permissions took precedence in `_state`; this text
+    pass chooses state only, never a decision's contents. Adapted from Codex's
+    #166/#188 rule; legacy's unconditional finished wording
+    (`legacy@1d32845:bridge/host.py:226-234`) does not settle a prose question
+    either, because a question mark still promotes.
     """
     answer = _final_answer(session.progress, phased=session.target.agent is AgentKind.CODEX)
-    if answer is None or _asking(answer):
+    if answer is not None and _asking(answer):
         return BriefState.DECISION
     return BriefState.FINISHED
 
@@ -757,19 +863,6 @@ _AUTOLINK: Final = re.compile(r"<[a-z][a-z0-9+.-]*:[^>\s]*>", re.IGNORECASE)
 #: rare spelling here; the English behaviour of this rule is **uncertain**
 #: (#176 §1.2) and errs toward DECISION, which is the cheap direction.
 _ASKS: Final = re.compile(r"[?？]")
-
-#: A labelled menu, which asks even when no interrogative survives: a line whose
-#: first word is `A`, `B` or `C` against a separator, or a named `选项 X` /
-#: `方案 X` anywhere. **No numeric-list clause, deliberately** — Codex is told to
-#: number its suggestions (`codex-rs/core/gpt_5_codex_prompt.md:47`), and it also
-#: numbers the findings of a review, which is the most common *done* shape in
-#: this corpus (#176 §3, §5). A comma is not a separator, so English prose
-#: reading "A, B and C" is not a menu.
-_OPTION_BLOCK: Final = re.compile(
-    r"^[ \t]*(?:[-*+>]\s*)?\**[ABC]\**[ \t]*[)\]】.。:：、\-—–【《]",
-    re.MULTILINE,
-)
-_NAMED_OPTION: Final = re.compile(r"(?:选项|方案)\s*[A-Za-z\d一二三四五六七八九十]")
 
 
 def _final_answer(progress: ProgressObservation, *, phased: bool = True) -> str | None:
@@ -822,22 +915,29 @@ def _final_answer(progress: ProgressObservation, *, phased: bool = True) -> str 
 def _asking(answer: str) -> bool:
     """Whether a final answer shows the user is being asked something.
 
-    #176 §5's heuristic C, measured at 86% recall and a 2% false-positive rate
-    over 72 hand-labelled finals. It is a **promotion gate**, not a classifier:
-    FINISHED is claimed only when this is false, so every shape it cannot read
-    keeps #166 B2's default. The tuned phrase list that scored higher on the
-    same sample is **not adopted** — it was fitted after reading that sample's
-    misses, and its number is not an estimate of anything (#176 §5, D).
+    **A question mark makes a decision; nothing else does** (#320, ADR 0021 as
+    amended 2026-09-09). This was #176 §5's heuristic C, and its two other
+    clauses — a lettered `A)` / `B)` option block, and a named `选项 X` /
+    `方案 X` — are **deleted**. They were a promotion gate out of a DECISION
+    default, where over-reading cost nothing; `_turn_ended` no longer defaults
+    that way, so every clause here now *creates* a 🟡 the user is told to act
+    on, and the same shape written twice must not get two words. A turn that
+    lays out lettered options and asks nothing is a report of what it did, and
+    that is 🟢. The tuned phrase list that scored higher on #176's sample stays
+    **not adopted**, for its own reason: it was fitted after reading that
+    sample's misses, and its number is not an estimate of anything (#176 §5, D).
+
+    What survives is the interrogative in either width, which is a mark the
+    writer put there on purpose rather than a shape a reader inferred.
 
     Legacy classified nothing here: `legacy@1d32845:bridge/transcript.py:431-454`
     returned `pending_question=None` for every Codex stop, on the ground that
-    "reporting nothing is the honest answer". **Dropped, because** #166 B2
-    reversed the default to DECISION, so the choice is no longer between
-    guessing and silence but between always claiming a decision and promoting
-    out of one on evidence.
+    "reporting nothing is the honest answer". **Dropped, because** the choice is
+    not between guessing and silence but between claiming a decision and
+    claiming one on evidence.
     """
     prose = _AUTOLINK.sub(" ", _CODE_SPAN.sub(" ", _LINK.sub(r"\1", _FENCED.sub(" ", answer))))
-    return bool(_ASKS.search(prose) or _OPTION_BLOCK.search(prose) or _NAMED_OPTION.search(prose))
+    return bool(_ASKS.search(prose))
 
 
 def _newest(progress: ProgressObservation) -> Newest:
@@ -866,8 +966,10 @@ def _newest(progress: ProgressObservation) -> Newest:
 def _decision(session: Session) -> Decision | None:
     """What it is waiting on, whole — or `None` when it is waiting on nothing.
 
-    Carried even when the state is UNREADABLE, because the brief keeps whatever
-    was read: a partial label is worth more to the user than a blank.
+    Carried whatever the state, because the brief keeps whatever was read: a
+    partial label is worth more to the user than a blank. A `PEER` or a `CHILD`
+    wait has no decision in it at all — nothing is being asked of the user — so
+    it falls to the same `None` a finished turn does.
     """
     waiting_for = session.waiting_for
     match waiting_for.kind:
@@ -1029,7 +1131,7 @@ def _spoken_roster(brief: RosterBrief, rows: list[RosterRow]) -> SpokenRosterBri
 
 
 def _session_lines(brief: SessionBrief) -> list[str]:
-    lines = [_headline(brief.name, brief.target, brief.state)]
+    lines = [_headline(brief.name, brief.target, brief.state, brief.awaited)]
     lines.append(f"  newest: {brief.newest.words}")
     lines.extend(_decision_lines(brief))
     lines.append(f"  answer: {_answer_wording(brief.answerable_here)}")
@@ -1086,10 +1188,10 @@ def _decision_lines(brief: SessionBrief) -> list[str]:
     about a permission dialog. The tool name is then the renderer's floor, which
     is where a name nobody supplied belongs.
 
-    A permission that reaches here under `UNREADABLE` — the progress read failed
-    on top of the dialog — is still recognised by its half of the fields, and one
-    that carries neither is the residue: it renders as an unreadable ask, which
-    is what it is.
+    A permission that reaches here under another state word — the progress read
+    failed on top of the dialog — is still recognised by its half of the fields,
+    and one that carries neither is the residue: it renders as an ask nobody
+    could read, which is what it is.
 
     Legacy (ADR 0010): `legacy@1d32845:bridge/host.py:213-235`
     (`SessionStopSpeech.render`) chose "This session is waiting for permission."
@@ -1150,7 +1252,7 @@ def _is_permission(brief: SessionBrief) -> bool:
     """Whether the decision a brief carries is a permission — the rule `_decision_lines` states.
 
     The state decides, and the two permission-only fields are the fallback for
-    a permission that reaches here under `UNREADABLE`. One predicate, so the
+    a permission whose state word says something else. One predicate, so the
     text renderer and the channel notice cannot come to read one stop two ways.
     """
     decision = brief.decision
@@ -1172,17 +1274,25 @@ def _roster_lines(brief: RosterBrief) -> list[str]:
     return lines
 
 
-def greeting(session: Session) -> str:
+def greeting(session: Session, peers: Sequence[Session] = ()) -> str:
     """The one line a menu greets one Session with: `text`'s own header for it (#264).
 
     The screen that offers `brief` / `history` / `send message` about a Session
     names it the way every other surface does, so the header is the headline
     `text` prints and nothing composed here.
+
+    `peers` for the reason `session` takes it: a Session waiting on another is
+    named by *that* Session's Session Name (#320), which one row cannot supply.
     """
-    return _headline(session.name, session.target, _state(session))
+    return _headline(session.name, session.target, _state(session), _awaited(session, peers))
 
 
-def _headline(name: SessionName | None, target: SessionTarget, state: BriefState) -> str:
+def _headline(
+    name: SessionName | None,
+    target: SessionTarget,
+    state: BriefState,
+    awaited: str | None = None,
+) -> str:
     """`<name> — <address> — <state>`, and the name is dropped when there is none.
 
     A Session with no Session Name is announced by its address
@@ -1193,11 +1303,11 @@ def _headline(name: SessionName | None, target: SessionTarget, state: BriefState
     carries `agent` for a consumer that wants it apart.
     """
     named = f"{name} — " if name is not None else ""
-    return f"{named}{target} — {STATE_WORDING[state]}"
+    return f"{named}{target} — {state_word(state, awaited)}"
 
 
 def _row_line(row: RosterRow) -> str:
-    return _headline(row.name, row.target, row.state)
+    return _headline(row.name, row.target, row.state, row.awaited)
 
 
 def _counts_line(brief: RosterBrief) -> str:
@@ -1213,5 +1323,9 @@ def _counts_line(brief: RosterBrief) -> str:
 
 def _counts(counts: Mapping[BriefState, int]) -> str:
     """Every state that has any Sessions in it, in the order the states are named."""
-    said = [f"{counts[state]} {STATE_WORDING[state]}" for state in BriefState if counts.get(state)]
+    said = [
+        f"{counts[state]} {state_word(state, SOMEBODY_ELSE)}"
+        for state in BriefState
+        if counts.get(state)
+    ]
     return ", ".join(said) if said else "none"

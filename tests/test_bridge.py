@@ -202,7 +202,7 @@ class TestTheStopNoticePipelineEndToEnd:
         # field: derived per read, with the lane's answer folded in.
         assert status.reply_windows[CODEX] is ReplyWindow.OPEN
 
-    def test_a_claude_turn_without_readable_words_defaults_to_decision_at_once(self) -> None:
+    def test_a_claude_turn_without_readable_words_is_finished_at_once(self) -> None:
         """Every reader of the roster, not only the notice (#213).
 
         The Stop used to leave the row `RUNNING` until the next discovery pass —
@@ -215,7 +215,7 @@ class TestTheStopNoticePipelineEndToEnd:
         hub.emit(SessionStopped(target=CLAUDE))
 
         summary = briefing.roster(hub.state.sessions.live(), None)
-        assert summary.counts == {BriefState.DECISION: 1}
+        assert summary.counts == {BriefState.FINISHED: 1}
         assert hub.state.sessions.resolve(CLAUDE).state is SessionState.IDLE
 
     def test_a_stop_for_a_session_the_roster_never_saw_is_still_briefed_as_stopped(
@@ -235,7 +235,7 @@ class TestTheStopNoticePipelineEndToEnd:
         hub.emit(SessionStopped(target=stranger))
 
         (notice,) = hub.channel.sent
-        assert notice.startswith("claude:stranger:999 — waiting for your decision")
+        assert notice.startswith("claude:stranger:999 — finished")
 
     def test_a_failed_stop_read_does_not_replace_a_readable_roster_observation(self) -> None:
         hub = Hub()
@@ -341,27 +341,31 @@ class TestTheStopNoticePipelineEndToEnd:
 
         assert hub.channel.notices == [None]
 
-    def test_a_claude_stop_without_readable_words_pushes_the_decision_state(self) -> None:
-        """Without words there is no evidence to promote a stop out of DECISION."""
+    def test_a_claude_stop_without_readable_words_pushes_the_finished_state(self) -> None:
+        """Without words there is no question to find, so nothing is asked of the user (#320)."""
         hub = Hub(voice=False, sessions=((CLAUDE, "port the log"),))
 
         hub.emit(SessionStopped(target=CLAUDE))
 
         assert hub.channel.sent == [
-            "GPT-VoiceCoding · port the log — claude:def:100 — waiting for your decision\n"
+            "GPT-VoiceCoding · port the log — claude:def:100 — finished\n"
             "  newest: not read\n"
             "  answer: from here\n"
             "  last activity: not read"
         ]
 
-    def test_an_unreadable_stop_pushes_the_briefs_text(self) -> None:
-        """A Stop that could not say what it stopped on is never a decision (#166 B7)."""
+    def test_a_stop_nobody_could_read_pushes_the_briefs_text(self) -> None:
+        """Never a decision (#166 B7), and since #320 never a sixth state word either.
+
+        The state says nothing is being asked and the omission line beside it
+        says the newest message was not read — which is the fact, told plainly.
+        """
         hub = Hub(voice=False)
 
         hub.emit(SessionStopped(target=CODEX, waiting_for=WaitingFor(kind=WaitingKind.UNKNOWN)))
 
         assert hub.channel.sent == [
-            "GPT-VoiceCoding · port the log — codex:abc — unreadable\n"
+            "GPT-VoiceCoding · port the log — codex:abc — finished\n"
             "  newest: not read\n"
             "  answer: at the terminal\n"
             "  last activity: not read"
@@ -1853,9 +1857,9 @@ class TestTheOneCallInvariantEndToEnd:
         ]
         briefed = hub.call.opened_on[0].hand_over[-1]
         assert isinstance(briefed, SpokenBrief)
-        # The codex lane reads a turn that ended without a final answer as a
-        # decision (#166 B2); what matters here is that it is not `running`.
-        assert briefed.state == "waiting for your decision"
+        # A turn that ended with no answer read asks nothing (#320); what
+        # matters here is that it is not `running`.
+        assert briefed.state == "finished"
         assert "port the log" in str(briefed.name)
 
     def test_the_session_a_stop_dialled_about_is_briefed_exactly_once(self) -> None:
@@ -3635,15 +3639,13 @@ class TestEveryMenuScreenIsAnAnchor:
         hub.emit(InboundText(text="2", in_reply_to="1", origin="callback:9"))
 
         assert hub.channel.sent[-1] == (
-            "GPT-VoiceCoding · build the shell — claude:def:100 — waiting for your decision\n"
+            "GPT-VoiceCoding · build the shell — claude:def:100 — finished\n"
             "1. brief\n"
             "2. history\n"
             "3. send message"
         )
         assert hub.channel.notices[-1] == MenuNotice(
-            heading=(
-                "GPT-VoiceCoding · build the shell — claude:def:100 — waiting for your decision"
-            ),
+            heading="GPT-VoiceCoding · build the shell — claude:def:100 — finished",
             options=("brief", "history", "send message"),
         )
 

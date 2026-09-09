@@ -744,11 +744,16 @@ class TestWhatTheRouteMadeOfTheWords:
         assert outcome.state is Lifecycle.DELIVERED
         assert outcome.authority is RelayAuthority.WORDS
 
-    def test_an_unread_codex_stop_is_briefed_as_a_decision_and_the_receipt_agrees(self) -> None:
-        """#166 B2's default, read once: the notice said `decision`, so the receipt says words."""
+    def test_an_unread_codex_stop_is_briefed_as_finished_and_the_receipt_agrees(self) -> None:
+        """One reading, so the notice and the receipt cannot disagree (#320).
+
+        The default reversed: a stop nobody read shows no question, so the
+        notice says `finished` and the receipt says plain words rather than
+        words answering a question that was never found.
+        """
         harness = Harness(window=ReplyWindow.OPEN)
 
-        assert harness.relay("carry on").authority is RelayAuthority.WORDS_ON_A_QUESTION
+        assert harness.relay("carry on").authority is RelayAuthority.WORDS
 
     def test_words_that_queue_for_a_working_session_are_words(self) -> None:
         assert Harness().relay().authority is RelayAuthority.WORDS

@@ -25,6 +25,7 @@ from claude_adapter_fake import ParkedApproval, claude_waiting_roster
 from fakes import PROGRESS_CAPTURE
 from gpt_voicecoding.adapters.agent.claude import adapter as claude_adapter
 from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, SessionReport
+from gpt_voicecoding.adapters.agent.claude.registry import PEER_PROTOCOL
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import TranscriptReader
 from gpt_voicecoding.adapters.agent.claude.window import ReplyWindowWatcher, StopReading
@@ -904,3 +905,150 @@ class TestWhenTheSessionEnds:
         stopped = next(event for event in raised if isinstance(event, SessionStopped))
         assert stopped.progress.has_history is False
         assert stopped.progress.recent == ()
+
+
+class TestWaitingOnAnotherSession:
+    """#320: the lane carries a raw recipient; this side resolves it or drops it.
+
+    `stop_analysis` reads no registry, so what it hands over is the string the
+    Session typed into `SendMessage`. Turning that into an address of a Session
+    this engine actually knows is the adapter's, and a recipient that names none
+    is not this state at all — the announcement says `finished` instead, which
+    tells the user less and never tells them something false.
+    """
+
+    #: This process, because the record has to name one that is actually alive:
+    #: a registry file outlives the Session that wrote it, and a recipient with
+    #: nobody behind it names nobody.
+    PEER_PID = os.getpid()
+    PEER_SESSION = "4d3e79c8-b919-4116-a10c-f7a42a76360a"
+    PEER_NAME = "gpt-voicecoding-32"
+
+    def registry_naming(self, tmp_path: Path, *, pid: int | None = None) -> Path:
+        """A registry holding one other Session, as Claude Code writes one."""
+        pid = pid if pid is not None else self.PEER_PID
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        (sessions / f"{pid}.json").write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "sessionId": self.PEER_SESSION,
+                    "cwd": "/a/workspace",
+                    "version": "2.1.266",
+                    "peerProtocol": PEER_PROTOCOL,
+                    "messagingSocketPath": f"/tmp/cc-socks/{pid}.sock",
+                    "status": "busy",
+                    "name": self.PEER_NAME,
+                    "nameSource": "derived",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return sessions
+
+    def reading(self, tmp_path: Path, recipient: str, *, pid: int | None = None) -> WaitingFor:
+        sessions = self.registry_naming(tmp_path, pid=pid)
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE,
+            settings=ClaudeSettings(registry_directory=sessions),
+        )
+        adapter._reported[TARGET] = SessionReport(  # noqa: SLF001 - seeding one registration
+            session_id=SESSION,
+            pid=TARGET.pid,
+            transcript_path=transcript(
+                tmp_path,
+                [
+                    said("Escalating."),
+                    called("SendMessage", "t1", {"to": recipient, "message": "CREW ASK 320"}),
+                    {
+                        "type": "user",
+                        "isSidechain": False,
+                        "userType": "external",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                            ],
+                        },
+                        "toolUseResult": {"success": True, "msg_id": "m-1"},
+                    },
+                ],
+            ),
+        )
+        return adapter.stop_reading(TARGET).waiting_for
+
+    def test_a_recipient_the_registry_names_becomes_that_sessions_address(
+        self, tmp_path: Path
+    ) -> None:
+        found = self.reading(tmp_path, self.PEER_NAME)
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == str(
+            SessionTarget(agent=AgentKind.CLAUDE, session_id=self.PEER_SESSION, pid=self.PEER_PID)
+        )
+
+    def test_a_recipient_addressed_by_its_socket_resolves_to_the_same_session(
+        self, tmp_path: Path
+    ) -> None:
+        """A `to` carries either spelling, and one record holds both."""
+        found = self.reading(tmp_path, f"uds:/tmp/cc-socks/{self.PEER_PID}.sock")
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == str(
+            SessionTarget(agent=AgentKind.CLAUDE, session_id=self.PEER_SESSION, pid=self.PEER_PID)
+        )
+
+    def test_a_recipient_this_engine_knows_nothing_about_is_not_this_state(
+        self, tmp_path: Path
+    ) -> None:
+        """The ticket's own edge case: not 🟣, 🟢."""
+        assert self.reading(tmp_path, "somebody-else-entirely").kind is WaitingKind.NONE
+
+    def test_a_record_whose_process_is_gone_names_nobody(self, tmp_path: Path) -> None:
+        """A registry file outlives the Session that wrote it, and liveness is asked apart."""
+        dead = 2**22 - 1  # above `kern.maxproc`, so no process can hold it
+
+        assert self.reading(tmp_path, self.PEER_NAME, pid=dead).kind is WaitingKind.NONE
+
+    def test_a_stopped_session_with_a_background_command_is_waiting_on_a_child(
+        self, tmp_path: Path
+    ) -> None:
+        """The child wait enters through the existing child tracking (ADR 0021)."""
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE,
+            settings=ClaudeSettings(registry_directory=sessions),
+        )
+        adapter._reported[TARGET] = SessionReport(  # noqa: SLF001 - seeding one registration
+            session_id=SESSION,
+            pid=TARGET.pid,
+            transcript_path=transcript(
+                tmp_path,
+                [
+                    said("Kicked off the review."),
+                    {
+                        "type": "user",
+                        "isSidechain": False,
+                        "userType": "external",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "t9",
+                                    "content": "Command running in background with ID: brv1.",
+                                }
+                            ],
+                        },
+                        "toolUseResult": {"backgroundTaskId": "brv1"},
+                    },
+                ],
+            ),
+        )
+
+        found = adapter.stop_reading(TARGET).waiting_for
+
+        assert found.kind is WaitingKind.CHILD
+        assert found.awaiting is None

@@ -114,10 +114,16 @@ def roster_screen(brief: RosterBrief) -> MenuScreen:
     )
 
 
-def greeting_screen(session: Session) -> MenuScreen:
-    """A Session picked off the roster: its headline, and `brief` / `history` / `send message`."""
+def greeting_screen(session: Session, peers: Sequence[Session] = ()) -> MenuScreen:
+    """A Session picked off the roster: its headline, and `brief` / `history` / `send message`.
+
+    `peers` is the roster this Session sits in, carried for the one word a row
+    cannot supply: a Session waiting on another is named by that Session's own
+    Session Name (#320). The heading is the headline every other surface prints,
+    so it has to be able to say the same thing they do.
+    """
     return _choices(
-        heading=greeting(session),
+        heading=greeting(session, peers),
         choices=GREETING_CHOICES,
         anchor_target=session.target,
     )

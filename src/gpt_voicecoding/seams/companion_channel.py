@@ -108,8 +108,12 @@ class BriefState(StrEnum):
 
     Deliberately not `SessionState`: that is the agent's own vocabulary for a
     lifecycle (`running`, `idle`, `waiting`), and these five are what the user
-    is owed — three of them actionable, one of them the honest admission that
-    something could not be read.
+    is owed. **`UNREADABLE` was the sixth and is retired** (#320): a read that
+    failed is a fact about the *message*, not a state of the Session, and
+    `ProgressAvailability.UNREADABLE` / `NewestState.UNREADABLE` still carry it
+    into the body's omission sentence. A stop nobody could read is `FINISHED`
+    with that sentence beside it, because "the engine does not know" dressed as
+    "it is waiting for you" is the one thing this state word must not do.
 
     **Defined at the seam, read by Core.** The words for each state are Core's
     (`core/briefing.py::STATE_WORDING`, ADR 0021 §5), but the closed set of
@@ -120,18 +124,19 @@ class BriefState(StrEnum):
     the seams import nothing of Core's, so this is the one direction it can go.
     """
 
-    #: A question is waiting for the user, or a Codex turn ended (#166 B2).
+    #: A question is put to the user — `AskUserQuestion`, or a question mark in
+    #: the turn's final prose (#320).
     DECISION = "decision"
     #: A permission dialog is open.
     PERMISSION = "permission"
+    #: The turn ended with the ball in another Session's hands or in the
+    #: Session's own Child Process's (#320). The one state whose word names
+    #: somebody, so its wording is a template Core fills.
+    WAITING_ON = "waiting_on"
     #: This turn is done and the Session is idle for a new instruction (Q7).
     FINISHED = "finished"
     #: Mid-turn. Nothing is being asked of the user.
     RUNNING = "running"
-    #: It stopped, and what it stopped on or what it said could not be read.
-    #: **Never counted as a decision** (#166 B7): the brief carries whatever was
-    #: read, and says plainly what it could not.
-    UNREADABLE = "unreadable"
 
 
 @dataclass(frozen=True, slots=True)

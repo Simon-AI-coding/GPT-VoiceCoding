@@ -237,6 +237,12 @@ def waiting_for_document(waiting_for: WaitingFor) -> dict[str, Any]:
         "tool_name": waiting_for.tool_name,
         "detail": waiting_for.detail,
         "approval_id": waiting_for.approval_id,
+        # Who is being awaited, as the lane refers to them (#320). The name the
+        # *user* reads is Core's, on the brief's `awaited`; this is the raw
+        # reference, carried for the same reason every other field here is —
+        # reading a field and dropping it is the reader deciding what a surface
+        # may know.
+        "awaiting": waiting_for.awaiting,
     }
 
 
@@ -317,6 +323,7 @@ def roster_brief_document(brief: RosterBrief) -> dict[str, Any]:
                 "name": str(row.name) if row.name is not None else None,
                 "agent": str(row.agent),
                 "state": str(row.state),
+                "awaited": row.awaited,
                 "focus": row.focus,
             }
             for row in brief.rows
@@ -330,6 +337,12 @@ def session_brief_document(brief: SessionBrief) -> dict[str, Any]:
         "name": str(brief.name) if brief.name is not None else None,
         "agent": str(brief.agent),
         "state": str(brief.state),
+        # Who the `waiting_on` state word names, already in the words the user
+        # reads (#320). `null` on every other state, and on a `waiting_on` whose
+        # party has no name of its own — the rendered `text` beside this says
+        # what Core words that as. Carried so the structure holds every fact the
+        # text was built from, which is this document's whole rule.
+        "awaited": brief.awaited,
         "newest": {"state": str(brief.newest.state), "text": brief.newest.text},
         "decision": decision_document(brief.decision),
         "answerable_here": brief.answerable_here,

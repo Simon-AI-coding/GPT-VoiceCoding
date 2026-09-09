@@ -3,8 +3,14 @@
 `claude agents --json` is the **official** answer to "what is running", and it is
 launch-independent: it lists Sessions this engine never started, which is what
 makes a bridge over the user's own Sessions possible at all (#70). Nothing here
-reads a transcript, a lock file or a process table — one command, one JSON
-document, mapped onto the seam field for field.
+reads a transcript or a lock file — one command, one JSON document, mapped onto
+the seam field for field.
+
+**One fact the roster cannot state is read beside it** (#319): whether each
+listed pid has a controlling terminal, which is what tells a Session from a
+Headless Run (ADR 0020 as amended). It is one `ps` for the whole pass, joined
+against the pids the roster already named, and it decides nothing — the tier is
+Bridge Core's, from the fact both lanes carry.
 
 **Coverage is per `CLAUDE_CONFIG_DIR`, and that is a decision rather than a
 limit** (#71). Claude Code keeps its Session registry inside the config
@@ -38,6 +44,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
+from gpt_voicecoding.adapters.agent import _terminals
 from gpt_voicecoding.adapters.agent._project import ProjectNames
 from gpt_voicecoding.adapters.agent.claude import waiting_labels
 from gpt_voicecoding.seams.agent import (
@@ -160,7 +167,39 @@ async def discover(
             )
         )
 
-    return LaneDiscovery(rows=tuple(await _rows(document, projects or ProjectNames())))
+    rows = await _rows(document, projects or ProjectNames())
+    return LaneDiscovery(rows=tuple(await _with_terminals(rows, run)))
+
+
+async def _with_terminals(rows: list[SessionInspection], run: Runner) -> list[SessionInspection]:
+    """Say of every row whether a person can type into it (#319, ADR 0020 amended).
+
+    **One `ps` for the whole pass, never one per pid.** The roster names every
+    Session's pid, so the process table is asked once and joined against them —
+    a second subprocess beside the roster command this pass already ran, on a
+    five-second cadence, whatever the machine holds.
+
+    **The lane reports and decides nothing.** A row with no controlling terminal
+    is carried exactly like one that has it; which tier that makes it is Bridge
+    Core's rule for both lanes (`core/sessions.py::Session.is_headless_run`). A
+    pid the table no longer holds, and every pid when the read fails, is `None`
+    — not read, and therefore not a claim that nobody is there.
+    """
+    terminals = await _terminals.by_pid(
+        [row.target.pid for row in rows if row.target.pid is not None],
+        run=lambda argv: _stdout(run, argv),
+    )
+    return [
+        replace(row, has_controlling_terminal=terminals.get(row.target.pid))
+        if row.target.pid is not None
+        else row
+        for row in rows
+    ]
+
+
+async def _stdout(run: Runner, argv: list[str]) -> str:
+    """This lane's runner, as the shape the shared terminal reader asks for."""
+    return (await run(argv)).stdout
 
 
 async def _rows(document: list[Any], projects: ProjectNames) -> list[SessionInspection]:

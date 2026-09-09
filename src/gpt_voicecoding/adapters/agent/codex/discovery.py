@@ -45,7 +45,7 @@ from typing import Any, Final, Protocol
 from gpt_voicecoding.adapters.agent._progress import source_degradation
 from gpt_voicecoding.adapters.agent._project import ProjectNames
 from gpt_voicecoding.adapters.agent.codex import rollouts, roster, thread_tail
-from gpt_voicecoding.adapters.agent.codex.processes import Candidate, enumerate_sessions
+from gpt_voicecoding.adapters.agent.codex.processes import Candidate, enumerate_runs
 from gpt_voicecoding.seams.agent import (
     LaneDiscovery,
     ProgressCapture,
@@ -131,7 +131,7 @@ class ProcessEvidence:
     while accidentally reading the machine's real other half.
     """
 
-    list_sessions: ProcessLister = enumerate_sessions
+    list_sessions: ProcessLister = enumerate_runs
     home: Path | None = None
 
     async def observations(self) -> tuple[roster.ProcessObservation, ...]:

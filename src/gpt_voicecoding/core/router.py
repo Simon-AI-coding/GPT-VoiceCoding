@@ -378,7 +378,12 @@ class InboundRouter:
         # rule stands.
         newest = self._anchors.newest() if self._anchors is not None else None
         thread_id = conversation_of(newest) if newest is not None else None
-        live = self._sessions.live()
+        # **The rows a reply may be sent to, not every row the roster holds**
+        # (#319). A Headless Run and a Child Process are both live and neither
+        # is a target: reading `live()` here made the only Headless Run on the
+        # machine the implicit target of ordinary words, and made a real Session
+        # beside one look like an ambiguity the user had to resolve by name.
+        live = self._sessions.addressable()
         if thread_id is None and not live:
             return self._refuse("nothing is running for me to pass that to")
 

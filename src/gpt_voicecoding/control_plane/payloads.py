@@ -201,6 +201,18 @@ def session_document(
             session.last_activity.isoformat() if session.last_activity is not None else None
         ),
         "child": child_document(session.child),
+        # **The third tier, beside the second** (#319, ADR 0020 as amended). A
+        # Headless Run stays on this wire exactly as a Child Process does — the
+        # row is kept, and `status` is where "appears in the roster" is true —
+        # so it travels carrying the fact that says what it is. Without it a
+        # surface counting user-facing Sessions has nothing to exclude it by,
+        # which is what made the menu-bar panel count one.
+        #
+        # A boolean rather than a nested document: `child` carries a parent
+        # address as well as a kind, and this tier has nothing beside itself.
+        # A reader that does not know the key reads its absence as `false` and
+        # keeps the count it had, which is what makes this additive.
+        "headless_run": session.is_headless_run,
         # Derived on the row and rendered here, so no surface re-derives it and
         # no two surfaces can disagree about the same Session.
         "reply_window": str(reply_window or session.reply_window),

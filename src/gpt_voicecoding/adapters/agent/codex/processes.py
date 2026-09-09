@@ -17,13 +17,20 @@ user could then be told had stopped. So a candidate is judged on its **argument
 vector**: the subcommand list below is `codex --help` on 0.149.1, verbatim, and
 a process running any of those is doing a job rather than holding a Session.
 Anything else — no subcommand, a bare `[PROMPT]`, `resume` or `fork` — has a
-TUI-shaped argv, but reaches the roster only with a controlling terminal. #144
-captured a bare `codex` with `PPID=1` and `TTY=??`: detached debris, not positive
-evidence of a current interactive run.
+TUI-shaped argv, and is a candidate.
+
+**Whether it has a controlling terminal is carried, not acted on** (#319). #144
+captured a bare `codex` with `PPID=1` and `TTY=??` — detached debris, not
+positive evidence of a current interactive run — and this reader dropped such a
+row on the spot until #319. It no longer does: `roster.compose` lets a candidate
+with no terminal vouch only for a root no live terminal vouches for, and what a
+row with no terminal *is* — a Headless Run, silent and kept — is Bridge Core's
+single rule for both lanes (ADR 0020 as amended). The outcome for #144's debris
+is unchanged; what changed is that the evidence now reaches the rule.
 
 **Every candidate has positive interactive-process evidence, but not every
-candidate has Session identity.** Its argv is a TUI and `ps` names its
-controlling terminal. Only `codex resume <canonical UUID>` carries a thread id
+candidate has Session identity.** Its argv is a TUI and `ps` says whether it has
+a terminal. Only `codex resume <canonical UUID>` carries a thread id
 that the rollout or daemon can independently name. Bare, prompt, picker,
 `--last`, `fork`, and remote invocations carry no shared key, so this module
 returns their pid and workspace but no identity.
@@ -48,6 +55,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+
+from gpt_voicecoding.adapters.agent._terminals import reads_as
 
 _log = logging.getLogger(__name__)
 
@@ -152,7 +161,7 @@ COMMAND_TIMEOUT_SECONDS: Final = 10.0
 #:
 #: **Which side the clock read is on decides the other half of the error, and
 #: only one side is safe.** `ps` samples `etime` at some moment inside the await
-#: that launches it, and `enumerate_sessions` subtracts it from one clock read:
+#: that launches it, and `enumerate_runs` subtracts it from one clock read:
 #:
 #: * Read *after* the await, the error is `(sample - read) + truncation` — both
 #:   terms positive, so the whole duration of the `ps` is added and the terminal
@@ -175,11 +184,6 @@ COMMAND_TIMEOUT_SECONDS: Final = 10.0
 #: that does not move, is still covered by the one second below.
 START_TIME_RESOLUTION_SECONDS: Final = 1.0
 
-#: macOS `ps`'s explicit answer that a process has no controlling terminal.
-#: #144 captured this value on a detached `codex` process whose argv and cwd
-#: otherwise looked like a TUI.
-NO_CONTROLLING_TERMINAL: Final = "??"
-
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
@@ -197,6 +201,16 @@ class Candidate:
     workspace: Path
     session_id: str | None = None
     started_at: float | None = None
+    #: Whether `ps` named a controlling terminal for this process (#319). It was
+    #: read all along — `tty=` is in the format string below — and until #319 a
+    #: `??` row was dropped here, where nobody upstream could see it. It is
+    #: carried now, so that what a run with no terminal *is* stays Bridge Core's
+    #: one rule (`core/sessions.py::Session.is_headless_run`) rather than a
+    #: silence this reader performs on its own authority.
+    #:
+    #: Never `None`: a row this reader did not see is not a candidate at all,
+    #: so every candidate has a `tty` column and every column has an answer.
+    has_controlling_terminal: bool = True
 
 
 #: Runs one command and returns its stdout, or raises. Injected for tests.
@@ -226,10 +240,17 @@ async def run_command(argv: list[str]) -> str:
     return out.decode("utf-8", errors="replace")
 
 
-async def enumerate_sessions(
+async def enumerate_runs(
     *, run: Runner = run_command, now: Clock = time.time
 ) -> tuple[Candidate, ...]:
-    """Every live interactive `codex` TUI, by pid, workspace, argv id and start.
+    """Every live `codex` run with a TUI-shaped argv, and what `ps` says about it.
+
+    **Runs, not Sessions, and the name says so since #319.** A Session has a
+    controlling terminal and a Headless Run has not (`CONTEXT.md`), and both
+    shapes come back from here now that the `??` row is carried rather than
+    dropped. Which of the two a candidate is remains nobody's answer on this
+    side: `roster.compose` decides what it may vouch for, and Bridge Core
+    decides what the resulting row is.
 
     Raises `OSError` or `TimeoutError` if the process table cannot be read at
     all — the caller turns that into a lane error, because not being able to
@@ -261,8 +282,8 @@ async def enumerate_sessions(
     # await, and the earliest moment consistent with the reading is the only one
     # that cannot make a terminal younger than it is.
     sampled_at = now()
-    listed = await _interactive_pids(run)
-    for pid, session_id, elapsed in listed:
+    listed = await _candidate_pids(run)
+    for pid, session_id, elapsed, terminal in listed:
         started_at = sampled_at - elapsed
         workspace = await _cwd_of(pid, run)
         if workspace is None:
@@ -277,24 +298,36 @@ async def enumerate_sessions(
                 workspace=workspace,
                 session_id=session_id,
                 started_at=started_at,
+                has_controlling_terminal=terminal,
             )
         )
     return tuple(found)
 
 
-async def _interactive_pids(run: Runner) -> list[tuple[int, str | None, float]]:
-    """TTY-backed `codex` processes, their argv thread id, and how long they have run."""
+async def _candidate_pids(run: Runner) -> list[tuple[int, str | None, float, bool]]:
+    """Interactive `codex` processes, their argv thread id, elapsed time and terminal.
+
+    **A `??` row is carried, not dropped** (#319). Until then this reader
+    refused one outright, on #144's evidence that a bare `codex` with `PPID=1`
+    and `TTY=??` is detached debris rather than a current interactive run — and
+    the refusal is still the outcome, but it is no longer made *here*. What
+    reaches a roster is decided by `roster.compose`, which lets such a candidate
+    vouch only where no live terminal does, and what a row with no terminal
+    *means* is Bridge Core's one rule for both lanes. A lane that drops the
+    evidence leaves Core deciding a tier from a fact it was never shown.
+    """
     listing = await run(["/bin/ps", "-axo", "pid=,ppid=,tty=,etime=,args="])
-    found: list[tuple[int, str | None, float]] = []
+    found: list[tuple[int, str | None, float, bool]] = []
     for line in listing.splitlines():
         pid, terminal, elapsed, argv = _split(line)
         if pid is None or terminal is None or elapsed is None or not argv:
             continue
-        if terminal == NO_CONTROLLING_TERMINAL:
-            continue
         if Path(argv[0]).name != EXECUTABLE or not is_interactive(argv):
             continue
-        found.append((pid, session_id_from_argv(argv), elapsed))
+        # A column this reader parsed is never empty, so `reads_as` never
+        # answers `None` here; the `is not False` spelling says that without
+        # asserting it.
+        found.append((pid, session_id_from_argv(argv), elapsed, reads_as(terminal) is not False))
     return found
 
 

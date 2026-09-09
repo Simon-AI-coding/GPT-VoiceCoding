@@ -144,6 +144,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from gpt_voicecoding.adapters.agent._terminals import TerminalMemo
 from gpt_voicecoding.adapters.agent.claude import waiting_labels
 from gpt_voicecoding.adapters.agent.claude.registry import (
     RegistryError,
@@ -315,6 +316,7 @@ class ReplyWindowWatcher:
         emit: Callable[[AgentEvent], None],
         stopped_on: Callable[[SessionTarget, WaitingFor | None], StopReading] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        terminals: TerminalMemo | None = None,
     ) -> None:
         self._settings = settings
         #: Which registry to sweep, handed in rather than read off `settings`:
@@ -343,6 +345,12 @@ class ReplyWindowWatcher:
         #: is not the dialog closing, and treating it as one would announce the
         #: same dialog again on the next readable sweep.
         self._at_a_dialog: dict[SessionTarget, _Dialog] = {}
+        #: Whether each watched pid has a controlling terminal, read on the
+        #: sweep and remembered (#319). A process keeps the terminal it started
+        #: with, so this is one `ps` per Session rather than one per second —
+        #: and a read that failed is not remembered, so a run misread once is
+        #: asked about again on the next sweep.
+        self._terminals = terminals if terminals is not None else TerminalMemo()
         self._polling: asyncio.Task[None] | None = None
 
     def level(self, target: SessionTarget) -> ReplyWindow:
@@ -398,6 +406,8 @@ class ReplyWindowWatcher:
         self._reported.pop(target, None)
         self._active_turns.discard(target)
         self._at_a_dialog.pop(target, None)
+        if target.pid is not None:
+            self._terminals.forget(target.pid)
 
     @property
     def watching(self) -> tuple[SessionTarget, ...]:
@@ -557,12 +567,12 @@ class ReplyWindowWatcher:
         self._active_turns.add(target)
         self._emit(self._stopped_event(target, reading))
 
-    @staticmethod
-    def _stopped_event(target: SessionTarget, reading: StopReading) -> SessionStopped:
+    def _stopped_event(self, target: SessionTarget, reading: StopReading) -> SessionStopped:
         return SessionStopped(
             target=target,
             progress=reading.progress,
             waiting_for=reading.waiting_for,
+            has_controlling_terminal=self._terminal_of(target),
         )
 
     def _read_stop(self, target: SessionTarget, roster: WaitingFor | None = None) -> StopReading:
@@ -589,15 +599,32 @@ class ReplyWindowWatcher:
         Liveness is asked of the *target's* pid rather than a parsed record's,
         because a dead Session whose record was deleted and one whose record was
         left behind are both deaths, and the record can prove neither.
+
+        **The controlling terminal is read here too, and memoised** (#319). It
+        rides the Stop this watcher raises, because a Claude Stop can precede
+        every discovery pass — `register_session` starts this watch from the
+        `SessionStart` hook, and Bridge Core stands a row in when the Stop
+        arrives first, so a row made without the fact would be announced once
+        before any pass could say it is a Headless Run. Read on the sweep rather
+        than at the Stop because this sweep runs while the pid is certainly
+        alive, and a run that is killed rather than stopping never reaches a
+        Stop to be read at.
         """
         if target.pid is None:  # pragma: no cover - SessionTarget refuses this already
             # No pid is no evidence, and no evidence must never read as death.
             return None, True
         alive = pid_is_live(target.pid)
+        # Asked for its effect, not its answer: this is where the memo is filled,
+        # and `_stopped_event` is where the answer is read back.
+        self._terminals.of(target.pid)
         try:
             return read_record(self._registry_directory, target.pid), alive
         except RegistryError:
             return None, alive
+
+    def _terminal_of(self, target: SessionTarget) -> bool | None:
+        """What the memo holds about this target's pid, read for a Stop alone."""
+        return None if target.pid is None else self._terminals.of(target.pid)
 
     async def _poll(self) -> None:
         while True:

@@ -2,7 +2,7 @@
 
 The Codex roster follows ADR 0020: a thread the daemon holds becomes a row only
 when a **live interactive `codex` with a controlling terminal** in the same
-workspace vouches for it, and `processes._interactive_pids` reads that from
+workspace vouches for it, and `processes._candidate_pids` reads that from
 `ps`'s `tty` column, skipping `??` by #144's rule. Run `20260902T041923Z` failed
 its codex `roster` step for exactly that reason: the harness opened a pty and
 ran the TUI on it, but never made that pty the child's *controlling* terminal,
@@ -78,7 +78,7 @@ SPEAKS_WITHIN_SECONDS = 30.0
 GOES_WITHIN_SECONDS = 15.0
 
 #: What `ps -o tty=` prints for a process with no controlling terminal: `??` on
-#: macOS (the form `processes.NO_CONTROLLING_TERMINAL` pins), `?` on Linux. Both
+#: macOS (the form `_terminals.NO_CONTROLLING_TERMINAL` pins), `?` on Linux. Both
 #: are listed because this test runs wherever CI runs, and the engine's own
 #: reading is macOS's.
 NO_TERMINAL_COLUMNS = frozenset({"??", "?", "-", ""})

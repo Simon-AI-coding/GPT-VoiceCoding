@@ -26,6 +26,7 @@
 | [0024](0024-the-task-half-of-a-session-name-is-descriptive-and-climbs.md) | The task half of a Session Name describes the Session, climbs to a better source, and never addresses — **amends #78's frozen name; the `@<name>:` relay form is retired** |
 | [0025](0025-capture-removes-the-selected-speakers-playback.md) | Capture removes the selected speaker’s playback while keeping human speech — replaces #145’s gate proposal |
 | [0026](0026-the-call-agent-shapes-the-relayed-instruction.md) | The Call Agent shapes the Relayed Instruction, in prompt alone; the engine carries words, reads `input_transcript`, and adds no dedupe guard |
+| [0027](0027-the-engine-decides-when-the-voices-playout-has-been-heard.md) | The engine decides when the Voice's Playout has been heard, from the audio it already holds — **replaces #235's unrecorded drain rule**, which the runs falsified |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67), [#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

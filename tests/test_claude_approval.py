@@ -222,13 +222,13 @@ class TestWhatTheHookPrints:
     def test_a_question_answer_is_denial_prose_with_the_framed_words(self) -> None:
         assert hook_decision(
             ApprovalVerdict.DENY,
-            message="The user answered from GPT-VoiceCoding: tabs",
+            message="Ruling: tabs",
         ) == {
             "hookSpecificOutput": {
                 "hookEventName": HOOK_EVENT,
                 "decision": {
                     "behavior": DENY_BEHAVIOR,
-                    "message": "The user answered from GPT-VoiceCoding: tabs",
+                    "message": "Ruling: tabs",
                 },
             }
         }
@@ -1011,7 +1011,7 @@ class TestAQuestionRidesTheHeldHook:
                     "hookEventName": HOOK_EVENT,
                     "decision": {
                         "behavior": DENY_BEHAVIOR,
-                        "message": "The user answered from GPT-VoiceCoding: tabs",
+                        "message": "Ruling: tabs",
                     },
                 }
             },
@@ -1117,9 +1117,7 @@ class TestAQuestionRidesTheHeldHook:
         decision = asyncio.run(scenario())
 
         assert decision is not None
-        assert decision["hookSpecificOutput"]["decision"]["message"] == (
-            "The user answered from GPT-VoiceCoding:   use a hybrid  "
-        )
+        assert decision["hookSpecificOutput"]["decision"]["message"] == "Ruling:   use a hybrid  "
 
     def test_the_session_s_own_mark_on_a_label_is_read_as_one(self) -> None:
         """`AskUserQuestion` has no recommendation field; the mark is in the label.
@@ -1217,9 +1215,7 @@ class TestAQuestionRidesTheHeldHook:
         assert answerable is True
         assert receipt.outcome is Delivery.DELIVERED
         assert decision is not None
-        assert decision["hookSpecificOutput"]["decision"]["message"] == (
-            "The user answered from GPT-VoiceCoding: tabs"
-        )
+        assert decision["hookSpecificOutput"]["decision"]["message"] == "Ruling: tabs"
         assert [event.window for event in windows] == [ReplyWindow.OPEN, ReplyWindow.CLOSED]
 
     def test_a_question_is_parked_without_entering_the_approval_relay(

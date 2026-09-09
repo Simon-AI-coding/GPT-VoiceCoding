@@ -116,6 +116,16 @@ PROMPT_ID_FIELD: Final = "prompt_id"
 # would be indistinguishable from a hook that answered `ask`. Nothing on the wire
 # would say so, which is exactly why this route's proof of delivery is the
 # `approval_ack` frame over our own socket (`ACK_TYPE`) and never the hook's exit.
+#
+# **Still the only two shapes on 2.1.267** (#328), read out of the shipped
+# binary's own rejection text rather than a live dialog: `PermissionRequest
+# decision must be {"behavior": "allow"} or {"behavior": "deny", "message":
+# "..."}`. `permissionDecision` remains documented `(PreToolUse only)`, so #77's
+# finding holds; its new fourth value `defer` never reaches a Session here, the
+# build logging `defer in interactive mode; ignoring (defer is print-mode only)`.
+# `PROVEN_AGAINST_VERSION` is deliberately not moved by this: that pin covers the
+# whole route including the live `--plugin-dir` load, and a string read is not
+# that measurement.
 def hook_decision(verdict: ApprovalVerdict, *, message: str | None = None) -> dict[str, Any] | None:
     """What the hook prints for one verdict, or `None` when it prints nothing.
 
@@ -183,10 +193,31 @@ VERDICT_FIELD: Final = "verdict"
 MESSAGE_FIELD: Final = "message"
 REASON_FIELD: Final = "reason"
 
-#: Claude consumes a denied `AskUserQuestion` call's message as the tool result.
-#: Frame remote words so the Session can distinguish their source from a local
-#: keyboard answer while preserving the user's words inside the frame.
-QUESTION_ANSWER_PREFIX: Final = "The user answered from GPT-VoiceCoding: "
+#: Claude consumes a denied `AskUserQuestion` call's message as the tool result,
+#: and a denial is the only shape that carries one — re-measured on 2.1.267 for
+#: #328, whose own rejection text still enumerates `{"behavior": "allow"}` and
+#: `{"behavior": "deny", "message": ...}` and nothing else. So this route's
+#: success is rendered as its failure: the terminal prints the answer in error
+#: styling, and the model receives it wrapped as a failed tool result.
+#:
+#: **This prefix is the whole of the remedy that reaches the model.** The framing
+#: around it belongs to Claude Code; the sentence inside it is ours. It is what
+#: the model reads first under that wrapper, so it is what decides whether the
+#: answer is acted on or discarded as an error to route around.
+#:
+#: `Ruling` earns the slot three ways. It is **positive** — a phrasing like *this
+#: is not an error* steers by prohibition, which makes the forbidden reading more
+#: available rather than less. It is **already this repo's word**, carried by the
+#: ADRs and by #128's own ruling, so the model meets it in the code, the docs and
+#: the tracker alike. And it is **narrow**: it settles the question that was
+#: asked and claims nothing about the exchange, where *final* would suppress the
+#: follow-up a Session is sometimes right to ask.
+#:
+#: It names neither the user nor this product, and the frame is no thinner for
+#: it: both are already carried, by the `AskUserQuestion` call this answers and
+#: by the channel the words arrived on. Its one remaining job is to be read
+#: correctly under an error tag, which is the job it is worded for.
+QUESTION_ANSWER_PREFIX: Final = "Ruling: "
 
 #: The registration's own fields. `transcript_path` is the one that earns this
 #: hook its place (#71): Claude Code's own registry does not carry it, and it

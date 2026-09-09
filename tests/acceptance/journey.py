@@ -669,7 +669,7 @@ QUESTION_FILE = "question.txt"
 CLAUDE_QUESTION = "Which marker should be written?"
 CLAUDE_OPTIONS = ("ALPHA", "DELTA")
 CLAUDE_ANSWER = "DELTA"
-CLAUDE_ANSWER_FRAME = f"The user answered from GPT-VoiceCoding: {CLAUDE_ANSWER}"
+CLAUDE_ANSWER_FRAME = f"Ruling: {CLAUDE_ANSWER}"
 
 
 def asking_the_claude_question(_: Path) -> Instruction:
@@ -2877,7 +2877,7 @@ class Walk:
                 continue
             if isinstance(row, dict):
                 rows.append(row)
-        framed = f"The user answered from GPT-VoiceCoding: {answer}"
+        framed = f"Ruling: {answer}"
         for index, row in enumerate(rows):
             message = row.get("message")
             content = message.get("content") if isinstance(message, dict) else None

@@ -16,7 +16,13 @@ from pathlib import Path
 import pytest
 
 from gpt_voicecoding.adapters.agent._project import ProjectNames, _project_in
-from gpt_voicecoding.core.naming import NameChoice, NameRung, choose_task, compose
+from gpt_voicecoding.core.naming import (
+    NameChoice,
+    NameRung,
+    NamingResult,
+    choose_task,
+    compose,
+)
 from gpt_voicecoding.seams.identity import AgentKind, SessionName
 
 
@@ -146,7 +152,6 @@ class TestReadingWhatGitSaid:
             80,
             "#290 please",
         ),
-        ("<command-name>/review</command-name><command-args> </command-args>", 80, "/review"),
         ("[Image #1] fix [Image #20] the shell", 80, "fix the shell"),
         ("你好世界🙂 next", 5, "你好世界🙂"),
         ("[Image #1]", 80, "floor"),
@@ -205,3 +210,77 @@ def test_invalid_candidates_return_reasons_without_logging(caplog):
 
 def test_no_source_does_not_invent_a_name():
     assert choose_task(AgentKind.CODEX, first_prompt_characters=80).choice is None
+
+
+CREW_FIRST_PROMPT = (
+    "<command-message>triage</command-message>"
+    "<command-name>/mattpocock-skills:triage</command-name>"
+    "<command-args>/Users/simon/Documents/coding/GPT-VoiceCoding/crewtask/21/306.md\n"
+    "Spec: /Users/simon/Documents/coding/GPT-VoiceCoding/crewtask/21/spec.md</command-args>"
+)
+
+
+class TestAnAbsolutePathIsNoTask:
+    """ADR 0024's 2026-09-09 amendment: the first-words rung alone refuses a path."""
+
+    def choosing(self, raw: str, **fields: object) -> NamingResult:
+        return choose_task(
+            AgentKind.CLAUDE,
+            first_prompt_characters=40,
+            first_prompt=raw,
+            derived_name="306-306-ed",
+            **fields,
+        )
+
+    def test_the_day_seven_workers_were_named_for_a_home_directory(self) -> None:
+        result = self.choosing(CREW_FIRST_PROMPT)
+        assert result.choice == NameChoice("306-306-ed", NameRung.DERIVED)
+        assert result.refusals == ("claude FIRST_PROMPT: a task that is an absolute path",)
+
+    def test_a_relative_task_path_the_user_typed_on_purpose_is_kept(self) -> None:
+        result = self.choosing("crewtask/21")
+        assert result.choice == NameChoice("crewtask/21", NameRung.FIRST_PROMPT)
+        assert result.refusals == ()
+
+    def test_a_home_relative_path_is_refused_too(self) -> None:
+        assert self.choosing("~/code/x").choice == NameChoice("306-306-ed", NameRung.DERIVED)
+
+    def test_only_whitespace_stands_between_the_argument_and_the_path(self) -> None:
+        raw = (
+            "<command-name>/triage</command-name><command-args>   /Users/simon/x.md</command-args>"
+        )
+        assert self.choosing(raw).choice == NameChoice("306-306-ed", NameRung.DERIVED)
+
+    def test_a_command_name_kept_for_a_blank_argument_is_a_path_like_any_other(self) -> None:
+        raw = "<command-name>/review</command-name><command-args> </command-args>"
+        result = self.choosing(raw)
+        assert result.choice == NameChoice("306-306-ed", NameRung.DERIVED)
+        assert result.refusals == ("claude FIRST_PROMPT: a task that is an absolute path",)
+
+    def test_a_windows_path_is_out_of_scope_and_stays_a_task(self) -> None:
+        result = self.choosing(r"C:\Users\simon\x.md")
+        assert result.choice == NameChoice(r"C:\Users\simon\x.md", NameRung.FIRST_PROMPT)
+
+    def test_the_rule_is_the_first_words_rungs_alone(self) -> None:
+        result = self.choosing("crewtask/21", user_name="/x", ai_title="/y")
+        assert result.choice == NameChoice("/x", NameRung.USER_NAME)
+        assert result.refusals == ()
+
+    def test_a_derived_name_beginning_with_a_slash_is_untouched(self) -> None:
+        result = choose_task(AgentKind.CLAUDE, first_prompt_characters=40, derived_name="/floor")
+        assert result.choice == NameChoice("/floor", NameRung.DERIVED)
+
+    def test_a_name_already_read_from_a_first_prompt_never_falls(self) -> None:
+        previous = NameChoice("port the log", NameRung.FIRST_PROMPT)
+        result = self.choosing(CREW_FIRST_PROMPT, previous=previous)
+        assert result.choice == previous
+
+    def test_a_codex_preview_beginning_with_a_slash_meets_the_same_rule(self) -> None:
+        result = choose_task(
+            AgentKind.CODEX,
+            first_prompt_characters=40,
+            preview="/Users/simon/Documents/coding/x.md read this",
+            short_thread_id="abcdefgh",
+        )
+        assert result.choice == NameChoice("abcdefgh", NameRung.DERIVED)
+        assert result.refusals == ("codex FIRST_PROMPT: a task that is an absolute path",)

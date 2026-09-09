@@ -381,6 +381,26 @@ class TestWhereTheTailBegins:
         waiting = analyse([*turn(), called("Bash", "b1", {"description": "push"}), result])
         assert waiting.kind is WaitingKind.PERMISSION
 
+    def test_our_own_relay_does_not_move_the_tail(self) -> None:
+        """#222 surfaces our Relay in History and leaves this boundary alone.
+
+        Making the relayed words a History entry was the whole of that ticket;
+        whether a delivery counts as "the user spoke" for the Stop is a separate
+        reader's question and was explicitly left undecided. So `analyse` still
+        asks `is_visible` alone, and a Relay arriving while a call is held leaves
+        the Session held on that call rather than reading as a finished turn.
+        """
+        relay = said("Another Claude session sent a message:\n可以继续", role="user")
+        relay["promptSource"] = "system"
+        relay["isMeta"] = True
+        relay["origin"] = {
+            "kind": "peer",
+            "from": "uds:/tmp/cc-socks/vc-relay-60460.sock",
+            "msg_id": "6877a163-f973-4342-8011-54c75b543f1d",
+        }
+        waiting = analyse([*turn(), called("Bash", "b1", {"description": "push"}), relay])
+        assert waiting.kind is WaitingKind.PERMISSION
+
     def test_slash_command_plumbing_does_not_move_the_tail(self) -> None:
         """Three records the pipeline writes as `user`, none of them a turn.
 

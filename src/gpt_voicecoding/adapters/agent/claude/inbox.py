@@ -124,6 +124,47 @@ KEY_SUFFIX: Final = ".key"
 REPLY_SOCKET_PREFIX: Final = "vc-relay-"
 
 
+#: The `claude` this wrapper survey was measured against, on 2026-09-09. It is
+#: the version whose binary was read, not a floor and not a ceiling: the strings
+#: below are one release's, and a later one that changes them makes the split
+#: fail to match, which keeps the whole text rather than losing the user's words.
+#:
+#: Re-measure by reading the assembler out of the installed binary — the survey
+#: is repeatable, which is why the version it was taken at is recorded with it.
+WRAPPER_PROVEN_AGAINST_VERSION: Final = "2.1.266"
+
+#: How the receiver wraps a peer message before writing it into the target's
+#: transcript: `<header>\n<payload>\n\n<tail>`. Read off the assembler in the
+#: 2.1.266 binary rather than inferred from samples, so the variants nobody has
+#: happened to see yet are here too — the header is chosen by whether the Session
+#: was mid-turn, and the tail by whether the sender is a descendant or host.
+#:
+#: Checked against real records this engine's own Relays produced: run
+#: `20260903T233723Z` (`二号工位`, `claude` 2.1.259) is the one the ticket's
+#: symptom was read from, and run `20260902T065340Z` (2.1.258) carries the same
+#: shape. Both use the first header and the first tail opening; the rest are the
+#: assembler's, not yet seen in a record here.
+#:
+#: Beside the frames we send, for ADR 0013's reason: a re-probe of a new `claude`
+#: compares against these, and a shape that lives far from the code that meets it
+#: is a shape nobody re-measures.
+WRAPPER_HEADERS: Final = (
+    "Another Claude session sent a message:",
+    "Another Claude session sent a message while you were working:",
+    "A peer session sent a message while you were working:",
+)
+
+#: How each tail opens. Only the opening is pinned, because the receiver appends
+#: a further sentence for a host-injected or mid-turn message and the whole tail
+#: is therefore not one string. Matched as a prefix of the last block.
+WRAPPER_TAIL_OPENINGS: Final = (
+    "This came from another Claude session — not typed by your user,",
+    'That "other Claude session" is an agent working inside this same session',
+    "IMPORTANT: This is NOT from your user — it came from a different Claude session",
+    "This is from another Claude session, not your user.",
+)
+
+
 class InboxError(Exception):
     """The inbox could not be reached, or our own reply socket could not be bound."""
 

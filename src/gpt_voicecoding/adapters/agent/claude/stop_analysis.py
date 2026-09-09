@@ -44,6 +44,12 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from gpt_voicecoding.adapters.agent import _summary
+from gpt_voicecoding.adapters.agent.claude.inbox import (
+    ADDRESS_PREFIX,
+    REPLY_SOCKET_PREFIX,
+    WRAPPER_HEADERS,
+    WRAPPER_TAIL_OPENINGS,
+)
 from gpt_voicecoding.seams.agent import Option, WaitingFor, WaitingKind
 
 #: The one tool whose call is part of the visible conversation, and the only one
@@ -326,11 +332,76 @@ def is_visible(record: Mapping[str, Any]) -> bool:
     `user` ones, so a future Claude Code that starts injecting on the assistant
     side is excluded by default instead of leaking until somebody notices.
     """
-    return (
-        record.get("isSidechain") is False
-        and record.get("userType") == "external"
-        and record.get("promptSource") != "system"
-    )
+    return is_this_sessions_own_turn(record) and record.get("promptSource") != "system"
+
+
+def is_this_sessions_own_turn(record: Mapping[str, Any]) -> bool:
+    """The two exclusions that hold whoever delivered the record.
+
+    Split out of `is_visible` so there is one definition rather than two (#222).
+    A sidechain record is an Agent-created child's work and a record that is not
+    `external` is not this Session's own turn — neither fact depends on how the
+    words arrived, so the Relay path re-uses this instead of restating it, and
+    the pair cannot drift between the two readers.
+    """
+    return record.get("isSidechain") is False and record.get("userType") == "external"
+
+
+def is_own_relay(record: Mapping[str, Any]) -> bool:
+    """Whether this record is an Answer Relay *this product* delivered (#222).
+
+    A separate predicate rather than an exception carved into `is_visible`, so
+    that rule keeps its one reason: a `system` prompt source is product-injected
+    plumbing. This one says something else — the plumbing is ours, and what it
+    carried is the user's own words, spoken through the phone.
+
+    **Recognised by the `origin` correlator, the same fact `correlated()` proves
+    arrival with** (`inbox.correlated`), minus its two per-delivery halves.
+    History does not know which Relays were sent, so there is no `msg_id` to
+    check; and it does not know which engine process sent them, so the address is
+    matched by *shape* rather than by string. The shape is all that is left:
+    `origin.kind == "peer"`, our address scheme, and a socket named with our own
+    prefix. The pid in that name belongs to whichever engine ran at the time, and
+    the directory is configurable (`DEFAULT_SOCKET_DIRECTORY`), so neither takes
+    part — a Relay an earlier engine sent is still ours to surface.
+
+    The two prefixes are imported, never restated: they are what the sender binds
+    and spells, and a second copy here would drift the day one of them moves.
+    """
+    origin = record.get("origin")
+    if not isinstance(origin, Mapping) or origin.get("kind") != "peer":
+        return False
+    sender = origin.get("from")
+    if not isinstance(sender, str) or not sender.startswith(ADDRESS_PREFIX):
+        return False
+    path = sender[len(ADDRESS_PREFIX) :]
+    return path.rpartition("/")[2].startswith(REPLY_SOCKET_PREFIX)
+
+
+def relay_payload(text: str) -> str:
+    """The relayed words inside the receiver's announcement, or the whole text.
+
+    The receiver wraps a peer message as `<header>` newline `<payload>`,
+    a blank line, then `<tail>`
+    (`inbox.WRAPPER_HEADERS`, `inbox.WRAPPER_TAIL_OPENINGS`, surveyed against
+    `inbox.WRAPPER_PROVEN_AGAINST_VERSION`). The wrapper is upstream's and moves
+    between releases, so the split is required to be unambiguous — a known header
+    on the first line, and a known tail opening the last block begins with.
+
+    **When it does not match, the whole text is the answer.** A wrapper this does
+    not recognise then surfaces as an entry carrying its boilerplate, which is
+    visible and diagnosable; the alternative — a confident strip against a shape
+    that changed — silently truncates or drops what the user said. Losing the
+    user's words is the failure this ticket exists to end, so the doubt is spent
+    on saying too much rather than too little.
+    """
+    header, newline, remainder = text.partition("\n")
+    if not newline or header not in WRAPPER_HEADERS:
+        return text
+    payload, separator, tail = remainder.rpartition("\n\n")
+    if not separator or not tail.startswith(WRAPPER_TAIL_OPENINGS):
+        return text
+    return payload
 
 
 def is_pipeline_noise(record: Mapping[str, Any], content: Any) -> bool:

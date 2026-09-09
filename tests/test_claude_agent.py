@@ -888,6 +888,98 @@ class TestFailingBeforeTheWordsLeave:
             )
 
 
+class TestWhereTheRegistryIs:
+    """Which directory holds the Session records this adapter reads (#303).
+
+    The registry is Claude Code's own, so it lives wherever that installation
+    lives: under `CLAUDE_CONFIG_DIR` when the variable names a directory, and
+    under the home default when it does not. These read the answer through the
+    three consumers that couple to it — `verify`, the Reply Window and the reply
+    inbox's key — because the derivation only matters where it is spent.
+    """
+
+    def test_the_registry_sits_inside_the_config_directory_the_variable_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_root = tmp_path / "claude-b"
+        monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(config_root))
+
+        adapter = ClaudeAgentAdapter(progress_capture=PROGRESS_CAPTURE, settings=quick())
+
+        assert adapter.registry_directory() == config_root / "sessions"
+
+    def test_an_unset_variable_leaves_the_registry_under_the_home_directory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(hooks.CONFIG_DIRECTORY_VARIABLE, raising=False)
+
+        adapter = ClaudeAgentAdapter(progress_capture=PROGRESS_CAPTURE, settings=quick())
+
+        assert adapter.registry_directory() == Path.home() / ".claude" / "sessions"
+
+    def test_a_configured_registry_directory_wins_over_the_variable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(tmp_path / "claude-b"))
+        mine = tmp_path / "mine" / "sessions"
+
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE, settings=quick(registry_directory=mine)
+        )
+
+        assert adapter.registry_directory() == mine
+
+    def test_verify_reports_no_registry_mismatch_under_the_variable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The symptom #303 was reported as: `verify` failing on its own two answers."""
+        config_root = tmp_path / ".claude-b"
+        install_claude_hooks(config_root)
+        (config_root / "sessions").mkdir()
+        monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(config_root))
+
+        result = asyncio.run(
+            ClaudeAgentAdapter(
+                progress_capture=PROGRESS_CAPTURE,
+                settings=quick(),
+                installation_base_dir=tmp_path / "support",
+            ).verify()
+        )
+
+        assert "the Session registry is at" not in result.detail
+        assert result.outcome is VerifyOutcome.PASS
+
+    def test_the_reply_window_reads_the_derived_directory(
+        self, tmp_path: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The record is only in the derived directory, so OPEN means it was read there."""
+        config_root = tmp_path / "claude-b"
+        monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(config_root))
+        write_record(config_root / "sessions", status="idle")
+
+        adapter = ClaudeAgentAdapter(progress_capture=PROGRESS_CAPTURE, settings=quick())
+        adapter.register_session(LIVE_TARGET, socket_path)
+
+        assert adapter.reply_window(LIVE_TARGET) is ReplyWindow.OPEN
+
+    def test_the_reply_inboxs_key_lands_in_the_derived_directory(
+        self, tmp_path: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The key names this engine as a peer, so it belongs beside the records."""
+        config_root = tmp_path / "claude-b"
+        monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(config_root))
+
+        async def bound() -> Path:
+            adapter = ClaudeAgentAdapter(progress_capture=PROGRESS_CAPTURE, settings=quick())
+            try:
+                replies = await adapter._reply_inbox(socket_path.parent)  # noqa: SLF001
+                return replies._key_path  # noqa: SLF001
+            finally:
+                await adapter.aclose()
+
+        assert asyncio.run(bound()).parent == config_root / "sessions"
+
+
 class TestReportingWhatIsLoaded:
     def test_verify_refuses_divergent_roots_before_inspection_or_dial(
         self, tmp_path: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -896,7 +988,9 @@ class TestReportingWhatIsLoaded:
         config_root.mkdir()
         (config_root / "settings.json").write_text("{not json", encoding="utf-8")
         monkeypatch.setenv(hooks.CONFIG_DIRECTORY_VARIABLE, str(config_root))
-        settings = quick()
+        #: Divergence has to be configured to exist at all now: an unset registry
+        #: directory follows the config directory and can never diverge (#303).
+        settings = quick(registry_directory=tmp_path / "elsewhere" / "sessions")
 
         result, connections = asyncio.run(
             observe_registered_verify(

@@ -46,10 +46,26 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-#: The registry's default home. A location, so it defaults; see `settings.py`.
-DEFAULT_REGISTRY_DIRECTORY = Path.home() / ".claude" / "sessions"
+#: What the registry is called inside a Claude config directory. This module owns
+#: the word: `installation.claude_hooks` owns the config directory it sits in
+#: (`DEFAULT_CONFIG_DIRECTORY_NAME`), and no third module spells either (#303).
+REGISTRY_DIRECTORY_NAME: Final = "sessions"
+
+
+def default_registry_directory(config_directory: Path) -> Path:
+    """Where the Sessions of one Claude installation announce themselves.
+
+    The registry belongs to the installation, so it follows the config directory
+    rather than the home directory: under `CLAUDE_CONFIG_DIR` the records are
+    written beside that directory's settings, and a reader still looking under
+    `~/.claude` finds an empty directory and reports every live Session missing
+    (#303). The caller resolves the config directory once, through
+    `installation.claude_hooks.default_config_directory`, and passes it here.
+    """
+    return config_directory / REGISTRY_DIRECTORY_NAME
+
 
 #: The one peer-socket wire this adapter has been proven against. The record
 #: carries this number, and a record carrying another one is refused by it.

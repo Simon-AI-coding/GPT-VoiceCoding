@@ -18,8 +18,6 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from gpt_voicecoding.adapters.agent.claude.registry import DEFAULT_REGISTRY_DIRECTORY
-
 #: A short runtime root, for the reason `privacy.py` gives a length limit at
 #: all: a channel socket under a long application-support path cannot be bound.
 DEFAULT_SOCKET_DIRECTORY = Path("/tmp")
@@ -92,7 +90,11 @@ class ClaudeSettings:
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
     max_text_bytes: int = DEFAULT_MAX_TEXT_BYTES
     #: Where Claude Code keeps the Session records the Reply Window reads.
-    registry_directory: Path = DEFAULT_REGISTRY_DIRECTORY
+    #: Unset means "wherever this machine's Claude installation keeps them": the
+    #: adapter derives it from the config directory it already resolves, so a run
+    #: under `CLAUDE_CONFIG_DIR` reads that installation's registry rather than
+    #: the home one (#303). A configured path is taken as it stands.
+    registry_directory: Path | None = None
     reply_window_poll_seconds: float = DEFAULT_REPLY_WINDOW_POLL_SECONDS
     #: How long a Stop nothing can yet name is re-read before it is announced
     #: as `UNKNOWN`. Policy-shaped in appearance and mechanical in fact: it is

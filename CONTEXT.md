@@ -31,7 +31,7 @@ The count of Sessions in each state, with one header row per live Session. Spoke
 _Avoid_: 多项目简报, overview, summary
 
 **Focus Session**:
-The one Session the user last replied to — by Answer Relay or Approval Relay. Its news is spoken first; another Session's news only rings. Cleared when it ends; never set by merely asking about a Session. A voice-side notion only: on the Companion Channel, where messages lie flat, the newest Anchor takes its place.
+The one Session the user last replied to — by Answer Relay or Approval Relay. Its news is spoken first; another Session's news only rings. Cleared when it ends; never set by merely asking about a Session. When there is none, the sole live Session is spoken about in its place: a ring says *another* Session wants the user, and a roster of one has no other — the Session the user is sitting at replies by typing into it, which no surface sees and which therefore never sets the focus (amended 2026-09-09). A held focus still decides alone; the roster is read only for the empty case. A voice-side notion only: on the Companion Channel, where messages lie flat, the newest Anchor takes its place.
 _Avoid_: current session, active session, last session
 
 **Detail**:

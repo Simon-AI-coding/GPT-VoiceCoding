@@ -355,8 +355,38 @@ class SessionRegistry:
 
     @property
     def focus(self) -> SessionTarget | None:
-        """The Session whose news is spoken first, or None when there is none."""
+        """The Session the user last replied to, or None when they have replied to none.
+
+        What the voice does with that record is `spoken_first`, which is not
+        always this: the two parted when a roster of one earned a word without
+        a reply behind it.
+        """
         return self._focus
+
+    @property
+    def spoken_first(self) -> SessionTarget | None:
+        """The Session whose news the voice speaks, rather than rings about.
+
+        The Focus Session when there is one. When there is none, the **sole live
+        Session**: the EVENT Cue's whole meaning is "another Session wants you"
+        (#167 Q7-Q9), and on a roster of one there is no other for it to mean.
+        Ringing there tells the user nothing they could act on, and the word they
+        are owed waits on an Answer Relay they have no reason to send — a user
+        sitting at that Session's own terminal replies by typing into it, which
+        no surface sees and which therefore never sets the focus.
+
+        The two readings are ordered, not merged. A focus that is held decides
+        alone, so a second Session's news still only rings while the user works
+        through the first; the roster is read only for the **empty** case.
+
+        Kept apart from `focus` because they answer different questions. `focus`
+        is the record of what the user last replied to, and nothing may set it
+        but a reply (#165 Q2); this is what the voice does with that record now.
+        """
+        if self._focus is not None:
+            return self._focus
+        sole = self.sole_live()
+        return None if sole is None else sole.target
 
     def set_focus(self, target: SessionTarget) -> None:
         """The user replied to this Session, so it becomes the Focus Session.
@@ -795,6 +825,17 @@ class SessionRegistry:
     def live(self) -> tuple[Session, ...]:
         """The roster, in the order the Sessions were first seen."""
         return tuple(held for held in self._sessions.values() if held.is_live)
+
+    def sole_live(self) -> Session | None:
+        """The one main Session on the roster, or None when there are none or several.
+
+        Child Processes are not counted: a Session that spawned a subagent has
+        not become two Sessions the user must choose between (#68), and counting
+        one would make a roster of one look like a roster of many to every
+        caller that asks this in order to skip an ambiguity.
+        """
+        main = [held for held in self.live() if held.child.is_main]
+        return main[0] if len(main) == 1 else None
 
     def all(self) -> tuple[Session, ...]:
         """Every Session held, ended ones included, in the order first seen."""

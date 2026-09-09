@@ -335,15 +335,33 @@ class Newest:
 
     state: NewestState
     text: str | None = None
+    #: What the source said when it could not be read, when it said anything.
+    #: Carried so an UNREADABLE brief can name *which* failure it hit — "no
+    #: registry record for its pid", "its transcript could not be found by
+    #: session id" — rather than the bare "could not be read" that sends a user
+    #: to the engine log to find out what happened (#278). Absent wherever the
+    #: source gave no sentence, which leaves the wording exactly as it was.
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if (self.state is NewestState.SAID) != (self.text is not None):
             raise ValueError("a newest message is either carried whole or named as absent")
+        if self.reason is not None and self.state is not NewestState.UNREADABLE:
+            raise ValueError("only a message nobody could read carries the reason it could not")
 
     @property
     def words(self) -> str:
-        """What a renderer prints for it — the message, or why it is missing."""
-        return self.text if self.text is not None else NEWEST_WORDING[self.state]
+        """What a renderer prints for it — the message, or why it is missing.
+
+        The one rendering point, so a reason reaches every surface that prints a
+        newest message at once. `NEWEST_WORDING` still supplies the clause; the
+        reason extends it rather than replacing it, because "could not be read"
+        is what the state means and the sentence after it is which time.
+        """
+        if self.text is not None:
+            return self.text
+        words = NEWEST_WORDING[self.state]
+        return f"{words}: {self.reason}" if self.reason is not None else words
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,7 +839,7 @@ def _newest(progress: ProgressObservation) -> Newest:
     if progress.availability is ProgressAvailability.NOT_READ:
         return Newest(state=NewestState.NOT_READ)
     if progress.availability is ProgressAvailability.UNREADABLE:
-        return Newest(state=NewestState.UNREADABLE)
+        return Newest(state=NewestState.UNREADABLE, reason=progress.reason)
     if progress.has_history is False:
         return Newest(state=NewestState.NOTHING_SAID)
     said = next(

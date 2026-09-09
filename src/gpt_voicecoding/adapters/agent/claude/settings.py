@@ -61,6 +61,16 @@ DEFAULT_RECEIPT_POLL_SECONDS = 0.25
 #: faster would multiply reads without seeing anything sooner.
 DEFAULT_REPLY_WINDOW_POLL_SECONDS = 1.0
 
+#: How long a *refused* registration recovery is left standing before it is
+#: attempted again (#278). A recovery that succeeded is never re-attempted — the
+#: files it read do not change under a running Session — but a refusal can stop
+#: being true: a transcript is written, or a momentarily unreadable record
+#: becomes readable, and ADR 0013's consequence is that every Session on the
+#: machine is reachable, including the ones that started before this engine.
+#: Sixty seconds is twelve discovery ticks, so a refused Session costs one
+#: directory scan a minute rather than one every tick.
+DEFAULT_RECOVERY_RETRY_INTERVAL_SECONDS = 60.0
+
 #: How long that sweep keeps re-reading a wait it cannot yet name before it
 #: announces the honest `UNKNOWN` anyway (#150). Five seconds, on the one-second
 #: cadence above, so a wait gets about five re-reads: Claude Code writes
@@ -102,6 +112,9 @@ class ClaudeSettings:
     #: the user is made to wait for anything.
     stop_catch_up_budget_seconds: float = DEFAULT_STOP_CATCH_UP_BUDGET_SECONDS
     receipt_poll_seconds: float = DEFAULT_RECEIPT_POLL_SECONDS
+    #: How long a refused recovery stands before it is tried again. A success is
+    #: kept for the life of the engine; only refusals expire.
+    recovery_retry_interval_seconds: float = DEFAULT_RECOVERY_RETRY_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -110,6 +123,7 @@ class ClaudeSettings:
             "late_ack_timeout_seconds",
             "reply_window_poll_seconds",
             "receipt_poll_seconds",
+            "recovery_retry_interval_seconds",
             "stop_catch_up_budget_seconds",
         ):
             if getattr(self, name) <= 0:

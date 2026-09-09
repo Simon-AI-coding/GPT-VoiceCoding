@@ -26,8 +26,8 @@ from gpt_voicecoding.config import load
 from gpt_voicecoding.control_plane.client import DEFAULT_TIMEOUT_SECONDS, EngineUnreachable
 from gpt_voicecoding.control_plane.commands import build_request, render
 from gpt_voicecoding.engine.composition import Engine
-from gpt_voicecoding.seams.call import CallSnapshot
-from gpt_voicecoding.seams.control_plane import Action, Reply
+from gpt_voicecoding.seams.call import RETURN_LEG_BUDGET_BYTES, CallSnapshot
+from gpt_voicecoding.seams.control_plane import Action, Reader, Reply
 
 #: Longer than any deadline these tests hand the surface, and short enough that
 #: the engine's own shutdown does not wait on it. It stands in for the real
@@ -200,6 +200,70 @@ class TestActingOnASessionThatIsNotThere:
     ) -> None:
         assert main(["--config", str(engine_at), "brief"]) == 0
         assert "sessions: none" in capsys.readouterr().out
+
+
+class TestTheReaderFlag:
+    """#302: the mark that says this read is for the Voice, and nothing else.
+
+    `bridgectl` turns the flag into the request field and does nothing else with
+    it. It holds no policy here either: what the mark *means* is the engine's.
+    """
+
+    def test_the_flag_puts_the_reader_on_the_request(self) -> None:
+        request = build_request("history", ["codex:abc"], reader=Reader.VOICE)
+
+        assert request.reader is Reader.VOICE
+        assert request.as_document()["reader"] == "voice"
+
+    def test_a_reader_this_engine_does_not_have_still_reaches_the_wire(self) -> None:
+        """Carried, not judged: the engine is the one that says what a reader is."""
+        assert (
+            build_request("history", ["codex:abc"], reader="the-voice").as_document()["reader"]
+            == "the-voice"
+        )
+
+    def test_without_the_flag_no_reader_is_sent(self) -> None:
+        """The Companion Channel's path, and every `bridgectl` run by a human."""
+        request = build_request("history", ["codex:abc"])
+
+        assert request.reader is None
+        assert "reader" not in request.as_document()
+
+    def test_the_flag_is_accepted_beside_the_socket_on_the_command_line(
+        self, engine_at: Path
+    ) -> None:
+        assert main(["--config", str(engine_at), "--reader", "voice", "brief"]) == 0
+
+    def test_an_unknown_reader_is_carried_to_the_engine_and_refused_there(
+        self, engine_at: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`bridgectl` puts the word on the request and does nothing else with it.
+
+        Whether this engine has a reader by that name is the engine's answer to
+        give, in the engine's own words, and it arrives as a refusal (exit 1)
+        rather than as an unreachable engine (exit 2): the request was delivered
+        and answered.
+        """
+        code = main(["--config", str(engine_at), "--reader", "the-voice", "brief"])
+
+        assert code == 1
+        assert "voice" in capsys.readouterr().err
+
+    def test_a_marked_read_round_trips_and_prints_within_the_return_legs_ceiling(
+        self, engine_at: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The whole path with the mark on: command line, socket, engine, render.
+
+        `brief` rather than `history` because this engine has no Session to page
+        — a refusal would be a short string that passed a byte assertion without
+        ever having carried an answer. This one succeeds, so the bytes measured
+        are an answer's. What a *large* marked read does is the main seam's to
+        prove, and `tests/test_control_plane_actions.py` proves it there.
+        """
+        code = main(["--config", str(engine_at), "--reader", "voice", "brief"])
+
+        assert code == 0, "a marked read is answered, not refused"
+        assert len(capsys.readouterr().out.encode("utf-8")) <= RETURN_LEG_BUDGET_BYTES
 
 
 class TestSayingNoOutLoud:

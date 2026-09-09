@@ -32,7 +32,15 @@ from gpt_voicecoding.control_plane.client import (
     ask,
 )
 from gpt_voicecoding.control_plane.commands import CommandError, build_request, render
-from gpt_voicecoding.seams.control_plane import USAGE, Action
+from gpt_voicecoding.seams.control_plane import READER_FLAG, USAGE, Action
+
+#: The global flags that take a value beside them, as opposed to standing
+#: alone. Written down because anything reading a `bridgectl` command line has
+#: to skip the *value* as well as the flag to find the action: the probe
+#: stand-in in `scripts/realtime_instruction_tracer.py` decides from that action
+#: whether a command may reach somebody's real Session, and a reader that took
+#: `voice` for a verb would forward a `relay` it meant to stop.
+VALUE_FLAGS: tuple[str, ...] = ("--config", "--socket", "--timeout", READER_FLAG)
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -49,6 +57,16 @@ def parse(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="the engine's configuration")
     parser.add_argument(
         "--socket", type=Path, default=None, help="the engine's socket, instead of reading config"
+    )
+    # Beside `--socket` rather than among a command's own arguments: it says who
+    # the answer is *for*, which is a fact about this run and not about what is
+    # being asked. The engine fits a `history` page or a Session Brief marked
+    # this way to the Live Call's return leg (#302); every other action carries
+    # it and ignores it. A human may pass it to see what the Voice would get.
+    parser.add_argument(
+        READER_FLAG,
+        default=None,
+        help="who the answer is for, when that changes what can be carried",
     )
     # No default here: which deadline applies depends on the action, which is not
     # known until the command line has been parsed. `None` means "not asked for",
@@ -69,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse(argv)
 
     try:
-        request = build_request(arguments.command, arguments.arguments)
+        request = build_request(arguments.command, arguments.arguments, reader=arguments.reader)
     except CommandError as unreadable:
         print(str(unreadable), file=sys.stderr)
         return EXIT_UNREACHABLE

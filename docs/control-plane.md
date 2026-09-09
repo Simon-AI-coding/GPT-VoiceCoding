@@ -54,6 +54,25 @@ start with a named error rather than an `OSError` from inside asyncio.
 
 `payload` may be omitted when an action takes nothing.
 
+**`reader`** is an optional field beside `action`, naming who the answer is for
+when that changes what may be carried. Its only value is `"voice"`: the answer
+will cross the Live Call's return leg, where the Call Agent hands it to the
+Voice and codex cuts anything over 4,000 UTF-8 bytes, keeping ~2,000 bytes from
+each end and leaving a marker that says how much went but never which part. A
+`history` or `brief` request that carries it is fitted to that line as well as
+to this one, and the tighter of the two binds; on every other action it is
+carried and ignored. Absent — or JSON `null` — is exactly the behaviour that
+existed before the field, which is what keeps the Companion Channel byte for
+byte unchanged. An unrecognised value is `malformed_request`, naming the values
+there are. The engine sets it, in the `bridgectl` invocation it generates for
+the Call Agent (`--reader voice`); the Companion Channel's `/` grammar never
+does ([#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302),
+ADR 0016 as amended).
+
+```json
+{"action": "history", "payload": {"target": {"agent": "codex", "session_id": "abc"}}, "reader": "voice"}
+```
+
 ### Reply
 
 ```json
@@ -65,7 +84,7 @@ start with a named error rather than an `OSError` from inside asyncio.
 ```
 
 `action` is `null` when the line never named a usable one. `protocol` is the
-numeric protocol version, currently `8`. A missing field or JSON `null` means the
+numeric protocol version, currently `10`. A missing field or JSON `null` means the
 reply did not declare a usable version. The Swift shell refuses to interpret any
 reply whose version is missing or differs from the version it supports, and shows
 that protocol mismatch separately from an engine refusal or an unreachable engine.
@@ -118,6 +137,15 @@ own. A protocol-8 surface would send `sessions` to an engine that answers it
 and be unable to tell that from one that refuses it. The `sessions` here is
 not protocol 6's: that one was a second rendering of the roster, and this one
 answers with Briefing's own text and adds only labels.
+
+Protocol 10 adds the optional `reader` field described under **Request**
+([#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302)). A
+protocol-9 engine accepts the same request and ignores the field, answering a
+page fitted to this wire alone — which codex then cuts on the way to the Voice,
+silently and in the middle. So a surface has to be able to tell the two apart
+before it asks. A request that sends no mark is answered at 10 exactly as it was
+at 9, and no gate on the field is added on the Python side: `bridgectl` ships
+inside the engine's own package, so the two move together.
 
 `launch` and `close` were the eighth and ninth until protocol 4. They are parked
 with the code behind them ([#72](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/72)):

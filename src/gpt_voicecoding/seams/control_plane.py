@@ -69,7 +69,15 @@ from typing import Any
 #: serves `bridgectl` and every `/`, so the menu's verbs are the shared set's
 #: or they are nowhere; a version-8 surface would send `sessions` to an engine
 #: that answers it and be unable to tell that from one that refuses it.
-PROTOCOL_VERSION = 9
+#: 10 adds the optional `reader` field, which names who the answer is *for*
+#: (#302). A `history` page or a Session Brief marked for the Voice is fitted to
+#: the Live Call's return leg — the line the Call Agent's answer crosses — as
+#: well as to this wire, because codex cuts that line at 4,000 bytes and says
+#: how much went but never which part. A version-9 engine accepts the same
+#: request, ignores the field and answers a page fitted to 64 KB alone, which is
+#: then cut in transit; so the disagreement has to be visible before the request
+#: is made. A request that sends no mark is answered exactly as it was at 9.
+PROTOCOL_VERSION = 10
 
 #: The longest line either side will read. Generous for a roster, small enough
 #: that a peer cannot make the engine hold an unbounded buffer.
@@ -156,6 +164,35 @@ MENU: dict[Action, str] = {
 }
 
 
+#: How the reader is named on a command line. Vocabulary, and here for the
+#: reason `USAGE` is: Bridge Core writes this flag into the invocation it
+#: generates for the Call Agent, and the control plane's parser reads it back.
+#: Core may not import the parser (ADR 0001), so a word spelled out in both
+#: would be a word free to drift; spelled once here, both sides share it.
+READER_FLAG = "--reader"
+
+
+class Reader(StrEnum):
+    """Who the answer is for, when that changes what may be carried (#302).
+
+    **Declared, never inferred.** A request is an action and a payload, and this
+    engine has no way to tell its callers apart: the tracer forwards `bridgectl`
+    reads to a live engine over the same socket, and a human at a terminal uses
+    the same binary. So the reader says so, and a request that says nothing is
+    answered exactly as it was before this field existed — which is what keeps
+    the Companion Channel byte-for-byte unchanged.
+
+    One value today, and the set is closed so that a second reader is a decision
+    somebody makes rather than a string somebody passes.
+    """
+
+    #: The answer will cross the Live Call's return leg on its way to the Voice:
+    #: the Call Agent fetches it and hands it back, and that hop cuts at
+    #: `seams/call.py::RETURN_LEG_BUDGET_BYTES`. Only `history` and `brief` are
+    #: fitted to it; on every other action the mark is carried and ignored.
+    VOICE = "voice"
+
+
 class ErrorCode(StrEnum):
     """Why a request was refused. Closed, so a surface can branch on it.
 
@@ -196,18 +233,58 @@ def _frozen(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(dict(payload))
 
 
+def _reader(document: Mapping[str, Any]) -> Reader | None:
+    """Who a request says its answer is for, or nothing at all (#302).
+
+    Absent and an explicit JSON `null` are one answer — "no reader named" — the
+    way every other optional field on this wire reads them, and it is how a
+    surface that builds its request from a nullable field will write it.
+
+    **An unrecognised value is refused rather than ignored.** Ignoring it would
+    make a mistyped reader silently the default, and the default is the one that
+    is cut in transit; the refusal names the values there are so the sender can
+    see what it should have said.
+    """
+    raw = document.get("reader")
+    if raw is None:
+        return None
+    try:
+        return Reader(raw)
+    except ValueError:
+        known = ", ".join(str(reader) for reader in Reader)
+        raise MalformedRequest(
+            ErrorCode.MALFORMED_REQUEST, f"{raw!r} is not a reader this engine has: {known}"
+        ) from None
+
+
 @dataclass(frozen=True, slots=True)
 class Request:
     """One thing a surface is asking for, and what it brought with it."""
 
     action: Action
     payload: Mapping[str, Any] = field(default_factory=dict)
+    #: Who the answer is for, when that changes what may be carried (#302).
+    #: A field of the *request* rather than of one action's payload: it is read
+    #: once, where the request is read, so an action that never consults it
+    #: still carries it without eleven payload readers learning it exists.
+    #:
+    #: **Typed both ways on purpose.** Outbound, a surface may write text this
+    #: engine does not know — the wire carries text, and a surface that refused
+    #: its own line would be deciding what the engine accepts. Inbound, `of()`
+    #: is the only reader, and it yields a `Reader` or refuses, so nothing past
+    #: that boundary ever holds a reader this engine has no meaning for.
+    reader: Reader | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _frozen(self.payload))
 
     def as_document(self) -> dict[str, Any]:
-        return {"action": str(self.action), "payload": dict(self.payload)}
+        document: dict[str, Any] = {"action": str(self.action), "payload": dict(self.payload)}
+        # Written only when there is one, so a surface that marks nothing sends
+        # the same bytes it sent before this field existed.
+        if self.reader is not None:
+            document["reader"] = str(self.reader)
+        return document
 
     @classmethod
     def of(cls, document: Any) -> Request:
@@ -232,15 +309,19 @@ class Request:
             raise MalformedRequest(
                 ErrorCode.MALFORMED_REQUEST, f"the payload of {raw!r} is not an object"
             )
-        return cls(action=action, payload=payload)
+        return cls(action=action, payload=payload, reader=_reader(document))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Request):
             return NotImplemented
-        return self.action is other.action and dict(self.payload) == dict(other.payload)
+        return (
+            self.action is other.action
+            and dict(self.payload) == dict(other.payload)
+            and self.reader is other.reader
+        )
 
     def __hash__(self) -> int:
-        return hash((self.action, tuple(sorted(self.payload))))
+        return hash((self.action, tuple(sorted(self.payload)), self.reader))
 
 
 @dataclass(frozen=True, slots=True)

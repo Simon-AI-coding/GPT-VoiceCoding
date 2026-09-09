@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from gpt_voicecoding.control_plane.commands import build_request
 from gpt_voicecoding.core.instructions import (
     ACTION_GIST,
     AGENT_ACTIONS,
@@ -62,7 +63,7 @@ from gpt_voicecoding.core.instructions import delegated as delegated_module
 from gpt_voicecoding.core.instructions import voice as voice_module
 from gpt_voicecoding.core.instructions.catalogue import STOCK_SOURCE_PREFIX
 from gpt_voicecoding.seams.call import CODEX_RESPONSE_ITEM_PREFIX
-from gpt_voicecoding.seams.control_plane import USAGE, Action
+from gpt_voicecoding.seams.control_plane import READER_FLAG, USAGE, Action, Reader, Request
 
 CLI = ControlPlaneCli(
     command=Path("/Applications/GPT-VoiceCoding.app/Contents/MacOS/bridgectl"),
@@ -712,6 +713,58 @@ class TestTheVoiceHearsStockTextThenOverlay:
         """A Voice handed something it cannot do invents rather than refuses (#179)."""
         found = self.VERBS.findall(instructions.voice.text)
         assert not found, f"the voice set names control-plane verbs: {sorted(set(found))}"
+
+    def test_the_call_agents_invocation_carries_the_reader_flag(self, instructions) -> None:
+        """#302: the Call Agent is told a command line that already says who reads it.
+
+        The engine sets the mark, at the moment it generates these instructions.
+        The Call Agent never learns that the mark exists — it copies one
+        invocation — which is why nothing in the text explains it.
+        """
+        assert f"{CLI.invocation} --reader voice <action>" in instructions.agent.text
+
+    def test_the_generated_invocation_is_one_the_parser_accepts(self, instructions) -> None:
+        """The flag word is written in Core and read in the control plane (ADR 0001).
+
+        Core may not import the parser, so the two spell `--reader` separately.
+        This is what keeps them from drifting: the line that is actually
+        generated is handed to the parser that has to accept it, and the reader
+        it yields is the one the engine fits an answer for.
+        """
+        flag, value = CLI.invocation_for_the_voice.rsplit(maxsplit=2)[-2:]
+        request = build_request("brief", [], reader=value)
+
+        assert flag == READER_FLAG
+        assert Request.of(request.as_document()).reader is Reader.VOICE
+
+    def test_the_delegated_set_carries_the_unflagged_invocation(self, instructions) -> None:
+        """A Delegated Turn hands nothing to the Voice, so it fits no return leg.
+
+        `Audience.DELEGATED` is action discipline for work handed to a coding
+        model during a call; `Audience.AGENT` is the half that fetches a read and
+        hands it back. Only the second crosses codex's cut.
+        """
+        assert f"{CLI.invocation} <action>" in instructions.delegated.text
+        assert "--reader" not in instructions.delegated.text
+
+    def test_the_voice_set_never_learns_the_mark_exists(self, instructions) -> None:
+        assert "--reader" not in instructions.voice.text
+
+    def test_the_reader_flag_is_the_only_change_to_the_agents_command_line(
+        self, instructions
+    ) -> None:
+        """The three rendered sets are otherwise byte-for-byte what they were.
+
+        Asserted as a substitution rather than as a pinned blob: putting the flag
+        back where it came from must reproduce the previous text exactly, so any
+        second edit riding along with this one fails here.
+        """
+        assert (
+            instructions.agent.text.replace(" --reader voice <action>", " <action>").count(
+                f"{CLI.invocation} <action>"
+            )
+            == 1
+        )
 
     def test_the_voice_set_names_no_cli(self, instructions) -> None:
         """The invocation lives with the half that can run it."""

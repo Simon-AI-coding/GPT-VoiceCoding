@@ -20,6 +20,7 @@ from gpt_voicecoding.seams.control_plane import (
     Action,
     ErrorCode,
     MalformedRequest,
+    Reader,
     Reply,
     Request,
 )
@@ -41,14 +42,25 @@ class TestTheActionSet:
             "assistant",
         }
 
-    def test_the_three_menu_verbs_move_the_protocol_to_nine(self) -> None:
+    def test_the_reader_mark_moves_the_protocol_to_ten(self) -> None:
+        """A surface can tell an engine that knows the mark from one that does not.
+
+        Protocol 9 added the three menu verbs (#264). Ten adds the optional
+        `reader` field: an engine at 9 answers a marked `history` with a page
+        fitted to the Control Plane's 64 KB and nothing else, which codex then
+        cuts (#302). The Swift shell compares this number and nothing else, so
+        the field cannot arrive under an unchanged version.
+        """
+        assert PROTOCOL_VERSION == 10
+
+    def test_the_three_menu_verbs_moved_the_protocol_to_nine(self) -> None:
         """A v8 surface would send `sessions` and be answered `unknown_action`.
 
         The Swift shell compares this number and nothing else, so an action set
         that grew under an unchanged number is a gate that lies (#264, ADR 0021
         §6). Protocol 8 retired `pending_approvals` from `status` (#191).
         """
-        assert PROTOCOL_VERSION == 9
+        assert PROTOCOL_VERSION >= 9
 
     def test_the_retired_exact_progress_verb_is_not_an_action_this_engine_has(self) -> None:
         """Retired with the History page, and its absence asserted, not assumed."""
@@ -119,6 +131,51 @@ class TestARequestOnTheWire:
 
     def test_a_missing_payload_is_an_empty_one(self) -> None:
         assert Request.of({"action": "status"}).payload == {}
+
+
+class TestTheReaderMark:
+    """#302: who the answer is *for*, when that changes what may be carried."""
+
+    def test_the_reader_set_is_exactly_the_voice(self) -> None:
+        """One value today. The set is closed, so a second reader is a decision."""
+        assert {str(reader) for reader in Reader} == {"voice"}
+
+    def test_a_request_without_the_mark_carries_no_reader(self) -> None:
+        """The Companion Channel's shape, and every `bridgectl` that never marks."""
+        assert Request.of({"action": "history"}).reader is None
+
+    def test_an_absent_mark_survives_the_round_trip_as_an_absent_field(self) -> None:
+        """A request that names no reader does not grow a null one to be read back."""
+        assert "reader" not in Request(action=Action.HISTORY).as_document()
+
+    def test_the_mark_survives_the_round_trip(self) -> None:
+        document = Request(action=Action.HISTORY, reader=Reader.VOICE).as_document()
+        assert document["reader"] == "voice"
+        assert Request.of(document).reader is Reader.VOICE
+
+    def test_an_explicit_null_reader_is_read_as_no_reader(self) -> None:
+        """How a surface that builds its request from a nullable field writes it."""
+        assert Request.of({"action": "history", "reader": None}).reader is None
+
+    def test_an_unrecognised_reader_is_refused_and_the_refusal_names_the_values(self) -> None:
+        """A mistyped reader is never silently the default (#302).
+
+        Malformed rather than an unusable payload: the field is the request's,
+        not one action's, so it is read where the request is read.
+        """
+        with pytest.raises(MalformedRequest) as refusal:
+            Request.of({"action": "history", "reader": "the-voice"})
+        assert refusal.value.code is ErrorCode.MALFORMED_REQUEST
+        assert "voice" in str(refusal.value)
+
+    def test_a_reader_that_is_not_text_is_refused(self) -> None:
+        with pytest.raises(MalformedRequest) as refusal:
+            Request.of({"action": "history", "reader": 1})
+        assert refusal.value.code is ErrorCode.MALFORMED_REQUEST
+
+    def test_two_requests_differing_only_in_reader_are_not_equal(self) -> None:
+        """The mark changes the answer, so it is part of what a request *is*."""
+        assert Request(action=Action.HISTORY) != Request(action=Action.HISTORY, reader=Reader.VOICE)
 
 
 class TestAReplyOnTheWire:

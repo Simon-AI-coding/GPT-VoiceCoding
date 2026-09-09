@@ -213,7 +213,7 @@ def _sections(context: InstructionContext) -> tuple[Section, ...]:
                     ),
                     text=(
                         "## Engine tools\n\n"
-                        f"Invoke the engine with `{context.cli.invocation} <action> "
+                        f"Invoke the engine with `{context.cli.invocation_for_the_voice} <action> "
                         f"[arguments]` (engine version {context.cli.version}). Pass arguments "
                         "as arguments; never build a shell string from the user's words or "
                         "edit the invocation path. Use only the engine forms below. Copy "

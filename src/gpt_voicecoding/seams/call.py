@@ -118,6 +118,43 @@ CODEX_BYTES_PER_TOKEN: Final = 4
 #: v3) and Bridge Core may not reach into an adapter for it.
 CODEX_RESPONSE_ITEM_PREFIX: Final = "[AGENT] "
 
+#: The wire's ceiling on the Call Agent's answer *back* to the Voice, in codex's
+#: estimated tokens. `REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET` in
+#: `codex-rs/core/src/realtime_conversation.rs:100` at tag `rust-v0.153.4`, the
+#: version this machine runs; applied by `realtime_backend_item` at `:1471-1482`
+#: through `truncate_realtime_text_to_token_budget`. Unlike the hand-over cap
+#: above it does **not** refuse the request — it cuts the middle out and leaves a
+#: marker saying how much went but never which part, which is why this side has
+#: to keep the ceiling (#302, `docs/research/2026-09-07-realtime-output-budget.md`).
+REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET: Final = 1_000
+
+#: What the Call Agent is allowed to say *beside* the engine's answer, inside the
+#: same budget. A deliberate over-estimate in the manner of
+#: `WIRE_LINE_OVERHEAD_BYTES`: on the 2026-09-09 10:48 tracer run
+#: (`docs/research/probes/20260908T224821Z-tracer-timeline.md`) the Call Agent
+#: returned engine results verbatim and its own remarks were separate messages of
+#: 43-70 bytes, so this is roughly four times the widest one observed. It stays an
+#: allowance and not a measurement: one extra remark must not push a whole page
+#: past a cut the user cannot see.
+CALL_AGENT_REMARK_ALLOWANCE_BYTES: Final = 256
+
+#: How many bytes of *answer* the Live Call's return leg may carry — the ceiling a
+#: `history` page or a Session Brief is fitted to when the reader is the Voice
+#: (#302). Derived from codex's own constants rather than chosen for safety: its
+#: budget in bytes, less the bytes codex prepends before it truncates
+#: (`CODEX_RESPONSE_ITEM_PREFIX` and the two newlines
+#: `realtime_backend_item` joins with, so 10 of the 4,000 are ours), less the
+#: allowance above.
+#:
+#: The prefix is *measured*, not written down, so a change to it moves this
+#: ceiling with it rather than silently overrunning the wire. A codex upgrade
+#: should re-check the two source lines named above.
+RETURN_LEG_BUDGET_BYTES: Final = (
+    REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET * CODEX_BYTES_PER_TOKEN
+    - len((CODEX_RESPONSE_ITEM_PREFIX + "\n\n").encode("utf-8"))
+    - CALL_AGENT_REMARK_ALLOWANCE_BYTES
+)
+
 #: How many bytes of hand-over one dial may carry — the wire's ceiling, converted,
 #: rather than a figure chosen for safety. A Chinese character costs three bytes
 #: and so three-quarters of an estimated token, exactly as three bytes of English

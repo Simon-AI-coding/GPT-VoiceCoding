@@ -287,6 +287,13 @@ def _state_behind(window: ReplyWindow, held: SessionState) -> SessionState:
 #: answering hands the dialog back to the terminal, which is already the default.
 PERMISSION_LABELS: tuple[str, ...] = (str(ApprovalVerdict.ALLOW), str(ApprovalVerdict.DENY))
 
+#: The two states in which the user is being asked to settle something, and so
+#: the two whose notice closes to `handled` when it stops being answerable from
+#: this surface (ADR 0021 §8 as amended on #324). Read off the state rather than
+#: off the question line, because a question asked in prose fills no question
+#: line and is a decision all the same.
+ASKING_STATES: frozenset[BriefState] = frozenset({BriefState.DECISION, BriefState.PERMISSION})
+
 
 def _notice_anchor(target: SessionTarget, waiting_for: WaitingFor) -> Anchor:
     """The Anchor row a Stop Notice registers: what a numeral on it picks from.
@@ -1978,6 +1985,16 @@ class BridgeCore:
         brief carried no decision is left alone — a `finished` notice records a
         turn that ended, and there is nothing on it to close.
 
+        **What is closable is read off the state, not the question line** (#324).
+        A Session that ends its turn on a question it typed in prose is briefed
+        `waiting for your decision` with an empty question slot — there is a
+        decision open and no structured ask to word it with — and the old test,
+        a non-empty question line, left exactly that notice 🟡 for ever: answered
+        from Telegram, or raised by a Session that has since died, nothing ever
+        edited it. The state is the honest reading of "the user is being asked
+        to settle this", and it is the same reading `close_questions` already
+        makes below.
+
         **Duty, and not the Message Switch.** An edit is not a push: it notifies
         nobody and only settles a message the user already has, so it obeys the
         master switch like every unbidden act toward the user, and outlives the
@@ -1994,7 +2011,7 @@ class BridgeCore:
             return
         for sent in self.anchors.open_notices(target):
             notice = sent.anchor.notice
-            if not isinstance(notice, SessionNotice) or not notice.question:
+            if not isinstance(notice, SessionNotice) or notice.state not in ASKING_STATES:
                 continue
             # A question's notice and a permission's both carry a question line,
             # so the brief's own state is what tells them apart (#323).

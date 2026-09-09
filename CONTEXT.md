@@ -43,7 +43,7 @@ What one Session said and was told, read on request in pages of a configured siz
 _Avoid_: progress (the retired verb), transcript, log, tail
 
 **Stop Notice**:
-A Session Brief published as text — what the Companion Channel receives whenever a Session stops, whatever it stopped on, with the Session's newest message carried whole when the surface can hold it and cut with a marker that says so when it cannot. It is an Anchor; once the decision it carried has been answered from the Companion Channel, or the Session has ended, it is marked as handled where it was sent — a question the user answered at the terminal leaves it as sent — and it stays a reply target for the user's words. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
+A Session Brief published as text — what the Companion Channel receives whenever a Session stops, whatever it stopped on, with the Session's newest message carried whole when the surface can hold it and cut with a marker that says so when it cannot. Where the Session asked its question in prose rather than as a list of options, the **ending** of that message is shown ahead of the fold, so a preview that cuts from the front carries the ask rather than the message's opening words. It is an Anchor; once the decision it carried has been answered from the Companion Channel, or the Session has ended, it is marked as handled where it was sent — a question the user answered at the terminal leaves it as sent — and it stays a reply target for the user's words. The Live Call does not receive text to read out; it receives the Session Brief itself and speaks from it.
 _Avoid_: announcement (the act, not the thing)
 
 **Cool-down**:

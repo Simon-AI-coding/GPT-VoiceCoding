@@ -4490,6 +4490,94 @@ class TestAClosedNoticeIsEditedInPlace:
         assert "message to edit not found" in caplog.text
         assert hub.channel.revisions.count(("1",)) == 1
 
+    @staticmethod
+    def prose(text: str = "两条路都行，你选哪个？") -> ProgressObservation:
+        """A turn that ended on a question the agent typed, with no structured ask.
+
+        `#320`'s rule promotes it to `DECISION` on the question mark, and
+        `_decision` finds nothing to fill the question slot with — so the notice
+        is a decision the user is being asked to settle, carrying no question
+        line. That is the shape that used to stay 🟡 for ever (#324).
+        """
+        return ProgressObservation.readable(
+            has_history=True,
+            recent=(ProgressEntry(ordinal=0, role=ProgressRole.ASSISTANT, text=text),),
+            read_at=datetime(2026, 9, 10, 9, 0, 0, tzinfo=UTC),
+        )
+
+    def test_a_prose_question_is_the_shape_this_predicate_is_about(self) -> None:
+        """The premise the four tests below stand on: `DECISION`, and no question line."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose()))
+
+        assert self.revised(hub).state is BriefState.DECISION
+        assert self.revised(hub).question == ""
+
+    def test_a_prose_questions_notice_closes_when_its_session_ends(self) -> None:
+        """§8's eligibility is the state that asks, not the question slot (#324)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose()))
+
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert self.edited(hub) == [("1",)]
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
+    def test_a_prose_questions_notice_closes_when_the_session_leaves_the_roster(self) -> None:
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose()))
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                ),
+            )
+        )
+
+        asyncio.run(hub.core.discover())
+
+        assert self.edited(hub) == [("1",)]
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
+    def test_a_prose_questions_notice_closes_when_words_from_telegram_are_delivered(self) -> None:
+        """The user answered in words, which is the only way a prose question is answered."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose()))
+
+        hub.emit(InboundText(text="第二个", in_reply_to="1"))
+
+        assert self.edited(hub) == [("1",)]
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
+
+    def test_a_prose_questions_notice_is_left_as_sent_when_the_reply_window_closes(self) -> None:
+        """The one exempt cause is exempt here too (#323): the user answered at the terminal."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose()))
+        sent = self.revised(hub)
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert self.edited(hub) == []
+        assert self.revised(hub) == sent
+
+    def test_a_finished_notice_is_still_never_edited_on_any_cause(self) -> None:
+        """A turn that ended asks nothing, so there is nothing on it to close."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, progress=self.prose("全部通过。")))
+        assert self.revised(hub).state is BriefState.FINISHED
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+        hub.emit(SessionEnded(target=CLAUDE))
+
+        assert self.edited(hub) == []
+
 
 class TestTheSwitchesScreenIsEditedAfterItsOwnFlip:
     """ADR 0021 §8 (#266): after a flip made *through* the switches screen, Core

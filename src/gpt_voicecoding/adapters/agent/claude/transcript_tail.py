@@ -45,9 +45,10 @@ and `relay_payload` unwraps the receiver's announcement, both from
 `stop_analysis` for the reason above. `is_visible` itself is untouched — it gains
 no exception, and `stop_analysis.analyse` goes on asking it alone, so the Stop
 tail boundary this walk shares with it does not move. The sidechain and
-`external` halves of the rule still hold — `_is_our_own_relay` asks
-`is_this_sessions_own_turn` for them rather than restating them — because only
-the `system` half is what a Relay trips.
+`external` halves of the rule still hold — `is_own_relay_turn` re-asserts them
+rather than assuming them — because only the `system` half is what a Relay trips.
+That composition lives in `stop_analysis` beside its two halves, because the
+Session Name's first-prompt read needs the same question (#305).
 
 **Against legacy** (ADR 0010, `CLAUDE.md`). The read is **ported** from
 `legacy@1d32845:bridge/transcript.py:1184-1246` (walk the records, keep what the
@@ -82,9 +83,8 @@ from typing import Any, Final
 
 from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
     QUESTION_TOOL,
-    is_own_relay,
+    is_own_relay_turn,
     is_pipeline_noise,
-    is_this_sessions_own_turn,
     is_visible,
     question_in,
     relay_payload,
@@ -213,7 +213,7 @@ def _entry(record: Mapping[str, Any], *, ordinal: int) -> ProgressEntry | None:
         return None
     if is_visible(record):
         text = visible_text(content)
-    elif _is_our_own_relay(record):
+    elif is_own_relay_turn(record):
         # The one record the visibility rule excludes that is nonetheless the
         # user speaking: our own Answer Relay, which Claude Code writes as a
         # `system` prompt source because it arrived down the inbox socket rather
@@ -225,18 +225,6 @@ def _entry(record: Mapping[str, Any], *, ordinal: int) -> ProgressEntry | None:
     else:
         return None
     return ProgressEntry(ordinal=ordinal, role=role, text=text) if text.strip() else None
-
-
-def _is_our_own_relay(record: Mapping[str, Any]) -> bool:
-    """Our own Relay, and still subject to every rule that is not the `system` one.
-
-    `is_own_relay` answers who delivered the record; it is not a way past the
-    other two exclusions. A sidechain record is a child's work and a record that
-    is not `external` is not the Session's own turn whoever sent it, so both are
-    re-asserted here rather than assumed — recognition adds a way in for one
-    rule, not for three.
-    """
-    return is_this_sessions_own_turn(record) and is_own_relay(record)
 
 
 def _moment(stamp: Any) -> datetime | None:

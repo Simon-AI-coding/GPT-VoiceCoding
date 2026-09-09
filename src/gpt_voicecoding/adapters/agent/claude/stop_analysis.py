@@ -378,6 +378,23 @@ def is_own_relay(record: Mapping[str, Any]) -> bool:
     return path.rpartition("/")[2].startswith(REPLY_SOCKET_PREFIX)
 
 
+def is_own_relay_turn(record: Mapping[str, Any]) -> bool:
+    """Our own Answer Relay, and still subject to every rule but the `system` one.
+
+    The one composition both `is_visible` consumers need, defined once (#305).
+    `is_own_relay` answers who delivered the record; it is not a way past the
+    other two exclusions. A sidechain record is a child's work and a record that
+    is not `external` is not the Session's own turn whoever sent it, so both are
+    re-asserted here — recognition adds a way in for one rule, not for three.
+
+    `transcript_tail.recent` asked this as a private helper of its own (#222) and
+    `transcript.naming_records` needed the same question a ticket later; a second
+    copy is the drift `is_this_sessions_own_turn` was split out to prevent, so
+    the composition lives here beside its two halves and both readers ask it.
+    """
+    return is_this_sessions_own_turn(record) and is_own_relay(record)
+
+
 def relay_payload(text: str) -> str:
     """The relayed words inside the receiver's announcement, or the whole text.
 

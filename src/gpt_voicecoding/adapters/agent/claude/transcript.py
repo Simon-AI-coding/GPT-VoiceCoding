@@ -59,8 +59,10 @@ from pathlib import Path
 from typing import Any
 
 from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
+    is_own_relay_turn,
     is_pipeline_noise,
     is_visible,
+    relay_payload,
     visible_text,
 )
 
@@ -154,22 +156,74 @@ def _parse(text: str) -> tuple[Record, ...]:
 
 
 def naming_records(records: tuple[Record, ...]) -> tuple[str | None, str | None]:
-    """Newest AI title and first user prompt, with their text left untouched."""
+    """Newest AI title and first user prompt, with their text left untouched.
+
+    **The prompt is handed on raw, because the cleaning is not this module's.**
+    ADR 0024 puts the first-words rung's deterministic string work — the
+    slash-command wrapper, the image markers, one line, the length — in the one
+    naming module in core. An adapter carries facts.
+
+    **A first turn that arrived by Relay is the user's words too** (#305). Claude
+    Code records an inbox delivery (ADR 0013) as a `user` record with
+    `promptSource: "system"`, which `is_visible` drops as product-injected
+    plumbing — the right rule, and it keeps it: `is_own_relay_turn` recognises
+    the delivery as ours beside the rule rather than carving an exception into
+    it, exactly as History does (`transcript_tail.recent`, #222), and
+    `stop_analysis.analyse` goes on asking `is_visible` alone so the Stop tail
+    boundary does not move. Without this a Session whose first words came through
+    the phone had no prompt to name itself from and fell to the derived-name
+    floor.
+
+    The one thing that is not handed on raw is the receiver's announcement around
+    those words: `relay_payload` strips it, because the wrapper is upstream's
+    boilerplate and not what the user said, so the cleaner in core does its work
+    on the instruction alone. Where the wrapper is one `relay_payload` cannot
+    split unambiguously it keeps the whole text (#222) — the cleaner then meets
+    the boilerplate, which is visible and diagnosable, where a confident strip
+    would silently lose the words the rung exists to carry.
+
+    **Against legacy** (ADR 0010, `CLAUDE.md`). **Legacy has no such behaviour,
+    twice over.** It never read a prompt to name a Session from: there was
+    exactly one way a Session got named, the Session's own reported title, and
+    `SessionLabelResolver` says so in as many words — "nothing here reads a
+    product's own transcript" (`legacy@1d32845:bridge/labels.py:73-83`). That
+    self-report is **dropped** by ADR 0024, which put this rung and its ladder
+    there instead, so the read this branch sits in is new and gen 1 is not a
+    citation for it either way. Nor did gen 1 ever meet the record shape: it
+    relayed through its own channel server
+    (`legacy@1d32845:bridge/claude.py:467-476`), which Claude Code recorded as an
+    ordinary typed turn needing no recognition and no unwrapping (#222). Its
+    `system` exclusion is the one thing here that is **ported**, verbatim and
+    unwidened, inside `is_visible`.
+    """
     title = prompt = None
     for record in records:
         if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
             title = record["aiTitle"]
-        if prompt is not None or record.get("type") != "user" or not is_visible(record):
+        if prompt is not None or record.get("type") != "user":
             continue
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if is_pipeline_noise(record, content):
             continue
-        # Tool results are user-shaped records, but never the user's prompt.
-        if isinstance(content, str):
-            prompt = content
-        elif isinstance(content, list) and any(
-            isinstance(item, dict) and item.get("type") in {"text", "image"} for item in content
-        ):
-            prompt = visible_text(content)
+        if is_visible(record):
+            prompt = _first_words(content)
+        elif is_own_relay_turn(record):
+            words = _first_words(content)
+            prompt = None if words is None else relay_payload(words)
     return title, prompt
+
+
+def _first_words(content: Any) -> str | None:
+    """What this `user` message says, or `None` when it is not the user speaking.
+
+    Tool results are user-shaped records, but never the user's prompt: they carry
+    no `text` or `image` part, which is what tells the two apart.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and any(
+        isinstance(item, dict) and item.get("type") in {"text", "image"} for item in content
+    ):
+        return visible_text(content)
+    return None

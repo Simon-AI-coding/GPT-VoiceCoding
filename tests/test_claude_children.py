@@ -44,6 +44,7 @@ from gpt_voicecoding.seams.agent import (
     LaneDiscovery,
     SessionInspection,
     SessionState,
+    WaitingKind,
 )
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from test_claude_stop_wiring import adapter_holding, roster
@@ -1355,3 +1356,161 @@ class TestWhatTheLaneComesBackWith:
         rows = asyncio.run(adapter.discover()).rows
 
         assert [row.target.session_id for row in rows] == [wiring.SESSION]
+
+
+# --- the background task (#320) ----------------------------------------------
+
+TASK_ID = "by4t9jf0n"
+FORKED_AGENT_ID = "a26e2cfdf5dbd9940"
+
+#: The parent's record of starting a background command, verbatim in shape from
+#: `~/.claude/projects/…/bc88121f-….jsonl` on 2026-09-09, claude 2.1.266. The
+#: `tool_result` arrives at once and the command goes on running; the id it
+#: carries is what the notification later names.
+BACKGROUND_LAUNCHED = {
+    "type": "user",
+    "isSidechain": False,
+    "userType": "external",
+    "message": {
+        "role": "user",
+        "content": [
+            {
+                "tool_use_id": "toolu_018FjdfhHTiu1NY1qDBws3wD",
+                "type": "tool_result",
+                "content": f"Command running in background with ID: {TASK_ID}.",
+                "is_error": False,
+            }
+        ],
+    },
+    "toolUseResult": {
+        "stdout": "",
+        "stderr": "",
+        "interrupted": False,
+        "backgroundTaskId": TASK_ID,
+    },
+}
+
+#: A forked `Agent` or `Skill`, from the same corpus. It says the same thing in
+#: the other spelling, and the id it names is the one its own notification
+#: carries.
+FORKED = {
+    "type": "user",
+    "isSidechain": False,
+    "userType": "external",
+    "message": {
+        "role": "user",
+        "content": [
+            {
+                "tool_use_id": "toolu_015dhzhVeacbjjwZCFTPmQCx",
+                "type": "tool_result",
+                "content": 'Skill "code-review" launched (forked, running in the background).',
+            }
+        ],
+    },
+    "toolUseResult": {
+        "success": True,
+        "commandName": "code-review",
+        "status": "forked",
+        "background": True,
+        "agentId": FORKED_AGENT_ID,
+        "result": "Running in the background as @code-review",
+    },
+}
+
+
+def notified(task_id: str = TASK_ID) -> dict:
+    """The parent being told the task is over, as a `user` record.
+
+    Verbatim in shape from a 2.1.261 transcript. It arrives while the parent is
+    idle, which is exactly why a background task needs no working parent — and
+    it is `promptSource: "system"`, so it is not the user speaking either.
+    """
+    return {
+        "type": "user",
+        "isSidechain": False,
+        "userType": "external",
+        "promptSource": "system",
+        "origin": {"kind": "task-notification"},
+        "message": {
+            "role": "user",
+            "content": (
+                "<task-notification>\n"
+                f"<task-id>{task_id}</task-id>\n"
+                "<tool-use-id>toolu_018FjdfhHTiu1NY1qDBws3wD</tool-use-id>\n"
+                "<status>completed</status>\n"
+                '<summary>Background command "Build venv" completed (exit code 0)</summary>\n'
+                "</task-notification>"
+            ),
+        },
+    }
+
+
+class TestTheBackgroundTask:
+    """#320: a Session sitting on a background review is not a Session that finished."""
+
+    def test_a_launched_command_is_listed_until_its_notification(self, tmp_path: Path) -> None:
+        transcript = transcript_for(tmp_path, [BACKGROUND_LAUNCHED])
+        reader = children.Children()
+
+        rows = reader.under(parent_row(SessionState.IDLE), transcript)
+        assert [row.target.session_id for row in rows] == [TASK_ID]
+        assert rows[0].child.kind is ChildKind.CHILD
+        assert rows[0].child.parent == parent_row().target
+
+        append(transcript, notified())
+        assert reader.under(parent_row(SessionState.IDLE), transcript) == ()
+
+    def test_a_forked_agent_says_the_same_thing_in_the_other_spelling(self, tmp_path: Path) -> None:
+        transcript = transcript_for(tmp_path, [FORKED])
+        reader = children.Children()
+
+        rows = reader.under(parent_row(SessionState.IDLE), transcript)
+        assert [row.target.session_id for row in rows] == [FORKED_AGENT_ID]
+
+        # It answers to a name, and the name is read rather than composed: it is
+        # what its own notification prints and what its Session addresses it by.
+        waiting = reader.awaiting(pid=PARENT_PID, state=SessionState.IDLE, transcript=transcript)
+        assert waiting.kind is WaitingKind.CHILD
+        assert waiting.awaiting == "code-review"
+
+        append(transcript, notified(FORKED_AGENT_ID))
+        assert reader.under(parent_row(SessionState.IDLE), transcript) == ()
+
+    def test_a_notification_for_another_task_settles_nothing(self, tmp_path: Path) -> None:
+        transcript = transcript_for(tmp_path, [BACKGROUND_LAUNCHED, notified("bsomethingelse")])
+
+        assert len(found(transcript, children.Children(), SessionState.IDLE)) == 1
+
+    def test_it_is_the_wait_its_session_is_in_and_it_has_no_name(self, tmp_path: Path) -> None:
+        """Core words a child with no name; the lane never reads one off a command line."""
+        transcript = transcript_for(tmp_path, [BACKGROUND_LAUNCHED])
+        reader = children.Children()
+
+        waiting = reader.awaiting(pid=PARENT_PID, state=SessionState.IDLE, transcript=transcript)
+        assert waiting.kind is WaitingKind.CHILD
+        assert waiting.awaiting is None
+
+        append(transcript, notified())
+        assert (
+            reader.awaiting(pid=PARENT_PID, state=SessionState.IDLE, transcript=transcript).kind
+            is WaitingKind.NONE
+        )
+
+    def test_a_teammate_names_the_wait_it_puts_its_session_in(self, tmp_path: Path) -> None:
+        transcript = transcript_for(tmp_path, [])
+        teammate_on_disk(transcript)
+        reader = children.Children()
+
+        waiting = reader.awaiting(pid=PARENT_PID, state=SessionState.IDLE, transcript=transcript)
+        assert waiting.kind is WaitingKind.CHILD
+        assert waiting.awaiting == TEAMMATE
+
+    def test_a_session_running_nothing_is_waiting_on_nothing(self, tmp_path: Path) -> None:
+        transcript = transcript_for(tmp_path, [SAID])
+
+        assert (
+            children.Children()
+            .awaiting(pid=PARENT_PID, state=SessionState.IDLE, transcript=transcript)
+            .kind
+            is WaitingKind.NONE
+        )

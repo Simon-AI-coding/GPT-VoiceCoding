@@ -56,8 +56,14 @@ class RelayReason(StrEnum):
     **The proven/unproven pairs collapsed.** Two of these used to be four,
     because a sentence about a ceiling may not claim non-delivery of an
     `UNKNOWN` — the grade that means the far side may well have the words.
-    A code claims nothing about arrival: `ceiling_passed` is a fact about this
-    system's own limit, and the attempt's grade travels beside it.
+    A code claims nothing about arrival: a terminal code is a fact about what
+    happened *here*, and the attempt's grade travels beside it.
+
+    **`CEILING_PASSED` was the seventh and is retired** (#321). It said the
+    words had waited past a wall clock of this system's own and been dropped —
+    the one way the user's words were lost with nothing said about it. Queued
+    words now wait for the Session's next turn or for its end, so the only
+    terminal codes left are facts about the Session or the question.
     """
 
     #: The attempt proved the words reached the model. Nothing else does.
@@ -73,12 +79,35 @@ class RelayReason(StrEnum):
     #: The far side parked the words in front of a person. It settles on its
     #: own; a second copy is a second decision for the same human.
     HELD_FAR_SIDE = "held_far_side"
-    #: Terminal: the words waited past `relay_ceiling_seconds` and left the
-    #: ledger, so nothing retries them.
-    CEILING_PASSED = "ceiling_passed"
     #: Terminal: the Session those words were for ended while they waited.
     SESSION_ENDED = "session_ended"
     #: Terminal, and refused before the wire: the question is no longer
     #: answerable from here, so the words were never queued for an inbox that
     #: cannot take them (#68).
     QUESTION_UNANSWERABLE = "question_unanswerable"
+
+
+class RelayAuthority(StrEnum):
+    """What the route the words took made of them (ADR 0013 §3 and its amendment).
+
+    **Here beside `RelayReason` rather than in the pipeline**, for the reason
+    that put `RelayReason` here: a queued Relay holds one, and a queue that had
+    to import the pipeline built on it would be a cycle (ADR 0001).
+
+    Three cases, and the third is the one that earns a clause on the receipt.
+    An answer through a question hook the lane still held (ADR 0015) and a
+    permission verdict are **the user's own**. Words into an inbox are a peer's
+    message: whether the Session acts on them is its call. That matters to the
+    user only when there was a question to answer — a Session that merely
+    *said* it, with no hook behind it — because "arrived" is then heard as
+    "accepted as mine". Words for a Session that asked nothing carry no more
+    authority, and nobody needs telling so.
+    """
+
+    #: The held-hook answer or the verdict: the user's own decision, carried whole.
+    AS_THE_USER = "as_the_user"
+    #: Plain text into a Session that ended its turn on a question it merely
+    #: said. The words travel; the user's say-so does not (ADR 0013 §3).
+    WORDS_ON_A_QUESTION = "words_on_a_question"
+    #: Plain text into a Session that asked nothing — an instruction, a supplement.
+    WORDS = "words"

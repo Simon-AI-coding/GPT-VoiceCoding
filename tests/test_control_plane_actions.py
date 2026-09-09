@@ -27,7 +27,7 @@ from gpt_voicecoding.control_plane.progress_publication import ProgressPublicati
 from gpt_voicecoding.core.bridge import BridgeCore
 from gpt_voicecoding.core.briefing import ASSISTANT_OPENING_LINE, ASSISTANT_UNAVAILABLE_HINT
 from gpt_voicecoding.core.policy import CorePolicy
-from gpt_voicecoding.core.relay_queue import RelayQueue
+from gpt_voicecoding.core.relay_queue import PendingRelay, RelayKind, RelayQueue
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.core.state import BridgeState
 from gpt_voicecoding.core.switches import Switchboard, SwitchName
@@ -59,7 +59,12 @@ from gpt_voicecoding.seams.control_plane import (
     Reply,
     Request,
 )
-from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
+from gpt_voicecoding.seams.identity import (
+    AgentKind,
+    SessionName,
+    SessionTarget,
+    new_request_id,
+)
 
 WORKSPACE = Path("/tmp/workspace")
 SECOND_WORKSPACE = Path("/tmp/another-workspace")
@@ -273,6 +278,30 @@ class TestStatus:
         # Protocol 8: no second list beside the rows. A pending permission is
         # the row's own `waiting_for`, and the panel counts those (#191).
         assert "pending_approvals" not in data
+
+    def test_a_queued_relay_is_rendered_whole_and_carries_no_deadline(self) -> None:
+        """#321: the ceiling is abolished, so a queued Relay has no `expires_at`.
+
+        Rendered with something actually queued, because a status read on an
+        empty queue is a status read that never touches this document at all.
+        """
+        surface = Surface()
+        surface.register()
+        surface.state.relays.enqueue(
+            PendingRelay(
+                request_id=new_request_id(),
+                target=CODEX,
+                kind=RelayKind.ANSWER,
+                text="ship it",
+                queued_at=1_000.0,
+            )
+        )
+
+        (queued,) = surface.ask(Action.STATUS).data["pending_relays"]
+
+        assert queued["text"] == "ship it"
+        assert queued["queued_at"] == 1_000.0
+        assert "expires_at" not in queued
 
     def test_the_roster_is_answerable_on_its_own(self) -> None:
         """The Roster Brief names the same Sessions `status` holds rows for."""
@@ -973,7 +1002,9 @@ class TestBrief:
 
         assert reply.ok
         assert reply.data["session"]["newest"] == {"state": "unreadable", "text": None}
-        assert reply.data["session"]["state"] == "unreadable"
+        # The failed read is a fact about the *message*, and since #320 it is
+        # told there and nowhere else: the state says nothing is being asked.
+        assert reply.data["session"]["state"] == "finished"
         # The roster still holds what it last read: a standing account does not
         # lose a fact because one pass could not answer.
         assert (
@@ -1026,7 +1057,8 @@ class TestBrief:
         history = surface.ask(Action.HISTORY, target=CODEX_ADDRESS)
 
         assert brief.ok
-        assert brief.data["session"]["state"] == "unreadable"
+        assert brief.data["session"]["state"] == "finished"
+        assert brief.data["session"]["newest"]["state"] == "unreadable"
         assert history.error is not None
 
     def test_a_newest_message_too_large_for_the_line_is_named_rather_than_sliced(self) -> None:

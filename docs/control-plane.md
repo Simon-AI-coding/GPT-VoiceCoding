@@ -84,7 +84,7 @@ ADR 0016 as amended).
 ```
 
 `action` is `null` when the line never named a usable one. `protocol` is the
-numeric protocol version, currently `10`. A missing field or JSON `null` means the
+numeric protocol version, currently `11`. A missing field or JSON `null` means the
 reply did not declare a usable version. The Swift shell refuses to interpret any
 reply whose version is missing or differs from the version it supports, and shows
 that protocol mismatch separately from an engine refusal or an unreachable engine.
@@ -164,7 +164,7 @@ Payload: none. Data:
   "sessions": [ /* see below */ ],
   "call_id": null,
   "pending_relays": [{"request_id": "…", "target": {…}, "kind": "answer", "text": "…",
-                      "route": "deliver", "queued_at": 0.0, "expires_at": 600.0,
+                      "route": "deliver", "queued_at": 0.0,
                       "outcome": "unknown" /* or null: nothing has been attempted */}]
 }
 ```
@@ -182,12 +182,13 @@ second question to render one line would be a second reader of the same Session:
                  "options": [{"text": "main", "description": "Use the default branch",
                               "recommended": true}],
                  "recommendation": "main", "tool_name": null, "detail": null,
-                 "approval_id": null},
+                 "approval_id": null, "awaiting": null},
  "progress": {"availability": "readable", "has_history": true,
               "omission": "status_summary",
               "read_at": "2026-08-26T02:44:39+00:00", "recent": []},
  "last_activity": "2026-08-26T02:44:39+00:00",
  "child": {"kind": "main", "parent": null},
+ "headless_run": false,
  "reply_window": "open"}
 ```
 
@@ -195,15 +196,32 @@ second question to render one line would be a second reader of the same Session:
 never crosses the wire as an address — resolving one to a target is Bridge
 Core's router, on the way in from the Companion Channel.
 
+`child` and `headless_run` are the two tiers a row can be in that are not a
+Session, and a row carries both because both stay on this wire: `status` lists
+every row the engine holds, and neither of these is a row the user may be
+offered. `child.kind` is `main` or `child` (ADR 0020's Child Process);
+`headless_run` is `true` for a run with no controlling terminal — a complete
+process nobody can type into, kept as a row and never announced (ADR 0020 as
+amended, `CONTEXT.md`'s *Headless Run*). A surface counting the Sessions a
+person can see running counts the rows where `child.kind` is `main` and
+`headless_run` is `false`. The key is additive: a reader that does not know it
+reads its absence as `false`, which is the count it had before.
+
 `first_seen` is wall-clock seconds, and it is when *this engine* first saw the
 Session — no agent knows it.
 
 `waiting_for` is what a stopped Session stopped on, as structure rather than as a
-rendered sentence. `kind` is one of `none`, `question`, `permission`, `unknown`;
-`unknown` always comes with `caught_up: false`, and means *ask again*, never
-*nothing is happening*. A question option always carries `text` and `recommended`;
-its `description` is the Agent's optional explanation of that choice, or `null`
-when the Agent supplied none.
+rendered sentence. `kind` is one of `none`, `question`, `permission`, `peer`,
+`child`, `unknown`; `unknown` always comes with `caught_up: false`, and means
+*ask again*, never *nothing is happening*. A question option always carries
+`text` and `recommended`; its `description` is the Agent's optional explanation
+of that choice, or `null` when the Agent supplied none.
+
+`awaiting` is set on `peer` and `child` alone, and it is the **lane's** own
+reference to the party being awaited: the awaited Session's address for `peer`,
+the child's own name for `child`, and `null` for a child that has none. The name
+the *user* reads is Core's and travels on a brief's `awaited`, because a Session
+Name climbs (ADR 0024) and a name resolved at the Stop would be announced stale.
 
 A row's `progress` always carries the same five fields:
 
@@ -290,16 +308,27 @@ rather than lines.
 
 | State | When |
 | --- | --- |
-| `decision` | A question is waiting, **or** a Codex turn ended — Codex has no question hook, so the ambiguity is briefed as the answerable state until the heuristic that tells them apart lands. |
+| `decision` | A question is put to the user — a question hook, or a question mark in the turn's final prose. A question mark makes a decision; nothing else does. |
 | `permission` | A permission dialog is open. |
-| `finished` | This turn is done and the Session is idle for a new instruction. Exited Sessions appear nowhere. |
+| `waiting_on` | The turn ended with the ball in another Session's hands or in the Session's own Child Process's. The one state word that names somebody: `waiting on <name>`, filled with the awaited Session's Session Name, the child's own name, or `a background command` for a child that has none. |
+| `finished` | No question and nothing awaited — including a hand-over that asks nothing, and a stop nobody could read. Exited Sessions appear nowhere. |
 | `running` | Mid-turn. Nothing is being asked of the user. |
-| `unreadable` | It stopped, and what it stopped on or what it said could not be read. **Never counted as a decision**, and the brief still carries whatever *was* read. |
+
+`unreadable` **was a sixth state and is retired** (#320). A read that failed is
+a fact about the *message*, not a state of the Session, so it is told where it
+belongs: the state says nothing is being asked and `newest.state` says the
+message could not be read. Nothing about a failed read is dressed as a decision
+the user has to make.
 
 `newest` is the newest assistant message **whole**, under ADR 0016's omission
 rules — the engine never condenses, so the one-line conclusion a user hears and
 the detail they may ask for are one field. Its `state` is `said`, `nothing_said`,
 `not_read`, `unreadable` or `oversize`, and `text` is present only for `said`.
+
+`awaited` is who the `waiting_on` state word names, already in the words the
+user reads — the awaited Session's Session Name, or the awaited child's name.
+`null` on every other state, and on a `waiting_on` whose party has no name of
+its own, which the rendered `text` beside it words as `a background command`.
 
 `decision` is `null` when nothing is being asked. A question carries `prompt`,
 every `option` and any `recommendation`; a permission carries `tool` and a
@@ -330,9 +359,9 @@ acts on — the header, the state, the whole decision — stays. Text is never c
 `brief <address>` is a **read**, read now, through exactly one `inspect`. Its
 refusals are `history`'s minus one: `unknown_session`, `stale_session`, and
 `refused` for a Child Process or a lane that could not be read at all. A Session
-whose *progress* could not be read is **not** a refusal here — it is the
-`unreadable` state, or an `unreadable` `newest` on a Session that is still
-running.
+whose *progress* could not be read is **not** a refusal here — it answers with
+an `unreadable` `newest` beside a state read off the wait, whether that Session
+is running or has stopped.
 
 ### `history`
 
@@ -452,7 +481,7 @@ Data:
  "route": "deliver",
  "receipt": {"outcome": "delivered" | "failed" | "held" | "unknown", "reason": "…"} | null,
  "reason": "delivered" | "awaiting_reply_window" | "duplicate_risk" | "held_far_side"
-         | "ceiling_passed" | "session_ended" | "question_unanswerable"}
+         | "session_ended" | "question_unanswerable"}
 ```
 
 **The receipt is a grade and a reason, never a sentence.** Three facts and no
@@ -467,7 +496,6 @@ the top-level `reason` is one code from the closed `RelayReason` set
 | `awaiting_reply_window` | they wait, and may go again when the Session next takes a turn |
 | `duplicate_risk` | an attempt proved nothing either way, so they are kept and never re-sent on this system's authority (P9) |
 | `held_far_side` | the far side parked them in front of a person |
-| `ceiling_passed` | terminal: they waited past `relay_ceiling_seconds` |
 | `session_ended` | terminal: the Session ended while they waited |
 | `question_unanswerable` | terminal, before the wire: that question is no longer answerable from here (#68) |
 
@@ -663,7 +691,6 @@ codex  = "gpt_voicecoding.adapters.agent.codex:codex_agent"
 workspace = "~/code"                # where the bridge's own threads run; default is ~
 
 [policy]                            # optional; these are the locked defaults
-relay_ceiling_seconds   = 600
 silence_end_seconds     = 60
 cool_down_seconds       = 30
 speech_settle_seconds   = 5

@@ -1,10 +1,7 @@
 """The numbers the policy pipelines run on, in one place and configurable.
 
-These are locked *defaults*, not constants: the Approval Relay budget is
-"600 s, configurable" by decision, and a ceiling baked into the pipeline that
-enforces it is a number nobody can change without a release. The Relay queue
-already refuses to own its own deadline for the same reason — it holds the
-deadline it is handed.
+These are locked *defaults*, not constants: a duration baked into the pipeline
+that enforces it is a number nobody can change without a release.
 
 Nothing here is a policy *decision*; the decisions live in the pipelines. This
 is only the dial they read.
@@ -14,8 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: The queued-delivery ceiling: ten minutes, then a reported failure.
-DEFAULT_RELAY_CEILING_SECONDS = 600.0
+# **No dial bounds how long the user's words may wait** (#321). A queued Relay
+# used to be dropped after ten minutes of wall clock; the ceiling is abolished,
+# because a Session's slow turn is not a reason to lose what the user said, and
+# the user withdraws words by saying different ones. There is nothing left for
+# policy to say about it.
 
 # **No dial names a hold duration** (ADR 0015, amended by #191). The Approval
 # Relay's budget lived here and was read in two places — the pending-approval
@@ -82,8 +82,6 @@ class CorePolicy:
     this type.
     """
 
-    #: How long an unsolicited Relay may wait for the Reply Window to open.
-    relay_ceiling_seconds: float = DEFAULT_RELAY_CEILING_SECONDS
     #: How long an owned Live Call may have no user or system activity.
     silence_end_seconds: float = DEFAULT_SILENCE_END_SECONDS
     #: How long after any end of a call the Call Keeper will not dial again.
@@ -114,7 +112,6 @@ class CorePolicy:
         ):
             raise ValueError("first_prompt_characters must be a positive whole number")
         for name, seconds in (
-            ("relay_ceiling_seconds", self.relay_ceiling_seconds),
             ("silence_end_seconds", self.silence_end_seconds),
             ("cool_down_seconds", self.cool_down_seconds),
             ("speech_settle_seconds", self.speech_settle_seconds),

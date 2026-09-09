@@ -501,9 +501,17 @@ class FakeCompanionChannel:
         self.notices: list[Notice | None] = []
         #: The reply-bar placeholder each send asked for, empty for most.
         self.reply_bars: list[str] = []
+        #: The user's own message each send hung under, empty for most (#321).
+        self.replies_to: list[str] = []
         #: Every receipt this fake answered with, in order — the ids a
         #: message landed under are what a reply to it is keyed by.
         self.receipts: list[ChannelReceipt] = []
+        #: Every `react`, as (message id, emoji | None) — one call per swap,
+        #: which is what a test asserting a swap has to be able to see (#321).
+        self.reactions: list[tuple[str, str | None]] = []
+        #: Whether this surface refuses reactions. The caller's fallback is a
+        #: sentence, so a refusal is an answer here and never an exception.
+        self.react_stands = True
 
     async def send(
         self,
@@ -514,8 +522,10 @@ class FakeCompanionChannel:
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> ChannelReceipt:
         self.sent.append(text)
+        self.replies_to.append(reply_to)
         self.requests.append(str(request_id))
         self.origins.append(origin)
         self.revisions.append(revises)
@@ -531,6 +541,10 @@ class FakeCompanionChannel:
         )
         self.receipts.append(receipt)
         return receipt
+
+    async def react(self, message_id: str, reaction: str | None) -> bool:
+        self.reactions.append((message_id, reaction))
+        return self.react_stands
 
     async def verify(self) -> VerifyResult:
         return self.verify_result

@@ -60,9 +60,9 @@ from gpt_voicecoding.seams.companion_channel import (
 STATE_LIGHT: Final[Mapping[BriefState, str]] = {
     BriefState.DECISION: "🟡",
     BriefState.PERMISSION: "🔴",
+    BriefState.WAITING_ON: "🟣",
     BriefState.FINISHED: "🟢",
     BriefState.RUNNING: "🔵",
-    BriefState.UNREADABLE: "⚪",
 }
 
 #: What separates the facts on one line — `agent · project · task`. The same
@@ -260,8 +260,6 @@ def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
     below_lines = []
     if not notice.answerable_here and notice.answer_wording:
         below_lines.append(notice.answer_wording)
-    if notice.undelivered:
-        below_lines.append(notice.undelivered)
     below = "".join(f"\n{line}" for line in below_lines)
 
     budget = limit - utf16_length(above) - utf16_length(below)

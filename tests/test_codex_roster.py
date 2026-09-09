@@ -70,6 +70,7 @@ def terminal(
     session_id: str | None = None,
     started_at: float | None = TERMINAL_STARTED_AT,
     rollout_root: bool = False,
+    has_controlling_terminal: bool = True,
 ) -> ProcessObservation:
     """One live interactive `codex`, as the process table reads it."""
     return ProcessObservation(
@@ -78,9 +79,15 @@ def terminal(
             workspace=Path(workspace),
             session_id=session_id,
             started_at=started_at,
+            has_controlling_terminal=has_controlling_terminal,
         ),
         rollout_root=rollout_root,
     )
+
+
+def headless(pid: int = 70001, **fields) -> ProcessObservation:
+    """One interactive-looking `codex` that `ps` gave no controlling terminal."""
+    return terminal(pid, has_controlling_terminal=False, **fields)
 
 
 def targets(composed: roster.Roster) -> list[tuple[str, int | None]]:
@@ -377,4 +384,66 @@ class TestATerminalTheDaemonHoldsNothingFor:
         composed = compose([thread(created_at=EARLIER_CREATED_AT)], [terminal()])
 
         assert composed.note is not None
+        assert composed.unheld == ()
+
+
+class TestARunWithNoControllingTerminal:
+    """#319: a `??` candidate reaches the rule, and the rule keeps it in its place.
+
+    ADR 0020's amendment sorts every recognised run into three tiers by one
+    fact, and the fact now travels out of `processes.py` instead of being
+    dropped there. What this class pins is that carrying it changed nothing
+    about a Session: the live rule runs first and alone, and a run with no
+    terminal only ever picks up what that rule left behind.
+    """
+
+    def test_it_vouches_for_a_root_no_live_terminal_vouches_for(self) -> None:
+        """The row a Headless Run needs, so its silence has somewhere to live."""
+        composed = compose([thread()], [headless()])
+
+        assert targets(composed) == [(THREAD, 70001)]
+        assert composed.rows[0].inspection.has_controlling_terminal is False
+
+    def test_it_never_takes_a_live_sessions_pid_away(self) -> None:
+        """#144's detached debris beside a real TUI, which is the shape to fear.
+
+        Both could be sitting in this root, and a second voucher in the live
+        rule's own count would collapse `len(for_this) == 1` and leave the
+        Session with no pid at all. The pools are read one after the other, so
+        the live terminal is still the only one counted.
+        """
+        composed = compose([thread()], [terminal(pid=68633), headless(pid=70001)])
+
+        assert targets(composed) == [(THREAD, 68633)]
+        assert composed.rows[0].inspection.has_controlling_terminal is True
+
+    def test_a_root_a_live_terminal_holds_is_never_read_off_the_other_pool(self) -> None:
+        """Two roots, one seat each: the live one keeps its terminal's answer."""
+        composed = compose(
+            [thread(), thread(OTHER_THREAD, cwd="/tmp/other")],
+            [terminal(), headless(pid=70001, workspace="/tmp/other")],
+        )
+
+        assert dict(
+            (row.inspection.target.session_id, row.inspection.has_controlling_terminal)
+            for row in composed.rows
+        ) == {THREAD: True, OTHER_THREAD: False}
+
+    def test_a_root_nothing_vouches_for_still_says_why(self) -> None:
+        """The drop reason is unchanged where neither pool answers for a root."""
+        composed = compose([thread(created_at=EARLIER_CREATED_AT)], [headless()])
+
+        assert composed.rows == ()
+        assert reasons(composed) == {THREAD: roster.NO_TERMINAL}
+
+    def test_it_is_not_a_terminal_the_lane_reports_as_a_missing_session(self) -> None:
+        """`note` and `unheld` are about a seat somebody is sitting in (#233).
+
+        Nobody sits in a run with no controlling terminal, so a `??` process
+        that vouches for nothing is neither a Session this roster may be
+        under-reporting nor a terminal it owes the user a sentence about.
+        """
+        composed = compose([thread(created_at=EARLIER_CREATED_AT)], [headless()])
+
+        assert composed.note is None
         assert composed.unheld == ()

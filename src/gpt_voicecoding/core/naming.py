@@ -84,6 +84,8 @@ def choose_task(
             else raw.strip()
         )
         reason = _refusal(task)
+        if reason is None and rung is NameRung.FIRST_PROMPT:
+            reason = _absolute_path_refusal(task)
         if reason:
             refusals.append(f"{agent} {rung.name}: {reason}")
             continue
@@ -101,6 +103,19 @@ def _first_words(raw: str, limit: int) -> str:
         raw = args.group(1) if args is not None and args.group(1).strip() else command.group(1)
     raw = _IMAGE_MARKER.sub("", raw)
     return " ".join(raw.split())[:limit].strip()
+
+
+def _absolute_path_refusal(task: str) -> str | None:
+    """The first-words rung's own refusal (ADR 0024, amendment 2026-09-09).
+
+    A first prompt that opens with a path names a place on this machine, not a
+    task; forty characters of a home directory outranked a derived name all of
+    2026-09-09. A relative path is kept: `crewtask/21` is what the user handed
+    the driver and says so.
+    """
+    if task[:1] in ("/", "~"):
+        return "a task that is an absolute path"
+    return None
 
 
 def _refusal(task: str) -> str | None:

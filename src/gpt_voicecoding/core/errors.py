@@ -73,6 +73,25 @@ class ChildSessionError(SessionError):
         self.parent = parent
 
 
+class HeadlessRunError(SessionError):
+    """That identity names a Headless Run. It is kept, and never spoken to (#319).
+
+    A run with no controlling terminal is a complete process nobody can type
+    into (ADR 0020 as amended, `CONTEXT.md`'s *Headless Run*), so the user's
+    words have nowhere to land: the Relay would be carried to a run that will
+    never read them and will exit on its own. Refused here rather than by a
+    caller's memory, and for the same reason `ChildSessionError` is — one
+    definition, raised by the registry, so every surface refuses alike.
+    """
+
+    def __init__(self, target: SessionTarget) -> None:
+        super().__init__(
+            f"{target} is a Headless Run: it has no controlling terminal, so it is kept "
+            "as a row and never Relayed into"
+        )
+        self.target = target
+
+
 class ProgressUnavailable(SessionError):
     """Nothing on this machine can read what that Session said.
 

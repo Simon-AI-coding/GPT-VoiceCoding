@@ -337,14 +337,9 @@ def compose(
     live interactive `codex` runs the process table holds. Nothing else is
     consulted, and nothing here is read from the machine.
     """
-    exact: dict[str, list[ProcessObservation]] = {}
-    unnamed: list[ProcessObservation] = []
-    for terminal in terminals:
-        thread_id = terminal.candidate.session_id
-        if thread_id is None:
-            unnamed.append(terminal)
-        else:
-            exact.setdefault(thread_id, []).append(terminal)
+    live = [term for term in terminals if term.candidate.has_controlling_terminal]
+    headless = [term for term in terminals if not term.candidate.has_controlling_terminal]
+    exact, unnamed = _by_argv(live)
 
     drops: list[Drop] = []
     classified: list[tuple[Mapping[str, Any], ChildClassification]] = []
@@ -365,33 +360,27 @@ def compose(
             continue
         classified.append((thread, child))
 
-    could_hold = {
-        str(thread["id"]): _could_hold(thread, exact.get(str(thread["id"]), ()), unnamed)
-        for thread, child in classified
-        if child.is_main
-    }
-    # A terminal whose argv names no thread and that could equally be sitting in
-    # two of these roots proves neither of them. At most one of them is the
-    # Session it holds, and choosing would be inventing a row — the refusal
-    # #144 already makes when two terminals name one thread, said the other way
-    # round. An exact argv match names one thread and is never ambiguous.
-    could_be_either = {pid for pid, held in _by_terminal(could_hold).items() if len(held) > 1}
-    vouched: dict[str, list[ProcessObservation]] = {}
-    for thread, child in classified:
-        if not child.is_main:
-            continue
+    roots = [thread for thread, child in classified if child.is_main]
+    vouched, could_hold = _vouching(roots, exact, unnamed)
+    unvouched = [thread for thread in roots if str(thread["id"]) not in vouched]
+
+    # **A run with no controlling terminal vouches only for what is left over**
+    # (#319). This pass runs after the one above and never beside it, and that
+    # order is the whole of the decision: #144's detached `codex` debris must not
+    # join the count that decides whether exactly one terminal can be a live
+    # Session's (`pid = for_this[0] … if len(for_this) == 1` below), because a
+    # second voucher there takes a real Session's pid away. What it may do is
+    # vouch for a root no live terminal vouches for — which is the row a Headless
+    # Run needs for its silence to have somewhere to live, and the row Bridge
+    # Core then keeps and never announces (ADR 0020 as amended).
+    headless_vouched, _ = _vouching(unvouched, *_by_argv(headless))
+    for thread in unvouched:
         thread_id = str(thread["id"])
-        for_this = [
-            terminal
-            for terminal in could_hold[thread_id]
-            if terminal.candidate.pid not in could_be_either
-        ]
-        if for_this:
-            vouched[thread_id] = for_this
-        else:
-            drops.append(
-                Drop(thread_id, _why_no_terminal(thread, ambiguous=bool(could_hold[thread_id])))
-            )
+        if thread_id in headless_vouched:
+            continue
+        drops.append(
+            Drop(thread_id, _why_no_terminal(thread, ambiguous=bool(could_hold[thread_id])))
+        )
 
     live_tree_ids = {
         tree_id
@@ -403,10 +392,14 @@ def compose(
     rows: list[Row] = []
     for thread, child in classified:
         thread_id = str(thread["id"])
+        terminal: bool | None = True
         if child.is_main:
             for_this = vouched.get(thread_id)
             if for_this is None:
-                continue
+                for_this = headless_vouched.get(thread_id)
+                if for_this is None:
+                    continue
+                terminal = False
             # Every terminal now vouches for at most one root, so this says the
             # whole of #144's pid rule: exactly one terminal can be it, or none
             # is named.
@@ -416,7 +409,12 @@ def compose(
                 drops.append(Drop(thread_id, NO_LIVE_TREE))
                 continue
             pid = None
-        rows.append(Row(inspection=from_thread(thread, pid, child=child), thread=dict(thread)))
+        rows.append(
+            Row(
+                inspection=from_thread(thread, pid, child=child, has_controlling_terminal=terminal),
+                thread=dict(thread),
+            )
+        )
 
     # A thread the daemon holds has already had its answer here, whatever that
     # answer was — including a drop. Every id it listed is excluded, not only
@@ -424,7 +422,11 @@ def compose(
     # rollout beside it would otherwise be dropped by the rule above and let
     # back in by the rule below, which is the one row this ADR says never exists.
     daemon_held = {str(thread["id"]) for thread in threads}
-    accounted = {terminal.candidate.pid for for_this in vouched.values() for terminal in for_this}
+    accounted = {
+        term.candidate.pid
+        for spoke_for in (*vouched.values(), *headless_vouched.values())
+        for term in spoke_for
+    }
     for thread_id, matches in exact.items():
         if thread_id in daemon_held:
             continue
@@ -439,8 +441,15 @@ def compose(
     # running. One split rather than a predicate and its negation, so that
     # "exhaustive, and never both" is the shape of the code rather than a claim
     # a comment makes about two list comprehensions (#233).
+    #
+    # **Both sentences are about a Session somebody is sitting in**, so both are
+    # asked of the live terminals alone (#319). A run with no controlling
+    # terminal that vouches for nothing is not a Session this roster may be
+    # under-reporting — it is nobody's seat — and reporting it here would put
+    # #144's detached debris into a note written to say a Session might be
+    # missing.
     beside_a_root, alone = _split_on_roots(
-        [terminal for terminal in terminals if terminal.candidate.pid not in accounted],
+        [terminal for terminal in live if terminal.candidate.pid not in accounted],
         _root_workspaces(classified),
     )
     return Roster(
@@ -452,6 +461,58 @@ def compose(
             for terminal in alone
         ),
     )
+
+
+def _by_argv(
+    terminals: Sequence[ProcessObservation],
+) -> tuple[dict[str, list[ProcessObservation]], list[ProcessObservation]]:
+    """These terminals split by whether their argv names a thread, which is #144's key."""
+    exact: dict[str, list[ProcessObservation]] = {}
+    unnamed: list[ProcessObservation] = []
+    for terminal in terminals:
+        thread_id = terminal.candidate.session_id
+        if thread_id is None:
+            unnamed.append(terminal)
+        else:
+            exact.setdefault(thread_id, []).append(terminal)
+    return exact, unnamed
+
+
+def _vouching(
+    roots: Sequence[Mapping[str, Any]],
+    exact: Mapping[str, Sequence[ProcessObservation]],
+    unnamed: Sequence[ProcessObservation],
+) -> tuple[dict[str, list[ProcessObservation]], dict[str, list[ProcessObservation]]]:
+    """Which of these terminals vouch for which of these roots, and which could.
+
+    One function rather than two passes written out twice, because #319 runs the
+    same rule over two pools — the live terminals first, then the ones with no
+    controlling terminal over what is left — and two copies of it would be two
+    rules the day one of them was corrected.
+
+    A terminal whose argv names no thread and that could equally be sitting in
+    two of these roots proves neither of them. At most one of them is the
+    Session it holds, and choosing would be inventing a row — the refusal #144
+    already makes when two terminals name one thread, said the other way round.
+    An exact argv match names one thread and is never ambiguous.
+
+    `could_hold` comes back beside the answer because the *reason* a root was
+    not vouched for turns on it: ambiguity reads differently from an empty
+    machine, and `_why_no_terminal` is the one that says which.
+    """
+    could_hold = {
+        str(thread["id"]): _could_hold(thread, exact.get(str(thread["id"]), ()), unnamed)
+        for thread in roots
+    }
+    could_be_either = {pid for pid, held in _by_terminal(could_hold).items() if len(held) > 1}
+    vouched: dict[str, list[ProcessObservation]] = {}
+    for thread_id, terminals in could_hold.items():
+        for_this = [
+            terminal for terminal in terminals if terminal.candidate.pid not in could_be_either
+        ]
+        if for_this:
+            vouched[thread_id] = for_this
+    return vouched, could_hold
 
 
 def _by_terminal(
@@ -677,12 +738,18 @@ def from_thread(
     pid: int | None,
     progress: ProgressObservation | None = None,
     child: ChildClassification = MAIN_SESSION,
+    has_controlling_terminal: bool | None = None,
 ) -> SessionInspection:
     """One daemon-held thread as the seam holds it.
 
     `child` is passed in rather than read here because the caller has already
     asked — the answer decides whether this row may take a pid at all, and
-    asking twice would be two readings of one field.
+    asking twice would be two readings of one field. `has_controlling_terminal`
+    arrives the same way and for the same reason: it is the *vouching terminal's*
+    fact and not the thread's, and `compose` is where a thread meets its
+    terminal. Its default is `None` — a caller that was told nothing about a
+    terminal has read nothing about one, and Bridge Core reads that as a
+    Session, which is the safe direction (ADR 0020 as amended).
     """
     kind = status_of(thread)
     state = STATUS_TYPES.get(str(kind), SessionState.RUNNING)
@@ -705,6 +772,7 @@ def from_thread(
         # case `last_activity` exists to answer when nothing was said (#76).
         last_activity=thread_tail.last_activity(thread),
         child=child,
+        has_controlling_terminal=has_controlling_terminal,
     )
 
 
@@ -723,4 +791,8 @@ def _from_process(candidate: Candidate, session_id: str, pid: int | None) -> Ses
         lifecycle=SessionLifecycle.LIVE,
         state=SessionState.RUNNING,
         waiting_for=WaitingFor(),
+        # Read off the candidate rather than assumed: only a live terminal
+        # reaches this rule at all (`compose` splits the pools before anything
+        # else), and stating it is what keeps that true if it ever stops being.
+        has_controlling_terminal=candidate.has_controlling_terminal,
     )

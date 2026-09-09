@@ -624,3 +624,165 @@ class TestTheVisibilityRuleItself:
     ) -> None:
         """A child's work and a turn that is not this Session's stay excluded."""
         assert is_own_relay_turn(RELAY | {field: value}) is False
+
+
+# --- waiting on another Session (#320) ---------------------------------------
+
+PEER_SOCKET = "uds:/tmp/cc-socks/19631.sock"
+PEER_NAME = "gpt-voicecoding-32"
+PEER_PID = 19631
+
+
+def sent(identifier: str, to: str = PEER_NAME) -> dict[str, Any]:
+    """The `SendMessage` call a Session reaches another Session through."""
+    return called(
+        "SendMessage",
+        identifier,
+        {"to": to, "summary": "Design escalation", "message": "CREW ASK 320 design — …"},
+    )
+
+
+def delivered(identifier: str, *, routing: bool = False) -> dict[str, Any]:
+    """The result that closes it, in the two shapes measured on 2.1.266.
+
+    A peer send answers `success` / `message` / `msg_id`; a teammate or subagent
+    send answers the same plus a `routing` object naming the target and its
+    colour. That object is the whole signal (#320, user story 9).
+    """
+    record = answered(identifier)
+    outcome: dict[str, Any] = {
+        "success": True,
+        "message": "“Design escalation” → gpt-voicecoding-32 (another Claude session)",
+        "msg_id": "793a4141-a4cf-40c2-b367-5bb14cb83a44",
+    }
+    if routing:
+        outcome["routing"] = {
+            "sender": "team-lead",
+            "target": "@impact-facts",
+            "targetColor": "blue",
+        }
+    record["toolUseResult"] = outcome
+    return record
+
+
+def peer_wrote(
+    *,
+    name: str | None = PEER_NAME,
+    sender: str = PEER_SOCKET,
+    pid: int | None = PEER_PID,
+) -> dict[str, Any]:
+    """The awaited Session's answer arriving, as 2.1.266 records one.
+
+    Verbatim in shape from `~/.claude/projects/…` on 2026-09-09: a `user`
+    record, `isMeta`, with an `origin` naming the sender three ways.
+    """
+    origin: dict[str, Any] = {
+        "kind": "peer",
+        "from": sender,
+        "msg_id": "07da6359-c423-4432-9589-8617c2ab548e",
+    }
+    if pid is not None:
+        origin["verifiedPeerPid"] = pid
+    if name is not None:
+        origin["name"] = name
+    return {
+        "type": "user",
+        "isSidechain": False,
+        "userType": "external",
+        "isMeta": True,
+        "origin": origin,
+        "message": {
+            "role": "user",
+            "content": "Another Claude session sent a message:\nCREW RULING 320 — 1(a).",
+        },
+    }
+
+
+class TestWaitingOnAnotherSession:
+    """#320: the turn ended with the ball in another Session's hands."""
+
+    def test_a_turn_that_ended_on_a_peer_send_is_waiting_on_it(self) -> None:
+        found = analyse([said("Escalating."), sent("t1"), delivered("t1"), said("Sent; waiting.")])
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == PEER_NAME
+
+    def test_a_subagent_send_carries_routing_and_is_not_this_state(self) -> None:
+        """The signal is structural, so a teammate's send cannot raise it."""
+        found = analyse([sent("t1", "impact-facts"), delivered("t1", routing=True)])
+
+        assert found.kind is WaitingKind.NONE
+
+    def test_a_later_tool_call_in_the_turn_ends_it(self) -> None:
+        """The turn's *last* call is the signal: it went on working afterwards."""
+        found = analyse(
+            [sent("t1"), delivered("t1"), called("Read", "t2", {"file_path": "/x"}), answered("t2")]
+        )
+
+        assert found.kind is WaitingKind.NONE
+
+    def test_the_last_of_two_peer_sends_names_the_target(self) -> None:
+        found = analyse([sent("t1", "one"), delivered("t1"), sent("t2", "two"), delivered("t2")])
+
+        assert found.awaiting == "two"
+
+    def test_the_awaited_session_answering_leaves_it(self) -> None:
+        """Story 7: leaving pushes nothing, so the state simply stops being one."""
+        found = analyse([sent("t1"), delivered("t1"), peer_wrote()])
+
+        assert found.kind is WaitingKind.NONE
+
+    def test_a_recipient_addressed_by_its_socket_is_matched_by_the_verified_pid(self) -> None:
+        """A `to` may be a socket address, and the receiver writes down the pid."""
+        found = analyse(
+            [
+                sent("t1", PEER_SOCKET),
+                delivered("t1"),
+                peer_wrote(name=None, sender="uds:/private/tmp/cc-socks/19631.sock"),
+            ]
+        )
+
+        assert found.kind is WaitingKind.NONE
+
+    def test_any_new_turn_leaves_it_whoever_opened_it(self) -> None:
+        """The backstop, for an awaited Session that ends without ever replying."""
+        found = analyse([sent("t1"), delivered("t1"), said("waiting", role="user")])
+
+        assert found.kind is WaitingKind.NONE
+
+    def test_our_own_answer_relay_does_not_leave_it(self) -> None:
+        """A Relay is the user's words carried by us, not the awaited Session replying."""
+        found = analyse([sent("t1"), delivered("t1"), relayed("any news?")])
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == PEER_NAME
+
+    def test_a_question_the_user_must_answer_outranks_a_peer_send(self) -> None:
+        """Only the user can end a question; the peer send is behind it."""
+        found = analyse(
+            [asked("q1", ("Which base?", ["main", "develop"])), sent("t1"), delivered("t1")]
+        )
+
+        assert found.kind is WaitingKind.QUESTION
+
+    def test_a_permission_still_outranks_a_peer_send(self) -> None:
+        found = analyse(
+            [sent("t1"), delivered("t1"), called("Bash", "t2", {"description": "build"})]
+        )
+
+        assert found.kind is WaitingKind.PERMISSION
+
+    def test_a_send_that_did_not_land_leaves_the_ball_nowhere(self) -> None:
+        """A refused recipient answers `is_error` with a string and no `success`."""
+        refused = answered("t1")
+        refused["message"]["content"][0]["is_error"] = True
+        refused["toolUseResult"] = "Error: no agent or session named 'nobody'"
+
+        assert analyse([sent("t1", "nobody"), refused]).kind is WaitingKind.NONE
+
+    def test_a_result_that_does_not_say_it_succeeded_is_not_this_state_either(self) -> None:
+        """The successful shape is asserted, not the failed one enumerated."""
+        quiet = answered("t1")
+        quiet["toolUseResult"] = {"msg_id": "m-1"}
+
+        assert analyse([sent("t1"), quiet]).kind is WaitingKind.NONE

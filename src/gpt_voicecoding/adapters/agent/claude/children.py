@@ -180,6 +180,7 @@ from gpt_voicecoding.seams.agent import (
     SessionLifecycle,
     SessionState,
     WaitingFor,
+    WaitingKind,
 )
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 
@@ -259,6 +260,40 @@ STOPPED_WORKING: Final = frozenset({IDLE_NOTIFICATION, SHUTDOWN_APPROVED})
 #: dropped is one the roster stopped mentioning while it was still working.
 LAUNCHED_NOT_FINISHED: Final = "async_launched"
 
+#: How a launch record says the work goes on in the background under an id, and
+#: the two fields that carry that id. Measured on 2.1.234 and 2.1.266: a `Bash`
+#: call with `run_in_background: true` — and one the product moved to the
+#: background when it outran its timeout — answers at once with
+#: `toolUseResult.backgroundTaskId`, and a forked `Agent` or `Skill` answers with
+#: `background: true` beside an `agentId`. Both ids are the id the notification
+#: below names, which is what makes the pair a marker rather than two.
+#:
+#: **The result is the marker, not the input.** `run_in_background: true` on the
+#: call says what was asked for; the result says what happened, and a call the
+#: product refused or ran in the foreground after all writes no id.
+BACKGROUND_TASK_ID: Final = "backgroundTaskId"
+BACKGROUND_AGENT_ID: Final = "agentId"
+BACKGROUND_FLAG: Final = "background"
+
+#: What a forked agent or skill answers to. It is the name that Session's own
+#: notification later prints — `Agent "code-review" finished` — and the name the
+#: parent addresses it by, so it is a name in the sense #78 refuses to invent
+#: one: read, never composed. A background *command* has none, and none is read
+#: off its command line (#320); Core words that case from its own table.
+BACKGROUND_AGENT_NAME: Final = "commandName"
+
+#: How the parent is told a background task is over: a `<task-notification>`
+#: naming the same id. It arrives while the parent is idle — like a teammate's
+#: marker and unlike a subagent's `tool_result` — which is exactly why a Session
+#: sitting on a background review is not a Session that finished (#320, user
+#: story 8). Written into the parent's own record as a `user` record whose
+#: `message.content` is this text; the same text also appears in the
+#: `queue-operation` and `attachment` records around it, and reading any of them
+#: gives the same answer, so no record type is required here.
+TASK_NOTIFICATION: Final = re.compile(
+    r"<task-notification>.*?<task-id>\s*([^<\s]+)\s*</task-id>", re.DOTALL
+)
+
 #: The `spawnDepth` of a subagent the Session itself started, and the one a
 #: teammate of that Session carries. Deeper than either is unmeasured — the
 #: probes drove one subagent at depth 1 and one teammate at depth 0 — so a
@@ -315,6 +350,11 @@ class Children:
         #: What each parent's record last said about its teammates, and how far
         #: into that record it was read from.
         self._standing: dict[Path, _Standing] = {}
+        #: Which background tasks each parent has running, and how far into its
+        #: record that was read from. Kept like the teammate verdict and for the
+        #: same reason: a launch and its notification are both the parent's own
+        #: records, so the answer is what the file has said so far.
+        self._background: dict[Path, _Background] = {}
 
     def under(
         self,
@@ -348,63 +388,149 @@ class Children:
         one either way, because the alternative is a whole lane's discovery
         failing over one unreadable directory.
         """
-        if transcript is None or parent.target.pid is None:
-            return ()
+        return tuple(
+            _row(parent, child)
+            for child in self._live(
+                pid=parent.target.pid, state=parent.state, transcript=transcript
+            )
+        )
+
+    def awaiting(
+        self,
+        *,
+        pid: int | None,
+        state: SessionState,
+        transcript: Path | None,
+    ) -> WaitingFor:
+        """The wait this Session's own live children put it in (#320), if any.
+
+        **The same listing, asked a second question.** ADR 0021's amendment says
+        a child wait enters through the existing child tracking, so this is a
+        second reader of `_live` rather than a second recognition path in the
+        stop reading: a Session with a live child at the moment it stopped is
+        waiting on that child, and the roster row for that child and the state
+        word the user reads come from one answer about one moment.
+
+        `awaiting` is the name the child answers to where it has one — which is
+        a **teammate**, the one shape with an address of its own — and `None`
+        otherwise, which Core words as `a background command`. Nothing is named
+        from a command line (#320). Where several children are live the first
+        named one speaks for them: the state word says *not your turn*, and it
+        says the same thing whichever of them is named.
+
+        Cheap for the caller that already asked `under`: the file has not grown
+        between the two questions, so the memories answer both.
+        """
+        live = self._live(pid=pid, state=state, transcript=transcript)
+        if not live:
+            return WaitingFor()
+        return WaitingFor(
+            kind=WaitingKind.CHILD,
+            awaiting=next((child.name for child in live if child.name is not None), None),
+        )
+
+    def _live(
+        self,
+        *,
+        pid: int | None,
+        state: SessionState,
+        transcript: Path | None,
+    ) -> list[_Child]:
+        """Every Child Process this Session is running right now, in listing order.
+
+        Split out of `under` when a second reader needed the same answer (#320):
+        the roster row and the parent's own wait are two renderings of one
+        reading, and deriving them apart is how two answers about one Session
+        start disagreeing.
+        """
+        if transcript is None or pid is None:
+            return []
         directory = transcript.parent / transcript.stem / CHILD_DIRECTORY
         unsettled = (
             _Child(agent_id, self._describe(directory, path))
             for agent_id, path in _candidates(directory)
             if agent_id not in self._finished
         )
-        working = parent.state is SessionState.RUNNING
+        working = state is SessionState.RUNNING
         listed = [child for child in unsettled if working or not child.needs_a_working_parent]
-        if not listed:
-            # The ordinary case for a Session that never spawned anything, for
-            # one whose classic children are all over, and for a stopped Session
-            # whose only children are classic: the transcript is never opened.
-            # A Session whose only children are *resting teammates* reaches the
-            # line below instead, and is not opened there either — `_settled`
-            # answers from what it remembers when the file has not grown.
-            return ()
-
         calls = {child.agent_id: child.call for child in listed if child.call is not None}
         teammates = {child.agent_id: child.name for child in listed if child.name is not None}
-        over = self._settled(transcript, calls, teammates)
+        over, tasks = self._settled(transcript, calls, teammates)
         self._finished |= over & calls.keys()
-        return tuple(_row(parent, child) for child in listed if child.agent_id not in over)
+        spawned = {child.agent_id for child in listed}
+        # A forked `Agent` is written into the tree *and* answered for by a
+        # background id, so the same child can arrive twice. The directory entry
+        # is the richer of the two — it carries the shape — so the background
+        # reading yields to it rather than adding a second row for one child.
+        background = [
+            _Child(task, {BACKGROUND_AGENT_NAME: name} if name else {}, background=True)
+            for task, name in sorted(tasks.items())
+            if task not in spawned
+        ]
+        return [child for child in listed if child.agent_id not in over] + background
 
     def _settled(
         self,
         transcript: Path,
         calls: Mapping[str, str],
         teammates: Mapping[str, str],
-    ) -> set[str]:
-        """Which of these children are over, reading no more of the file than it must.
+    ) -> tuple[set[str], Mapping[str, str | None]]:
+        """Which children are over, and which background tasks are still running.
 
+        **One read of the parent's record, because it is one record** (#320).
         `calls` is `agentId → toolUseId` for classic subagents and `teammates` is
-        `agentId → name` for teammates. A classic subagent is over once and for
-        all, and the caller keeps that; a teammate is over for as long as the
-        newest thing said about its name says so, and that is kept here.
+        `agentId → name` for teammates; a background task is named by neither,
+        because it has no file in the tree at all — what this record says about
+        it is its whole existence. A classic subagent is over once and for all,
+        and the caller keeps that; a teammate is over for as long as the newest
+        thing said about its name says so; and a background task is running from
+        the launch record naming its id until the `<task-notification>` that
+        names it again. All three are read off one stretch of one file in one
+        pass, starting at the deepest floor any of them needs — two passes over
+        a file the Session is still appending to is what this module's docstring
+        already refuses, and it would also let the two answers describe two
+        moments of it.
 
-        How much of the file that costs is `_floor`'s answer and what to keep of
-        it is `_Standing.record`'s; both live where they do so that this method
-        reads as the four steps it is.
+        How much of the file that costs is `_floor`'s answer and `_Background`'s;
+        what to keep of it is each memory's own `record`.
         """
-        if not calls and not teammates:
-            return set()
         size = _size(transcript)
         standing = self._standing_for(transcript, size)
-        floor = _floor(standing, size, mid_call=bool(calls), agents=teammates)
-        if floor is None:
-            return standing.over(teammates)
+        tasks = self._tasks_for(transcript, size)
+        settling = (
+            _floor(standing, size, mid_call=bool(calls), agents=teammates)
+            if calls or teammates
+            else None
+        )
+        launching = tasks.floor(size)
+        floors = [floor for floor in (settling, launching) if floor is not None]
+        if not floors:
+            return standing.over(teammates), dict(tasks.live)
 
         named: dict[str, set[str]] = {}
         for agent, name in teammates.items():
             named.setdefault(name, set()).add(agent)
-        tail = _Tail(transcript, floor)
-        finished, spoke_of = _read(tail, calls, named.keys())
+        tail = _Tail(transcript, min(floors))
+        finished, spoke_of, launched, notified = _read(
+            tail,
+            calls,
+            named.keys(),
+            reading_tasks=launching is not None,
+        )
         standing.record(named, spoke_of, tail)
-        return finished | standing.over(teammates)
+        tasks.record(launched, notified, tail)
+        return finished | standing.over(teammates), dict(tasks.live)
+
+    def _tasks_for(self, transcript: Path, size: int | None) -> _Background:
+        """What is remembered about this parent's background tasks, if it is still about it.
+
+        `_standing_for`'s rule, for the other memory and for the same reason: an
+        offset only means anything against the file it was taken from.
+        """
+        tasks = self._background.setdefault(transcript, _Background())
+        if size is not None and size < tasks.read_through:
+            tasks = self._background[transcript] = _Background()
+        return tasks
 
     def _standing_for(self, transcript: Path, size: int | None) -> _Standing:
         """What is remembered about this parent's teammates, if it is still about it.
@@ -465,6 +591,59 @@ class Children:
         for standing in self._standing.values():
             for agent in dropped:
                 standing.stopped.pop(agent, None)
+
+
+@dataclass
+class _Background:
+    """Which background tasks one parent has running, and how far in that was read.
+
+    Two facts and no verdict per task, because a background task has only one
+    state worth naming: the launch record puts it here and the
+    `<task-notification>` for its id takes it away. `read` apart from
+    `read_through` because a read that has never happened and a read that
+    reached offset 0 are the same number and not the same fact.
+    """
+
+    #: `task id → the name it answers to`, and `None` where it answers to none.
+    live: dict[str, str | None] = field(default_factory=dict)
+    read_through: int = 0
+    read: bool = False
+
+    def floor(self, size: int | None) -> int | None:
+        """Where the next read must reach for this memory's sake, or `None` for none.
+
+        The whole file the first time, what it has gained after that, and nothing
+        at all when it has gained nothing — `_floor`'s three answers, without its
+        middle question: a background task has no per-child "never read for"
+        case, because a task nobody has read for is a task nobody knows exists.
+        """
+        if not self.read:
+            return 0
+        if size is None or size <= self.read_through:
+            return None
+        return self.read_through
+
+    def record(
+        self,
+        launched: Mapping[str, str | None],
+        notified: set[str],
+        tail: _Tail,
+    ) -> None:
+        """Keep what one read said about this parent's background tasks.
+
+        **Giving up at the budget is safe here, and that is a property of the
+        marker rather than a hope**: a notification is always written after the
+        launch it answers, so a stretch too old to read can hold only a launch
+        whose notification is also unread — a task nobody will ever be told
+        about, which is not a task its Session is waiting on. `_Standing` has no
+        such property, which is why it answers a gap by dropping what it knew
+        and this does not.
+        """
+        self.live = {
+            task: name for task, name in {**self.live, **launched}.items() if task not in notified
+        }
+        self.read = True
+        self.read_through = max(self.read_through, tail.complete_through)
 
 
 @dataclass
@@ -617,6 +796,14 @@ class _Child:
 
     agent_id: str
     document: Mapping[str, Any]
+    #: Whether this child is a **background task** — a command or a forked agent
+    #: the parent left running (#320). It has no `meta.json` at all, so its
+    #: shape cannot be read from a document the way the other two are; the flag
+    #: says which reading found it. Every property below answers for it as the
+    #: classic shape does, except the one that matters: it does not need a
+    #: working parent, because a Session sitting at a stop with a background
+    #: review still running is the whole case this shape exists for.
+    background: bool = False
 
     @property
     def teammate(self) -> bool:
@@ -637,6 +824,11 @@ class _Child:
         and an unsettled child is listed, which is the safe way round and the
         same answer #79 gave a `meta.json` that named no `toolUseId`.
         """
+        if self.background:
+            # A forked agent answers to a name; a background command does not,
+            # and none is invented from its command line (#320).
+            named = self.document.get(BACKGROUND_AGENT_NAME)
+            return named if isinstance(named, str) and named.strip() else None
         named = self.document.get(TEAMMATE_NAME)
         return named if self.teammate and isinstance(named, str) and named.strip() else None
 
@@ -652,16 +844,20 @@ class _Child:
         The classic subagent is, because a `tool_result` that never arrives —
         Esc on the parent — leaves nothing else to end it. A teammate is not,
         and could not be: its Session goes idle while it works, which is the
-        whole of #231.
+        whole of #231. Neither is a background task, for the same reason and on
+        the same evidence: its marker is a notification that arrives while the
+        parent is idle (#320).
         """
-        return not self.teammate
+        return not self.teammate and not self.background
 
 
 def _read(
     tail: _Tail,
     calls: Mapping[str, str],
     names: Iterable[str],
-) -> tuple[set[str], dict[str, bool]]:
+    *,
+    reading_tasks: bool = False,
+) -> tuple[set[str], dict[str, bool], dict[str, str | None], set[str]]:
     """What the stretch of the parent's record `tail` covers says about these children.
 
     `calls` is `agentId → toolUseId` for classic subagents and `names` is the
@@ -672,6 +868,15 @@ def _read(
     marker said about each name — `True` for stopped, `False` for working, and
     absent for a name this stretch never mentions, which is
     `_Standing.record`'s cue to leave what it already knew alone.
+
+    **The early break belongs to the two shapes that can be settled, and a read
+    that is also collecting background tasks does not take it** (#320). A
+    classic subagent stops the scan at the record that started it and a teammate
+    at its newest marker, because there is nothing older about either to find; a
+    background task has no such bound — the launch it is looking for lies
+    wherever the parent wrote it — so when this pass is collecting them too it
+    reads the whole stretch it was given. That stretch is the file's growth in
+    the steady state and the whole file only on the first read of it.
 
     A teammate answer is by name and not by `agentId` because that is what the
     record offers; `_Standing` is where the two are tied together, and it is
@@ -710,7 +915,16 @@ def _read(
     unanswered = set(names)
     finished: set[str] = set()
     spoke_of: dict[str, bool] = {}
+    launched: dict[str, str | None] = {}
+    notified: set[str] = set()
     for record in tail:
+        if reading_tasks:
+            # Each namespace reads only while it has something to gain, the rule
+            # the two below already follow: a read the background memory does
+            # not need is pure cost, and one record measured 258 KB here.
+            for task, named in _launched_tasks(record):
+                launched.setdefault(task, named)
+            notified.update(_notified_tasks(record))
         # Each namespace stops reading the moment it has nothing left to settle.
         # The ordinary Session has children of one shape only, so the other scan
         # is pure cost — and it is not small: one record measured 258 KB on this
@@ -725,9 +939,9 @@ def _read(
                 if name in unanswered:
                     unanswered.discard(name)
                     spoke_of[name] = over
-        if not waiting and not unanswered:
+        if not waiting and not unanswered and not reading_tasks:
             break
-    return finished, spoke_of
+    return finished, spoke_of, launched, notified
 
 
 def _mentions(record: Mapping[str, Any]) -> Iterator[tuple[str, bool]]:
@@ -825,6 +1039,50 @@ def _teammate_mentions(record: Mapping[str, Any]) -> Iterator[tuple[str, bool]]:
             continue
         if isinstance(addressed, str):
             yield addressed, False
+
+
+def _launched_tasks(record: Mapping[str, Any]) -> Iterator[tuple[str, str | None]]:
+    """Every background task this record's result started, by id and by name.
+
+    Read off `toolUseResult` rather than off the call's input, because the input
+    is what was asked for and this is what happened. Two spellings, both
+    measured: a background command answers with `backgroundTaskId` and has no
+    name; a forked agent or skill answers with `background: true` beside the
+    `agentId` its own `<task-notification>` later names, and a `commandName`
+    that is what it answers to.
+    """
+    outcome = record.get("toolUseResult")
+    if not isinstance(outcome, Mapping):
+        return
+    task = outcome.get(BACKGROUND_TASK_ID)
+    if isinstance(task, str) and task.strip():
+        yield task, None
+    if outcome.get(BACKGROUND_FLAG) is True:
+        forked = outcome.get(BACKGROUND_AGENT_ID)
+        if isinstance(forked, str) and forked.strip():
+            named = outcome.get(BACKGROUND_AGENT_NAME)
+            yield forked, named if isinstance(named, str) and named.strip() else None
+
+
+def _notified_tasks(record: Mapping[str, Any]) -> Iterator[str]:
+    """Every background task this record says the parent has now been told about.
+
+    The notification is one text, and Claude Code writes it into the record more
+    than once — as the `user` record that opens the parent's next turn, and in
+    the `queue-operation` and `attachment` records around it. Matching the text
+    wherever it appears is what makes this independent of which of those the
+    build writes: they all say the same id, and the answer is the same from any
+    of them.
+    """
+    message = record.get("message")
+    attachment = record.get("attachment")
+    for value in (
+        message.get("content") if isinstance(message, Mapping) else None,
+        attachment.get("prompt") if isinstance(attachment, Mapping) else None,
+        record.get("content"),
+    ):
+        if isinstance(value, str):
+            yield from TASK_NOTIFICATION.findall(value)
 
 
 def _protocol_type(body: str) -> str | None:
@@ -962,7 +1220,7 @@ def _row(parent: SessionInspection, child: _Child) -> SessionInspection:
     next assertion failed on it.
     """
     depth = child.document.get("spawnDepth")
-    direct = depth == child.own_depth and not isinstance(depth, bool)
+    direct = child.background or (depth == child.own_depth and not isinstance(depth, bool))
     return SessionInspection(
         target=SessionTarget(
             agent=AgentKind.CLAUDE, session_id=child.agent_id, pid=parent.target.pid

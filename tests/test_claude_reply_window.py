@@ -1204,9 +1204,74 @@ class TestDeathReachesBridgeCoreEndToEnd:
         assert hub.state.sessions.all()[0].lifecycle is SessionLifecycle.ENDED
         assert hub.state.relays.pending() == ()
         assert hub.agent.calls == []
-        # A Session that ended while the words waited gets no field and no wake:
-        # exited Sessions appear nowhere (`CONTEXT.md` *Focus Session*), so the
-        # reason is logged and nothing is pushed or spoken (#197).
+        # A Session that ended while the words waited is spoken about nowhere:
+        # exited Sessions appear in no brief (`CONTEXT.md` *Focus Session*), so
+        # the reason is logged and nothing is pushed or spoken (#197, #321).
         assert hub.call.spoken == []
-        assert hub.state.sessions.all()[0].undelivered is None
         assert "session_ended" not in " ".join(hub.channel.sent)
+
+
+class TestTheStopCarriesTheControllingTerminal:
+    """#319: the fact rides the Stop, because a Stop can beat every discovery pass.
+
+    `register_session` starts this watch from the `SessionStart` hook, and Bridge
+    Core stands a row in when the Stop arrives first — so a Stop with nothing to
+    say about the terminal is a run announced once before any pass could call it
+    a Headless Run. That one push is the noise #319 removes.
+
+    Read on the sweep and remembered, rather than at the Stop: this sweep runs
+    while the pid is certainly alive, and a run that is killed rather than
+    stopping never reaches a Stop to be read at.
+    """
+
+    def stopping(self, tmp_path: Path, sink: AllEvents, terminal: bool | None) -> None:
+        """Drive one Session from mid-turn to idle, with `ps` answering `terminal`."""
+        watcher = ReplyWindowWatcher(
+            settings=ClaudeSettings(reply_window_poll_seconds=0.02),
+            registry_directory=registry(tmp_path),
+            emit=sink.emit,
+            terminals=window_module.TerminalMemo(read=lambda _: terminal),
+        )
+        say(tmp_path, "busy")
+        watcher.watch(TARGET)
+        watcher.poll_once()
+        say(tmp_path, "idle")
+        watcher.poll_once()
+
+    def test_a_run_with_no_terminal_says_so(self, tmp_path: Path) -> None:
+        sink = AllEvents()
+
+        self.stopping(tmp_path, sink, False)
+
+        assert [stop.has_controlling_terminal for stop in sink.stops] == [False]
+
+    def test_a_session_says_so_too(self, tmp_path: Path) -> None:
+        sink = AllEvents()
+
+        self.stopping(tmp_path, sink, True)
+
+        assert [stop.has_controlling_terminal for stop in sink.stops] == [True]
+
+    def test_a_read_that_failed_claims_nothing(self, tmp_path: Path) -> None:
+        """`None` travels as `None`, and Bridge Core reads it as a Session."""
+        sink = AllEvents()
+
+        self.stopping(tmp_path, sink, None)
+
+        assert [stop.has_controlling_terminal for stop in sink.stops] == [None]
+
+    def test_the_pid_is_asked_about_once_however_often_it_is_swept(self, tmp_path: Path) -> None:
+        """One `ps` per Session, not one per second — the sweep's own cadence."""
+        asked: list[int] = []
+        watcher = ReplyWindowWatcher(
+            settings=ClaudeSettings(reply_window_poll_seconds=0.02),
+            registry_directory=registry(tmp_path),
+            emit=AllEvents().emit,
+            terminals=window_module.TerminalMemo(read=lambda pid: bool(asked.append(pid)) or True),
+        )
+        say(tmp_path, "busy")
+        watcher.watch(TARGET)
+        for _ in range(5):
+            watcher.poll_once()
+
+        assert asked == [LIVE_PID]

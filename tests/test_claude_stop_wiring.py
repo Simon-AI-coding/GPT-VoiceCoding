@@ -12,6 +12,7 @@ are the only judgment #75 has outside the parser.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -25,6 +26,10 @@ from claude_adapter_fake import ParkedApproval, claude_waiting_roster
 from fakes import PROGRESS_CAPTURE
 from gpt_voicecoding.adapters.agent.claude import adapter as claude_adapter
 from gpt_voicecoding.adapters.agent.claude.adapter import ClaudeAgentAdapter, SessionReport
+from gpt_voicecoding.adapters.agent.claude.registry import (
+    PEER_PROTOCOL,
+    STATUS_IDLE_WITH_BACKGROUND,
+)
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import TranscriptReader
 from gpt_voicecoding.adapters.agent.claude.window import ReplyWindowWatcher, StopReading
@@ -37,6 +42,7 @@ from gpt_voicecoding.seams.agent import (
     Option,
     ProgressCapture,
     ProgressObservation,
+    ReplyWindow,
     ReplyWindowChanged,
     SessionEnded,
     SessionInspection,
@@ -44,6 +50,7 @@ from gpt_voicecoding.seams.agent import (
     SessionStopped,
     WaitingFor,
     WaitingKind,
+    derive_reply_window,
 )
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
 from test_claude_reply_window import Child, say
@@ -55,6 +62,31 @@ TARGET = SessionTarget(agent=AgentKind.CLAUDE, session_id=SESSION, pid=3538)
 #: What the roster alone says about a Session it calls `waiting`: something is
 #: being waited on and the command does not carry what (`discovery.py`).
 ROSTER_WAITING = WaitingFor(kind=WaitingKind.UNKNOWN, caught_up=False)
+
+#: The transcript tail of a Session that started a background command and has
+#: not been told it finished: the `tool_result` naming the id, and nothing since.
+#: One shape, read by both paths that answer for such a Session — the Stop that
+#: reports the turn ended, and the roster row the cadence projects — because the
+#: whole of #325 is those two paths having answered differently about it.
+BACKGROUND_COMMAND_RUNNING: list[dict[str, Any]] = [
+    said("Kicked off the review."),
+    {
+        "type": "user",
+        "isSidechain": False,
+        "userType": "external",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t9",
+                    "content": "Command running in background with ID: brv1.",
+                }
+            ],
+        },
+        "toolUseResult": {"backgroundTaskId": "brv1"},
+    },
+]
 
 
 def transcript(tmp_path: Path, records: list[dict[str, Any]]) -> Path:
@@ -904,3 +936,351 @@ class TestWhenTheSessionEnds:
         stopped = next(event for event in raised if isinstance(event, SessionStopped))
         assert stopped.progress.has_history is False
         assert stopped.progress.recent == ()
+
+
+class TestWaitingOnAnotherSession:
+    """#320: the lane carries a raw recipient; this side resolves it or drops it.
+
+    `stop_analysis` reads no registry, so what it hands over is the string the
+    Session typed into `SendMessage`. Turning that into an address of a Session
+    this engine actually knows is the adapter's, and a recipient that names none
+    is not this state at all — the announcement says `finished` instead, which
+    tells the user less and never tells them something false.
+    """
+
+    #: This process, because the record has to name one that is actually alive:
+    #: a registry file outlives the Session that wrote it, and a recipient with
+    #: nobody behind it names nobody.
+    PEER_PID = os.getpid()
+    PEER_SESSION = "4d3e79c8-b919-4116-a10c-f7a42a76360a"
+    PEER_NAME = "gpt-voicecoding-32"
+
+    def registry_naming(self, tmp_path: Path, *, pid: int | None = None) -> Path:
+        """A registry holding one other Session, as Claude Code writes one."""
+        pid = pid if pid is not None else self.PEER_PID
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(exist_ok=True)
+        (sessions / f"{pid}.json").write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "sessionId": self.PEER_SESSION,
+                    "cwd": "/a/workspace",
+                    "version": "2.1.266",
+                    "peerProtocol": PEER_PROTOCOL,
+                    "messagingSocketPath": f"/tmp/cc-socks/{pid}.sock",
+                    "status": "busy",
+                    "name": self.PEER_NAME,
+                    "nameSource": "derived",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return sessions
+
+    def reading(self, tmp_path: Path, recipient: str, *, pid: int | None = None) -> WaitingFor:
+        sessions = self.registry_naming(tmp_path, pid=pid)
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE,
+            settings=ClaudeSettings(registry_directory=sessions),
+        )
+        adapter._reported[TARGET] = SessionReport(  # noqa: SLF001 - seeding one registration
+            session_id=SESSION,
+            pid=TARGET.pid,
+            transcript_path=transcript(
+                tmp_path,
+                [
+                    said("Escalating."),
+                    called("SendMessage", "t1", {"to": recipient, "message": "CREW ASK 320"}),
+                    {
+                        "type": "user",
+                        "isSidechain": False,
+                        "userType": "external",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                            ],
+                        },
+                        "toolUseResult": {"success": True, "msg_id": "m-1"},
+                    },
+                ],
+            ),
+        )
+        return adapter.stop_reading(TARGET).waiting_for
+
+    def test_a_recipient_the_registry_names_becomes_that_sessions_address(
+        self, tmp_path: Path
+    ) -> None:
+        found = self.reading(tmp_path, self.PEER_NAME)
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == str(
+            SessionTarget(agent=AgentKind.CLAUDE, session_id=self.PEER_SESSION, pid=self.PEER_PID)
+        )
+
+    def test_a_recipient_addressed_by_its_socket_resolves_to_the_same_session(
+        self, tmp_path: Path
+    ) -> None:
+        """A `to` carries either spelling, and one record holds both."""
+        found = self.reading(tmp_path, f"uds:/tmp/cc-socks/{self.PEER_PID}.sock")
+
+        assert found.kind is WaitingKind.PEER
+        assert found.awaiting == str(
+            SessionTarget(agent=AgentKind.CLAUDE, session_id=self.PEER_SESSION, pid=self.PEER_PID)
+        )
+
+    def test_a_recipient_this_engine_knows_nothing_about_is_not_this_state(
+        self, tmp_path: Path
+    ) -> None:
+        """The ticket's own edge case: not 🟣, 🟢."""
+        assert self.reading(tmp_path, "somebody-else-entirely").kind is WaitingKind.NONE
+
+    def test_a_record_whose_process_is_gone_names_nobody(self, tmp_path: Path) -> None:
+        """A registry file outlives the Session that wrote it, and liveness is asked apart."""
+        dead = 2**22 - 1  # above `kern.maxproc`, so no process can hold it
+
+        assert self.reading(tmp_path, self.PEER_NAME, pid=dead).kind is WaitingKind.NONE
+
+    def test_a_stopped_session_with_a_background_command_is_waiting_on_a_child(
+        self, tmp_path: Path
+    ) -> None:
+        """The child wait enters through the existing child tracking (ADR 0021)."""
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE,
+            settings=ClaudeSettings(registry_directory=sessions),
+        )
+        adapter._reported[TARGET] = SessionReport(  # noqa: SLF001 - seeding one registration
+            session_id=SESSION,
+            pid=TARGET.pid,
+            transcript_path=transcript(tmp_path, BACKGROUND_COMMAND_RUNNING),
+        )
+
+        found = adapter.stop_reading(TARGET).waiting_for
+
+        assert found.kind is WaitingKind.CHILD
+        assert found.awaiting is None
+
+
+class TestTheRegistryOverlayOnARosterRow:
+    """What only the Session's own registry record can tell the roster (#325).
+
+    `claude agents --json` answers `busy` for a Session whose record reads
+    `status: "shell"` — measured at #154, and the reason the roster projection
+    maps three status words and not four. So the roster called a Session with a
+    background command `running` while the Reply Window sweep, reading the same
+    record, called its turn over and sent a 🟣 Stop Notice. These are the rows of
+    that overlay: what it changes, and everything it leaves exactly as found.
+    """
+
+    def registered(
+        self, tmp_path: Path, *, status: str, session_id: str = SESSION
+    ) -> ClaudeAgentAdapter:
+        """An adapter whose registry holds one record for this Session's pid."""
+        sessions = tmp_path / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"{TARGET.pid}.json").write_text(
+            json.dumps(
+                {
+                    "pid": TARGET.pid,
+                    "sessionId": session_id,
+                    "cwd": str(tmp_path),
+                    "peerProtocol": PEER_PROTOCOL,
+                    "messagingSocketPath": str(tmp_path / "claude.sock"),
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = ClaudeAgentAdapter(
+            progress_capture=PROGRESS_CAPTURE,
+            settings=ClaudeSettings(registry_directory=sessions),
+        )
+        adapter._reported[TARGET] = SessionReport(  # noqa: SLF001 - seeding one registration
+            session_id=SESSION,
+            pid=TARGET.pid,
+            transcript_path=transcript(tmp_path, BACKGROUND_COMMAND_RUNNING),
+        )
+        return adapter
+
+    def listed(self, state: SessionState, waiting: WaitingFor | None = None) -> LaneDiscovery:
+        """What the roster command answered, before anything overlays it."""
+        return LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=TARGET,
+                    workspace=Path("/tmp/workspace"),
+                    state=state,
+                    waiting_for=waiting if waiting is not None else WaitingFor(),
+                ),
+            )
+        )
+
+    def test_a_shell_record_makes_a_running_row_idle_and_waiting_on_its_child(
+        self, tmp_path: Path, roster
+    ) -> None:
+        """The ticket, in one pass: the overlay runs ahead of the stop gate.
+
+        `_row_with_stop` opens a transcript only for a row that is no longer
+        `RUNNING`, so the flip has to happen before it or the child wait is never
+        asked for — and the roster would keep disagreeing with the Stop Notice
+        the same record already produced.
+        """
+        adapter = self.registered(tmp_path, status="shell")
+        roster(self.listed(SessionState.RUNNING))
+
+        found = asyncio.run(adapter.discover()).rows[0]
+
+        assert found.state is SessionState.IDLE
+        assert found.waiting_for.kind is WaitingKind.CHILD
+        assert found.waiting_for.awaiting is None
+
+    def test_the_flipped_row_reads_the_same_way_the_stop_notice_does(
+        self, tmp_path: Path, roster
+    ) -> None:
+        """One Session, two surfaces, one word — which is the whole ticket."""
+        adapter = self.registered(tmp_path, status="shell")
+        roster(self.listed(SessionState.RUNNING))
+
+        row = asyncio.run(adapter.discover()).rows[0]
+        notice = adapter.stop_reading(TARGET).waiting_for
+
+        assert row.waiting_for.kind is notice.kind is WaitingKind.CHILD
+        assert row.state is notice.stopped_state is SessionState.IDLE
+
+    def test_the_flipped_rows_reply_window_is_open(self, tmp_path: Path, roster) -> None:
+        """`shell` reads OPEN in the registry sweep, and now on the row too (#154)."""
+        adapter = self.registered(tmp_path, status="shell")
+        roster(self.listed(SessionState.RUNNING))
+
+        found = asyncio.run(adapter.discover()).rows[0]
+
+        assert derive_reply_window(found.state, found.waiting_for, found.child) is ReplyWindow.OPEN
+
+    def test_a_busy_record_leaves_the_running_row_alone_and_opens_no_transcript(
+        self, tmp_path: Path, roster, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate that keeps the cadence off the hot path is untouched.
+
+        The overlay is narrow on purpose: `busy` is the roster and the registry
+        agreeing, so the row stays `RUNNING` and its transcript is never parsed —
+        which is what makes a five-second sweep over a machine of working
+        Sessions cost one command and no file reads.
+        """
+        adapter = self.registered(tmp_path, status="busy")
+        roster(self.listed(SessionState.RUNNING))
+        opened: list[Path] = []
+        original = TranscriptReader.records
+
+        def watched(self_: TranscriptReader, path: Path):  # type: ignore[no-untyped-def]
+            opened.append(path)
+            return original(self_, path)
+
+        monkeypatch.setattr(TranscriptReader, "records", watched)
+
+        found = asyncio.run(adapter.discover()).rows[0]
+
+        assert found.state is SessionState.RUNNING
+        assert found.waiting_for.kind is WaitingKind.NONE
+        assert opened == []
+
+    @pytest.mark.parametrize("status", ["shell", "waiting", None])
+    def test_a_waiting_row_is_left_exactly_as_the_roster_stated_it(
+        self, tmp_path: Path, roster, status: str | None
+    ) -> None:
+        """Only `RUNNING` moves, and a dialog on screen is not this reader's to erase.
+
+        Both words are asked, and the answer is measured against the control —
+        the same pass with no record to read at all. That is what pins the
+        overlay contributing *nothing* to a `WAITING` row, state and label
+        alike: asserting the state word by itself would still pass if the
+        registry's `waitingFor` had quietly displaced the roster's.
+        """
+        adapter = self.registered(tmp_path / (status or "no-record"), status=status or "waiting")
+        if status is None:
+            (tmp_path / "no-record" / "sessions" / f"{TARGET.pid}.json").unlink()
+        roster(self.listed(SessionState.WAITING, ROSTER_WAITING))
+
+        found = asyncio.run(adapter.discover()).rows[0]
+
+        assert found.state is SessionState.WAITING
+        assert found.waiting_for == self.waiting_row_without_a_record(tmp_path, roster)
+
+    def waiting_row_without_a_record(self, tmp_path: Path, roster) -> WaitingFor:
+        """What a `WAITING` row's wait reads as when no record overlays it at all."""
+        control = self.registered(tmp_path / "control", status="waiting")
+        (tmp_path / "control" / "sessions" / f"{TARGET.pid}.json").unlink()
+        roster(self.listed(SessionState.WAITING, ROSTER_WAITING))
+        return asyncio.run(control.discover()).rows[0].waiting_for
+
+    def test_a_record_for_another_session_leaves_the_roster_word_alone(
+        self, tmp_path: Path, roster
+    ) -> None:
+        """A recycled pid may not restate the Session the roster is talking about."""
+        adapter = self.registered(tmp_path, status="shell", session_id="another-session")
+        roster(self.listed(SessionState.RUNNING))
+
+        found = asyncio.run(adapter.discover()).rows[0]
+
+        assert found.state is SessionState.RUNNING
+
+    def test_a_missing_record_leaves_the_roster_word_alone(self, tmp_path: Path, roster) -> None:
+        """Fail toward what was observed: no record is not evidence of a stop."""
+        adapter = self.registered(tmp_path, status="shell")
+        (tmp_path / "sessions" / f"{TARGET.pid}.json").unlink()
+        roster(self.listed(SessionState.RUNNING))
+
+        assert asyncio.run(adapter.discover()).rows[0].state is SessionState.RUNNING
+
+    def test_an_unreadable_record_leaves_the_roster_word_alone(
+        self, tmp_path: Path, roster
+    ) -> None:
+        """A half-written record is an ordinary momentary state, not a stop."""
+        adapter = self.registered(tmp_path, status="shell")
+        (tmp_path / "sessions" / f"{TARGET.pid}.json").write_text("{not json", encoding="utf-8")
+        roster(self.listed(SessionState.RUNNING))
+
+        assert asyncio.run(adapter.discover()).rows[0].state is SessionState.RUNNING
+
+    def test_the_word_shell_is_spelled_in_exactly_one_module(self) -> None:
+        """The two readers that act on it cite one name (#325, ruling 3).
+
+        A third literal in a third module is how one reader comes to disagree
+        with another about the same Session, which is the defect this closes.
+        """
+        lane = Path(claude_adapter.__file__).parent
+        naming = {
+            source.name
+            for source in lane.glob("*.py")
+            if STATUS_IDLE_WITH_BACKGROUND in _string_literals(source)
+        }
+
+        assert naming == {"registry.py"}
+
+
+def _string_literals(source: Path) -> set[str]:
+    """Every string this module *evaluates*, docstrings and comments excluded.
+
+    Prose may quote a registry document — `discovery.py` transcribes the
+    measurement that a `shell` record reads `busy` on the roster, and should —
+    and the rule being pinned is about the word a module *acts* on, not the word
+    it explains. So the check reads the parse tree rather than the bytes.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    documented = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in documented
+    }

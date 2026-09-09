@@ -75,6 +75,43 @@ SUMMARY_FIELDS: Final = ("description", "file_path", "path", "notebook_path")
 #: it follows, and `tests/test_progress_bound.py` holds the two together.
 SUMMARY_MAX_CHARS: Final = _summary.SUMMARY_MAX_CHARS
 
+#: The tool a Session reaches another Session through, and the field naming the
+#: recipient. `children.py` spells the same two for its own question (a
+#: recipient that is a teammate of this Session); the two questions are
+#: different enough that neither imports the other's constant, and both cite
+#: this fact: `SendMessage` carries `to` for a teammate and for a Session on
+#: another socket alike.
+MESSAGE_TOOL: Final = "SendMessage"
+RECIPIENT: Final = "to"
+
+#: **What tells a peer send from a subagent send, and it is structural** (#320,
+#: user story 9). A send to a teammate or a subagent answers with a `routing`
+#: object naming the sender, the target and its colour; a send to another
+#: Session answers with `success` / `message` / `msg_id` and no `routing` at
+#: all. Measured on 2.1.266 in this engine's own transcripts on 2026-09-09.
+#: Read off the result rather than off the prose, so a wording change in a
+#: plugin cannot break the signal.
+ROUTING: Final = "routing"
+
+#: What a send that landed says about itself. A refused recipient, an unknown
+#: name or a socket nobody is listening on answers `is_error` with a string
+#: result carrying no `success` at all — so the successful shape is asserted
+#: rather than the failed one enumerated, which is the direction that stays
+#: right when the product grows a new way to fail.
+SUCCEEDED: Final = "success"
+
+#: How an arriving peer message names its sender, and the three fields it is
+#: matched on. `kind` is `peer` for a Session on another socket; `name` is the
+#: string that Session was addressed by, `from` its socket address, and
+#: `verifiedPeerPid` the pid the receiver resolved that socket to — which is
+#: also the number in the socket's own file name, and so what matches a
+#: recipient addressed as `uds:…/<pid>.sock`.
+ORIGIN: Final = "origin"
+PEER_ORIGIN: Final = "peer"
+ORIGIN_NAME: Final = "name"
+ORIGIN_FROM: Final = "from"
+ORIGIN_PID: Final = "verifiedPeerPid"
+
 #: The wrappers Claude Code writes around the two local-command pipeline records,
 #: and the opening line of an expanded skill body. All three are `user` records
 #: with no `promptSource`, so none is already excluded as product-injected
@@ -118,6 +155,7 @@ def analyse(records: Sequence[Mapping[str, Any]]) -> WaitingFor:
     (`legacy@1d32845:bridge/transcript.py:1683-1712`).
     """
     open_calls: dict[str, _OpenCall] = {}
+    watch = _PeerWatch()
     last_spoken_at = -1
     for ordinal, record in enumerate(records):
         if not isinstance(record, Mapping) or record.get("isSidechain") is True:
@@ -129,6 +167,7 @@ def analyse(records: Sequence[Mapping[str, Any]]) -> WaitingFor:
         kind = record.get("type")
         if kind not in ("user", "assistant"):
             continue
+        watch.arrived(record)
         message = record.get("message")
         if not isinstance(message, Mapping) or message.get("role") != kind:
             continue
@@ -137,9 +176,12 @@ def analyse(records: Sequence[Mapping[str, Any]]) -> WaitingFor:
         # closes the call it names whether or not it is worth reading aloud,
         # and a call is followed whether or not its record is visible.
         _follow(content, open_calls, ordinal)
+        watch.follow(content, record)
         if is_visible(record) and not is_pipeline_noise(record, content) and visible_text(content):
             last_spoken_at = ordinal
-    return _tail_wait(open_calls, last_spoken_at=last_spoken_at)
+            if kind == "user" and not is_own_relay(record):
+                watch.spoke_again()
+    return _tail_wait(open_calls, last_spoken_at=last_spoken_at, awaiting=watch.awaiting)
 
 
 def summarise(tool_input: Any) -> str:
@@ -208,14 +250,30 @@ def _follow(content: Any, open_calls: dict[str, _OpenCall], ordinal: int) -> Non
                     open_calls.pop(identifier, None)
 
 
-def _tail_wait(open_calls: dict[str, _OpenCall], *, last_spoken_at: int) -> WaitingFor:
-    """Read what the Session is waiting on out of the outstanding calls."""
+def _tail_wait(
+    open_calls: dict[str, _OpenCall],
+    *,
+    last_spoken_at: int,
+    awaiting: str | None = None,
+) -> WaitingFor:
+    """Read what the Session is waiting on out of the outstanding calls.
+
+    `awaiting` is the peer the turn ended on, if it ended on one (#320). It
+    ranks **below** every outstanding call: a Session that asked the user a
+    question and then messaged a peer is still asking the user, because only
+    the user can end that. A turn with nothing outstanding that ended on a peer
+    send is the one this state is about. The recipient carried out of here is
+    the lane's raw `to`; the caller resolves it to a Session it knows, and one
+    that resolves to none is not this state at all.
+    """
     tail = [call for call in open_calls.values() if call.ordinal >= last_spoken_at]
     asking = next((call for call in reversed(tail) if call.question is not None), None)
     if asking is not None:
         assert asking.question is not None  # exactly what `asking` selected on
         return asking.question
     if not tail:
+        if awaiting is not None:
+            return WaitingFor(kind=WaitingKind.PEER, awaiting=awaiting)
         return WaitingFor()
     # The newest outstanding call is the one the Session is held up on: an older
     # one it wrote first is already waiting behind this. A call this scan cannot
@@ -227,6 +285,122 @@ def _tail_wait(open_calls: dict[str, _OpenCall], *, last_spoken_at: int) -> Wait
         tool_name=newest.tool_name or None,
         detail=newest.detail or None,
     )
+
+
+class _PeerWatch:
+    """Whether this turn ended with the ball in another Session's hands (#320).
+
+    **One walk, one boundary, and the signal is structural.** The enter is the
+    turn's *last* `tool_use` being a `SendMessage` whose result carries no
+    `routing` — a peer send, not a subagent's — so any later call clears it: a
+    Session that messaged a peer and then went on working did not stop on that
+    message. The recipient is carried out raw, because resolving it to a Session
+    is the adapter's business and this module reads no registry.
+
+    **Leaving is one event and never a second message** (user story 7). Two ways
+    out, and the second is the backstop the first cannot cover:
+
+    - the awaited Session answers — a record whose `origin.kind` is `peer` and
+      whose sender matches what was addressed, by any of the three fields the
+      receiver writes;
+    - any new turn. The user typed, another peer wrote, the Session moved on —
+      whatever it was, the moment the notice was about has passed.
+
+    **Our own Answer Relay is neither.** It arrives as a `peer` record like any
+    other, from a socket named with this engine's own prefix, and it is the
+    user's words carried by us: a Relay is no evidence that the awaited Session
+    replied, and treating it as a new turn would let the user's own reply to the
+    🟣 notice silently retire the state it was about. `is_own_relay` is the same
+    predicate `analyse`'s docstring already argues for on the tail boundary,
+    asked here for the same reason.
+    """
+
+    def __init__(self) -> None:
+        #: The `SendMessage` call whose result has not been read yet, as
+        #: `(tool_use id, recipient)`.
+        self._pending: tuple[str, str] | None = None
+        #: The recipient this turn ended on, as the Session addressed it.
+        self.awaiting: str | None = None
+
+    def follow(self, content: Any, record: Mapping[str, Any]) -> None:
+        """Read one record's tool blocks: a call clears, a peer send's result sets."""
+        if not isinstance(content, list):
+            return
+        for item in content:
+            if not isinstance(item, Mapping):
+                continue
+            match item.get("type"):
+                case "tool_use":
+                    self._called(item)
+                case "tool_result":
+                    self._answered(item, record)
+
+    def _called(self, item: Mapping[str, Any]) -> None:
+        # Any call at all is the turn going on, so whatever was established
+        # before it is no longer what the turn ended on.
+        self._pending = None
+        self.awaiting = None
+        if item.get("name") != MESSAGE_TOOL:
+            return
+        identifier = item.get("id")
+        tool_input = item.get("input")
+        recipient = tool_input.get(RECIPIENT) if isinstance(tool_input, Mapping) else None
+        if isinstance(identifier, str) and isinstance(recipient, str) and recipient.strip():
+            self._pending = (identifier, recipient.strip())
+
+    def _answered(self, item: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+        if self._pending is None or item.get("tool_use_id") != self._pending[0]:
+            return
+        recipient = self._pending[1]
+        self._pending = None
+        outcome = record.get("toolUseResult")
+        if not isinstance(outcome, Mapping) or outcome.get(SUCCEEDED) is not True:
+            # **A send that did not land leaves the ball nowhere.** A refused or
+            # unresolvable recipient answers `is_error` with a string result and
+            # no `success`, and announcing 🟣 for it would tell the user their
+            # words are with somebody they never reached. The state is about a
+            # message that arrived, so the result has to say one did.
+            return
+        if ROUTING in outcome:
+            # A subagent or teammate send. The Child Process rules answer for
+            # that one, and this state is not about it (user story 9).
+            return
+        self.awaiting = recipient
+
+    def arrived(self, record: Mapping[str, Any]) -> None:
+        """The awaited Session answering leaves the state, whatever else the record is."""
+        if self.awaiting is None or is_own_relay(record):
+            return
+        if _sent_by(record, self.awaiting):
+            self.awaiting = None
+
+    def spoke_again(self) -> None:
+        """The backstop: a new turn, so the moment the notice was about has passed."""
+        self._pending = None
+        self.awaiting = None
+
+
+def _sent_by(record: Mapping[str, Any], recipient: str) -> bool:
+    """Whether this arriving peer message came from the Session that was addressed.
+
+    Three fields, because a recipient is addressed in two ways and the receiver
+    writes down what it resolved: `name` is the Session Name a `to` usually
+    carries, `from` is the socket address a `to` may carry instead, and
+    `verifiedPeerPid` is the pid that socket was resolved to — which is the
+    number in the socket's own file name, so it answers for a `to` naming that
+    socket even under a directory this reader knows nothing about. `False` for
+    every record that is not a peer arrival at all.
+    """
+    origin = record.get(ORIGIN)
+    if not isinstance(origin, Mapping) or origin.get("kind") != PEER_ORIGIN:
+        return False
+    if recipient in (origin.get(ORIGIN_NAME), origin.get(ORIGIN_FROM)):
+        return True
+    pid = origin.get(ORIGIN_PID)
+    if not isinstance(pid, int) or not recipient.startswith(ADDRESS_PREFIX):
+        return False
+    stem = recipient.rpartition("/")[2]
+    return stem.partition(".")[0] == str(pid)
 
 
 @dataclass(frozen=True, slots=True)

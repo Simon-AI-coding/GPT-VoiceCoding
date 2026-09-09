@@ -377,11 +377,11 @@ def foreign_codex_refusal(
     one case where it is not better.
 
     **A candidate the adapter cannot name a workspace for is not reported**, and
-    that is inherited rather than decided here: `enumerate_sessions` drops a row
+    that is inherited rather than decided here: `enumerate_runs` drops a row
     whose cwd `lsof` will not give up. Reporting it would need the second scanner
     this deliberately does not have.
 
-    **The clock is read once, here, and handed down.** `enumerate_sessions`
+    **The clock is read once, here, and handed down.** `enumerate_runs`
     dates every `etime` against one reading taken before its `ps`; passing that
     same moment in means the elapsed times in the refusal are computed against
     the moment the starts were, and keeps the read on the safe side of the `ps`
@@ -398,7 +398,7 @@ def foreign_codex_refusal(
     """
     sampled_at = now()
     try:
-        live = asyncio.run(codex_processes.enumerate_sessions(run=run, now=lambda: sampled_at))
+        live = asyncio.run(codex_processes.enumerate_runs(run=run, now=lambda: sampled_at))
     except (OSError, TimeoutError) as unreadable:
         return (
             "the process table could not be read, so this run cannot tell whether a Codex "
@@ -406,10 +406,17 @@ def foreign_codex_refusal(
             f"{unreadable!r}"
         )
     owned = acceptance_root().expanduser().resolve(strict=False)
+    # **Only a run that would reach the graded roster is worth refusing over**
+    # (#319). `enumerate_runs` carries a `??` candidate now instead of dropping
+    # it, and a run with no controlling terminal is a Headless Run: it is never
+    # announced and never addressable, so it cannot sit on the roster this walk
+    # is graded on — and refusing a run over one would be this gate stopping a
+    # walk for a process that cannot affect it.
     foreign = [
         candidate
         for candidate in live
-        if not candidate.workspace.expanduser().resolve(strict=False).is_relative_to(owned)
+        if candidate.has_controlling_terminal
+        and not candidate.workspace.expanduser().resolve(strict=False).is_relative_to(owned)
     ]
     if not foreign:
         return None
@@ -429,7 +436,7 @@ def foreign_codex_refusal(
 def _uptime_text(sampled_at: float, started_at: float | None) -> str:
     """How long a Session has been up, in the compact form the refusal reads in.
 
-    **The `None` arm is unreachable today and kept anyway.** `enumerate_sessions`
+    **The `None` arm is unreachable today and kept anyway.** `enumerate_runs`
     drops a row whose `etime` it cannot parse, so nothing it returns is missing a
     start — but `Candidate.started_at` is typed `float | None`, no CI gate type-
     checks (`.github/workflows/ci.yml`), and this is called from a session-scoped
@@ -971,17 +978,6 @@ DEFAULT_CALL_WORKSPACES = live_call.CallWorkspaces(
     waiting=live_call.WAITING_WORKSPACE_NAME,
 )
 
-#: The Relay ceiling every run is given, in seconds, in place of the one the user
-#: configured. The shipped default is ten minutes (`core/policy.py`), and #197
-#: asks a step to observe what happens *past* the ceiling — so a run on the real
-#: number would spend ten minutes per lane waiting for a clock rather than
-#: proving a path. The value is short enough to sit inside one step and longer
-#: than the round trip a `bridgectl relay` takes, so a Relay that is held is held
-#: because the Session's window is shut and not because the harness was slow.
-#: The steps read it back out of the run's config (`journey.Walk`), so this
-#: number appears nowhere else.
-ACCEPTANCE_RELAY_CEILING_SECONDS = 20
-
 
 @dataclass(frozen=True)
 class DerivedConfig:
@@ -1044,16 +1040,10 @@ def derive_config(
     it names a module the parked tree no longer has. What is left is a config the
     engine under test could have been given.
 
-    **A fourth value is replaced, and it is a policy dial rather than a path:**
-    `[policy] relay_ceiling_seconds` becomes `ACCEPTANCE_RELAY_CEILING_SECONDS`.
-    #197 asks a step to observe what a Relay does *past* its ceiling, and the
-    shipped ceiling is ten minutes — so a run on the user's own number would
-    spend ten minutes per lane waiting for a clock. What acceptance proves here
-    is the path a relay that finally failed takes to the user, not the number it
-    waits out; the number is policy, and the fast suite holds the shipped
-    default. Said out loud because it is a deviation of a different kind from
-    the three above: those keep two engines out of each other's way, and this
-    one changes what the engine under test does.
+    A fourth value used to be replaced — `[policy] relay_ceiling_seconds`, so a
+    run would not spend ten minutes per lane waiting out a clock. The ceiling is
+    abolished (#321), so there is no dial to shorten and every run is on the
+    engine's own policy again.
 
     One value is **rewritten** rather than copied, and only when the caller asks:
     `[adapters.settings.companion_channel] token_env`. Two lanes run at once
@@ -1128,10 +1118,6 @@ def derive_config(
     log = dict(document["log"])
     log["path"] = str(run_directory / "engine.log")
     document["log"] = log
-
-    policy = dict(document.get("policy", {}))
-    policy["relay_ceiling_seconds"] = ACCEPTANCE_RELAY_CEILING_SECONDS
-    document["policy"] = policy
 
     dropped = [name for name in ("launch",) if document.pop(name, None) is not None]
     adapters = dict(document["adapters"])

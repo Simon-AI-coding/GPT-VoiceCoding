@@ -98,7 +98,6 @@ class TestRoundTrip:
                 kind=RelayKind.ANSWER,
                 text="yes, go ahead",
                 queued_at=1.0,
-                expires_at=601.0,
             )
         )
         before.persist()

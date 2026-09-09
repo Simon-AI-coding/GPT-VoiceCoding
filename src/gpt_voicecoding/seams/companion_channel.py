@@ -1,6 +1,8 @@
 """The Companion Channel seam — reaching the user when no Live Call is up.
 
-Verbs Bridge Core calls: `send(message)` and `verify` (liveness — ADR 0003).
+Verbs Bridge Core calls: `send(message)`, `react(message_id, reaction)` — the
+receipt for the user's own words, as an emoji on the message they sent rather
+than a message of its own — and `verify` (liveness — ADR 0003).
 
 Events raised upward: inbound user text, **unclassified**. Deciding whether
 inbound text is a control-plane command, an Answer Relay, or a delegation is
@@ -76,11 +78,18 @@ class InboundText(Event):
     and empty when it answered nothing. Of the same nature as `origin`: a fact
     the adapter saw, matched by Core by string equality against the ids earlier
     `ChannelReceipt`s reported. An adapter with no reply concept leaves it empty.
+
+    `message_id` is that same kind of fact about **this** text: the adapter's
+    opaque id of the user's own message, which is what `react` puts a receipt
+    on (ADR 0021, *a receipt is a reaction*). Empty where there is no message to
+    react to — a button press, a surface with no message ids — and a Relay from
+    an empty one gets its receipt as a sentence instead.
     """
 
     text: str
     origin: str = ""
     in_reply_to: str = ""
+    message_id: str = ""
 
 
 #: The longest reply-bar placeholder a surface will carry. The Bot API's own
@@ -108,8 +117,12 @@ class BriefState(StrEnum):
 
     Deliberately not `SessionState`: that is the agent's own vocabulary for a
     lifecycle (`running`, `idle`, `waiting`), and these five are what the user
-    is owed — three of them actionable, one of them the honest admission that
-    something could not be read.
+    is owed. **`UNREADABLE` was the sixth and is retired** (#320): a read that
+    failed is a fact about the *message*, not a state of the Session, and
+    `ProgressAvailability.UNREADABLE` / `NewestState.UNREADABLE` still carry it
+    into the body's omission sentence. A stop nobody could read is `FINISHED`
+    with that sentence beside it, because "the engine does not know" dressed as
+    "it is waiting for you" is the one thing this state word must not do.
 
     **Defined at the seam, read by Core.** The words for each state are Core's
     (`core/briefing.py::STATE_WORDING`, ADR 0021 §5), but the closed set of
@@ -120,18 +133,19 @@ class BriefState(StrEnum):
     the seams import nothing of Core's, so this is the one direction it can go.
     """
 
-    #: A question is waiting for the user, or a Codex turn ended (#166 B2).
+    #: A question is put to the user — `AskUserQuestion`, or a question mark in
+    #: the turn's final prose (#320).
     DECISION = "decision"
     #: A permission dialog is open.
     PERMISSION = "permission"
+    #: The turn ended with the ball in another Session's hands or in the
+    #: Session's own Child Process's (#320). The one state whose word names
+    #: somebody, so its wording is a template Core fills.
+    WAITING_ON = "waiting_on"
     #: This turn is done and the Session is idle for a new instruction (Q7).
     FINISHED = "finished"
     #: Mid-turn. Nothing is being asked of the user.
     RUNNING = "running"
-    #: It stopped, and what it stopped on or what it said could not be read.
-    #: **Never counted as a decision** (#166 B7): the brief carries whatever was
-    #: read, and says plainly what it could not.
-    UNREADABLE = "unreadable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,9 +179,6 @@ class SessionNotice:
     #: Whether the user can answer from this surface, and Briefing's line for it.
     answerable_here: bool = True
     answer_wording: str = ""
-    #: Why the user's last reply never arrived, in Briefing's words — empty when
-    #: nothing is undelivered, which is the ordinary case and draws no line.
-    undelivered: str = ""
 
     def __post_init__(self) -> None:
         if not self.state_word.strip():
@@ -259,6 +270,7 @@ class CompanionChannel(Protocol):
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> ChannelReceipt:
         """Push one message to the user, and say which ids it landed under.
 
@@ -278,6 +290,41 @@ class CompanionChannel(Protocol):
         belongs to the **last** part, because that is the message the bar sits
         under. An adapter with no reply bar ignores it. The words are Core's,
         and `PLACEHOLDER_LIMIT` is the bound they stay inside.
+
+        `reply_to` is an id this channel raised on an `InboundText` — the user's
+        own message — and asks the surface to hang this message under it, the
+        way the user's own client would show one message answering another. A
+        receipt says so (ADR 0021, *a receipt is a reaction*): the three
+        outcomes that still carry a sentence carry it **as a reply to the
+        message the words were typed in**, so that a chat with several Relays in
+        it says which one each sentence is about. On a send that splits it
+        belongs to the **first** part, which is the one answering. An adapter
+        with no reply concept ignores it, exactly as it emits an empty
+        `in_reply_to`.
+        """
+        ...
+
+    async def react(self, message_id: str, reaction: str | None) -> bool:
+        """Put one reaction on a message the **user** sent, or take it away.
+
+        The receipt for the user's own words, where a sentence would be a
+        message of its own for news the user already expects (ADR 0021, *a
+        receipt is a reaction*): set, swapped as the Relay's state changes, and
+        resting on the final state. `reaction` is one emoji, spelt exactly as
+        the surface's own list spells it; `None` clears whatever is there.
+
+        `message_id` is an id this channel raised on an `InboundText` — the only
+        place Core learns of a message the user sent. One reaction stands at a
+        time, so a second call **replaces** the first rather than adding to it;
+        setting the same one twice is safe and is what makes a re-render
+        idempotent.
+
+        Answers whether the reaction now stands: `True` only when the surface
+        confirmed it. `False` is the whole of failure — a refused emoji, a
+        message the surface no longer has, a dead network — because the caller's
+        answer to all three is the same one sentence, and a raise would put a
+        surface's trouble in the engine's loop. A channel with no reactions
+        accepts and does nothing.
         """
         ...
 

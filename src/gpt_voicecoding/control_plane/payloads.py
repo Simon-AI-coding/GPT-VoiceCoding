@@ -201,6 +201,18 @@ def session_document(
             session.last_activity.isoformat() if session.last_activity is not None else None
         ),
         "child": child_document(session.child),
+        # **The third tier, beside the second** (#319, ADR 0020 as amended). A
+        # Headless Run stays on this wire exactly as a Child Process does — the
+        # row is kept, and `status` is where "appears in the roster" is true —
+        # so it travels carrying the fact that says what it is. Without it a
+        # surface counting user-facing Sessions has nothing to exclude it by,
+        # which is what made the menu-bar panel count one.
+        #
+        # A boolean rather than a nested document: `child` carries a parent
+        # address as well as a kind, and this tier has nothing beside itself.
+        # A reader that does not know the key reads its absence as `false` and
+        # keeps the count it had, which is what makes this additive.
+        "headless_run": session.is_headless_run,
         # Derived on the row and rendered here, so no surface re-derives it and
         # no two surfaces can disagree about the same Session.
         "reply_window": str(reply_window or session.reply_window),
@@ -225,6 +237,12 @@ def waiting_for_document(waiting_for: WaitingFor) -> dict[str, Any]:
         "tool_name": waiting_for.tool_name,
         "detail": waiting_for.detail,
         "approval_id": waiting_for.approval_id,
+        # Who is being awaited, as the lane refers to them (#320). The name the
+        # *user* reads is Core's, on the brief's `awaited`; this is the raw
+        # reference, carried for the same reason every other field here is —
+        # reading a field and dropping it is the reader deciding what a surface
+        # may know.
+        "awaiting": waiting_for.awaiting,
     }
 
 
@@ -244,7 +262,6 @@ def pending_relay_document(pending: PendingRelay) -> dict[str, Any]:
         "text": pending.text,
         "route": str(pending.route),
         "queued_at": pending.queued_at,
-        "expires_at": pending.expires_at,
         # The grade of the last attempt, or nothing at all when none was made.
         # `null` rather than `unknown`: the absence of an attempt is not an
         # attempt that proved nothing.
@@ -305,6 +322,7 @@ def roster_brief_document(brief: RosterBrief) -> dict[str, Any]:
                 "name": str(row.name) if row.name is not None else None,
                 "agent": str(row.agent),
                 "state": str(row.state),
+                "awaited": row.awaited,
                 "focus": row.focus,
             }
             for row in brief.rows
@@ -318,6 +336,12 @@ def session_brief_document(brief: SessionBrief) -> dict[str, Any]:
         "name": str(brief.name) if brief.name is not None else None,
         "agent": str(brief.agent),
         "state": str(brief.state),
+        # Who the `waiting_on` state word names, already in the words the user
+        # reads (#320). `null` on every other state, and on a `waiting_on` whose
+        # party has no name of its own — the rendered `text` beside this says
+        # what Core words that as. Carried so the structure holds every fact the
+        # text was built from, which is this document's whole rule.
+        "awaited": brief.awaited,
         "newest": {"state": str(brief.newest.state), "text": brief.newest.text},
         "decision": decision_document(brief.decision),
         "answerable_here": brief.answerable_here,

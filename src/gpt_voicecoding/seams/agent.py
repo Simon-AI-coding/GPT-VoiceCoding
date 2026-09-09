@@ -138,6 +138,14 @@ class WaitingKind(StrEnum):
     QUESTION = "question"
     #: A permission dialog. The Approval Relay's business.
     PERMISSION = "permission"
+    #: The turn ended with the ball in another Session's hands (#320, ADR 0021
+    #: as amended 2026-09-09). Symmetric: the Session that sent a ruling and the
+    #: Session that asked for one are in the same state, because the record
+    #: cannot tell an ask from a ruling and the user's action is the same.
+    PEER = "peer"
+    #: The turn ended with the ball in the Session's own Child Process's hands —
+    #: a subagent, a teammate, or a command running in the background (#320).
+    CHILD = "child"
     #: Something is being waited on and we cannot yet say what. Only honest
     #: alongside `caught_up=False`; see `WaitingFor`.
     UNKNOWN = "unknown"
@@ -203,6 +211,22 @@ class WaitingFor:
     #: Session is `waiting` without naming the dialog, and the handle arrives
     #: with the hook that holds it open.
     approval_id: str | None = None
+    #: **The adapter's own reference to the party being awaited** (#320), on a
+    #: `PEER` or a `CHILD` wait and on nothing else. For `PEER` it is the awaited
+    #: Session's address as this process spells one (`str(SessionTarget)`),
+    #: resolved by the lane at recognition — a send whose recipient resolves to
+    #: no Session the engine knows is not a `PEER` wait at all. For `CHILD` it is
+    #: the child row's name where that child has one, and `None` where it has
+    #: none: a command running in the background is named by the wording table
+    #: and never from its command line.
+    #:
+    #: Carried here rather than beside it on the inspection row because this is
+    #: already what a Session stopped on, and it already rides the row and
+    #: `SessionStopped` as `waiting_for`. Core turns it into the name the user
+    #: reads at briefing time (`core/briefing.py`), never the lane: a Session
+    #: Name climbs (ADR 0024), so a name resolved at the Stop and stored would
+    #: be announced stale.
+    awaiting: str | None = None
 
     def __post_init__(self) -> None:
         if not self.caught_up and self.kind is not WaitingKind.UNKNOWN:
@@ -226,15 +250,27 @@ class WaitingFor:
         nothing is `IDLE`, which is what `BriefState.FINISHED` means (#165 Q7),
         and anything else is `WAITING` — a question or a permission because only
         the user can end it, an `UNKNOWN` because a wait nobody could read is
-        still a stop, and reading it as `WAITING` is what makes Briefing say
-        *unreadable* rather than a false *running* (#166 B7).
+        still a stop.
+
+        **`PEER` and `CHILD` are `IDLE`, and they are named here rather than
+        left to the fallback** (#320). Two reasons, and they are one reason. The
+        user is not being asked anything — `needs_the_user` says so — and this
+        value is what `derive_reply_window` reads: `WAITING` with no answerable
+        question closes the Reply Window, and a 🟣 notice is an ordinary Anchor
+        the user replies into (ADR 0021 §5, user story 6). A Session whose turn
+        ended waiting on somebody else is a Session ready for the next
+        instruction, which is what `IDLE` means everywhere else here.
 
         Read by `SessionRegistry.set_stop_reading` (#213), for the row it holds
         and for the one it stands in for when no discovery pass has landed yet
         (#216). Deliberately not a field on `SessionStopped`: the lanes
         observe the wait, and what it implies is this side's rule.
         """
-        return SessionState.IDLE if self.kind is WaitingKind.NONE else SessionState.WAITING
+        match self.kind:
+            case WaitingKind.NONE | WaitingKind.PEER | WaitingKind.CHILD:
+                return SessionState.IDLE
+            case _:
+                return SessionState.WAITING
 
     def as_approval_request(self, target: SessionTarget) -> ApprovalRequest | None:
         """The pending permission as the Approval Relay addresses it, if it is one.
@@ -611,6 +647,20 @@ class SessionInspection:
     #: having said anything a reader would show, and #76 consumes both.
     last_activity: datetime | None = None
     child: ChildClassification = MAIN_SESSION
+    #: Whether `ps -o tty=` names a controlling terminal for this run: `True`
+    #: when it does, `False` when it reads `??`, and `None` when the read could
+    #: not be taken at all — a pid that left the table between the lane's own
+    #: reading and the `ps`, or a `ps` that failed.
+    #:
+    #: **The lane reports the fact and decides nothing from it** (#319, ADR 0020
+    #: as amended). Which tier a run is in — Session or Headless Run — is Bridge
+    #: Core's (`core/sessions.py`), from this one field, so the two lanes cannot
+    #: drift into two rules about what a person can type into.
+    #:
+    #: `None` is deliberately not `False`. Silencing a real Session is the
+    #: expensive error and an extra ended line is the cheap one, so a read that
+    #: could not tell leaves the run announced.
+    has_controlling_terminal: bool | None = None
     #: Project resolution is unchanged; candidate strings cross untouched.
     project_name: str | None = None
     user_name: str | None = None
@@ -775,6 +825,11 @@ class SessionStopped(Event):
     target: SessionTarget
     progress: ProgressObservation = field(default_factory=ProgressObservation)
     waiting_for: WaitingFor = field(default_factory=WaitingFor)
+    #: The same fact `SessionInspection` carries, and it rides here because a
+    #: Stop can precede every discovery pass (#319): `core/sessions.py::stand_in`
+    #: makes the row when the Stop arrives first, and a row made without this
+    #: would be announced before any pass could say it is a Headless Run.
+    has_controlling_terminal: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

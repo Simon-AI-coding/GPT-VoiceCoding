@@ -1421,8 +1421,6 @@ def _brief_text(brief: SpokenBrief) -> str:
     lines.extend(f"  {line}" for line in brief.decision)
     lines.append(f"  answer: {brief.answerable_here}")
     lines.append(f"  last activity: {brief.last_activity_at}")
-    if brief.undelivered:
-        lines.append(f"  undelivered: {brief.undelivered}")
     return "\n".join(lines)
 
 

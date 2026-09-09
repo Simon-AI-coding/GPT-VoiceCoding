@@ -24,7 +24,6 @@ import pytest
 from fakes import FakeAgent
 from gpt_voicecoding.core.errors import StaleSessionError, UnknownSessionError
 from gpt_voicecoding.core.lifecycle import Lifecycle
-from gpt_voicecoding.core.policy import CorePolicy
 from gpt_voicecoding.core.relay_queue import RelayKind, RelayQueue
 from gpt_voicecoding.core.relays import (
     NO_AUTHORITY_CLAUSE,
@@ -32,8 +31,10 @@ from gpt_voicecoding.core.relays import (
     RelayOutcome,
     RelayPipeline,
     RelayReason,
+    reaction_for,
     reason_for,
     receipt_sentence,
+    sentence_stands_alone,
 )
 from gpt_voicecoding.core.sessions import Session, SessionRegistry
 from gpt_voicecoding.seams.agent import (
@@ -88,7 +89,6 @@ class Harness:
             agents={AgentKind.CODEX: self.agent, AgentKind.CLAUDE: self.agent},
             sessions=self.sessions,
             relays=self.relays,
-            policy=CorePolicy(),
             clock=lambda: self.now,
         )
 
@@ -98,9 +98,6 @@ class Harness:
     def window_opened(self, target: SessionTarget = CODEX) -> object:
         self.sessions.set_state(target, SessionState.IDLE)
         return asyncio.run(self.pipeline.reply_window_opened(target))
-
-    def sweep(self) -> object:
-        return self.pipeline.sweep_expired()
 
 
 class TestDeliveringIntoAnOpenReplyWindow:
@@ -149,13 +146,14 @@ class TestQueueingAgainstAClosedWindow:
         assert waiting.kind is RelayKind.ANSWER
         assert waiting.text == "ship it"
 
-    def test_the_queued_relay_carries_the_ten_minute_ceiling(self) -> None:
+    def test_the_queued_relay_remembers_the_message_its_words_were_typed_in(self) -> None:
+        """What the receipt reacts on, held so it survives the entry's release (#321)."""
         harness = Harness()
 
-        harness.relay()
+        harness.relay(message_id="4242")
 
         (waiting,) = harness.relays.pending()
-        assert waiting.expires_at == waiting.queued_at + TEN_MINUTES
+        assert waiting.message_id == "4242"
 
     def test_a_closed_question_route_refuses_instead_of_queueing_for_the_inbox(self) -> None:
         harness = Harness(targets=(CLAUDE,))
@@ -181,21 +179,6 @@ class TestQueueingAgainstAClosedWindow:
         assert outcome.receipt is None
         assert harness.agent.calls == []
         assert harness.relays.pending() == ()
-
-    def test_the_ceiling_is_configurable_rather_than_baked_in(self) -> None:
-        harness = Harness()
-        harness.pipeline = RelayPipeline(
-            agents={AgentKind.CODEX: harness.agent},
-            sessions=harness.sessions,
-            relays=harness.relays,
-            policy=CorePolicy(relay_ceiling_seconds=30.0),
-            clock=lambda: harness.now,
-        )
-
-        harness.relay()
-
-        (waiting,) = harness.relays.pending()
-        assert waiting.expires_at == waiting.queued_at + 30.0
 
     def test_the_open_window_releases_it_and_the_adapter_delivers(self) -> None:
         harness = Harness()
@@ -379,44 +362,30 @@ class TestNonDelivery:
         assert len(harness.agent.calls) == 1
 
 
-class TestTheTenMinuteCeiling:
-    def test_nothing_expires_before_the_ceiling(self) -> None:
-        harness = Harness()
-        harness.relay()
+class TestNoCeilingAtAll:
+    """#321: queued words wait for the Session's next turn, or for its end."""
 
-        harness.now += TEN_MINUTES - 1
-
-        assert harness.sweep() == ()
-        assert len(harness.relays.pending()) == 1
-
-    def test_at_the_ceiling_the_relay_becomes_a_reported_failure(self) -> None:
+    def test_words_still_wait_long_after_the_ten_minutes_that_used_to_drop_them(self) -> None:
         harness = Harness()
         harness.relay("ship it")
 
-        harness.now += TEN_MINUTES
-        (outcome,) = harness.sweep()
+        harness.now += TEN_MINUTES * 10
 
-        assert outcome.state is Lifecycle.REPORTED_FAILED
-        assert outcome.reason is RelayReason.CEILING_PASSED
+        (waiting,) = harness.relays.pending()
+        assert waiting.text == "ship it"
 
-    def test_an_expired_relay_leaves_the_ledger_so_nothing_can_retry_it(self) -> None:
+    def test_they_go_in_when_the_window_finally_opens(self) -> None:
         harness = Harness()
-        harness.relay()
-        harness.now += TEN_MINUTES
-        harness.sweep()
+        harness.relay("ship it")
+        harness.now += TEN_MINUTES * 10
 
-        harness.window_opened()
+        (outcome,) = harness.window_opened()
 
-        assert harness.agent.calls == []
-        assert harness.relays.pending() == ()
+        assert outcome.state is Lifecycle.DELIVERED
+        assert [call.text for call in harness.agent.calls] == ["ship it"]
 
-    def test_a_relay_is_reported_failed_exactly_once(self) -> None:
-        harness = Harness()
-        harness.relay()
-        harness.now += TEN_MINUTES
-
-        assert len(harness.sweep()) == 1
-        assert harness.sweep() == ()
+    def test_a_pipeline_has_no_sweep_to_call(self) -> None:
+        assert not hasattr(Harness().pipeline, "sweep_expired")
 
 
 class TestFailingClosedOnTheTarget:
@@ -580,8 +549,8 @@ class TestWhatATerminalRelaySaysAboutAnUnprovenAttempt:
     The two used to be one sentence, in two spellings each, because a rendered
     sentence may not claim non-delivery of an `UNKNOWN` — the grade that means
     the far side may well have the words. Splitting them makes the pair
-    unnecessary: `ceiling_passed` is a fact about this system's ceiling and
-    claims nothing about arrival, and the attempt's grade travels beside it.
+    unnecessary: `session_ended` is a fact about the Session and claims nothing
+    about arrival, and the attempt's grade travels beside it.
     """
 
     def unproven(self) -> Harness:
@@ -594,40 +563,24 @@ class TestWhatATerminalRelaySaysAboutAnUnprovenAttempt:
         harness = self.unproven()
         harness.relay("ship it")
 
-        harness.now += TEN_MINUTES
-        (outcome,) = harness.sweep()
+        (outcome,) = harness.pipeline.session_ended(CODEX)
 
         assert outcome.state is Lifecycle.REPORTED_FAILED
-        assert outcome.reason is RelayReason.CEILING_PASSED
+        assert outcome.reason is RelayReason.SESSION_ENDED
         assert outcome.receipt is not None
         assert outcome.receipt.outcome is Delivery.UNKNOWN
-        # The adapter's own evidence survives the ceiling rather than being
+        # The adapter's own evidence survives the ending rather than being
         # rewritten into a sentence about it.
         assert outcome.receipt.reason == "no readback"
 
-    def test_words_that_never_went_reach_the_ceiling_with_no_grade(self) -> None:
+    def test_a_terminal_relay_carries_the_message_its_words_were_typed_in(self) -> None:
+        """The last settlement renders the reaction, and the row is gone by then (#321)."""
         harness = Harness()
-        harness.relay("ship it")
+        harness.relay("ship it", message_id="4242")
 
-        harness.now += TEN_MINUTES
-        (outcome,) = harness.sweep()
+        (outcome,) = harness.pipeline.session_ended(CODEX)
 
-        assert outcome.reason is RelayReason.CEILING_PASSED
-        assert outcome.receipt is None
-
-    def test_a_proven_failure_reaches_the_ceiling_under_the_same_code(self) -> None:
-        harness = Harness(
-            window=ReplyWindow.OPEN,
-            agent=FakeAgent(outcome=Delivery.FAILED, reason="the far side is gone"),
-        )
-        harness.relay("ship it")
-
-        harness.now += TEN_MINUTES
-        (outcome,) = harness.sweep()
-
-        assert outcome.reason is RelayReason.CEILING_PASSED
-        assert outcome.receipt is not None
-        assert outcome.receipt.outcome is Delivery.FAILED
+        assert outcome.message_id == "4242"
 
     def test_a_session_that_ends_under_an_unproven_relay_keeps_that_grade(self) -> None:
         harness = self.unproven()
@@ -744,11 +697,16 @@ class TestWhatTheRouteMadeOfTheWords:
         assert outcome.state is Lifecycle.DELIVERED
         assert outcome.authority is RelayAuthority.WORDS
 
-    def test_an_unread_codex_stop_is_briefed_as_a_decision_and_the_receipt_agrees(self) -> None:
-        """#166 B2's default, read once: the notice said `decision`, so the receipt says words."""
+    def test_an_unread_codex_stop_is_briefed_as_finished_and_the_receipt_agrees(self) -> None:
+        """One reading, so the notice and the receipt cannot disagree (#320).
+
+        The default reversed: a stop nobody read shows no question, so the
+        notice says `finished` and the receipt says plain words rather than
+        words answering a question that was never found.
+        """
         harness = Harness(window=ReplyWindow.OPEN)
 
-        assert harness.relay("carry on").authority is RelayAuthority.WORDS_ON_A_QUESTION
+        assert harness.relay("carry on").authority is RelayAuthority.WORDS
 
     def test_words_that_queue_for_a_working_session_are_words(self) -> None:
         assert Harness().relay().authority is RelayAuthority.WORDS
@@ -869,7 +827,6 @@ class TestTheReceiptSentence:
                 state=Lifecycle.REPORTED_FAILED
                 if reason
                 in {
-                    RelayReason.CEILING_PASSED,
                     RelayReason.SESSION_ENDED,
                     RelayReason.QUESTION_UNANSWERABLE,
                 }
@@ -881,3 +838,150 @@ class TestTheReceiptSentence:
                 continue
             assert receipt_sentence(outcome).strip(), reason
             assert "=" not in receipt_sentence(outcome), "a sentence, not the codes"
+
+
+class TestWhatEachStandingWears:
+    """The receipt table (ADR 0021 as amended 2026-09-09; #321).
+
+    A reaction on the user's own message for the outcomes they already expect,
+    and a sentence only for the three that are news to act on. Both tables are
+    total over the codes, because a reason with no entry would be a Relay whose
+    standing the user cannot see.
+    """
+
+    def test_every_reason_says_what_it_wears(self) -> None:
+        for reason in RelayReason:
+            reaction_for(reason)  # total, or this raises
+
+    def test_the_ordinary_outcomes_wear_the_ticket_s_own_emoji(self) -> None:
+        assert reaction_for(RelayReason.DELIVERED) == "\N{OK HAND SIGN}"
+        assert reaction_for(RelayReason.AWAITING_REPLY_WINDOW) == (
+            "\N{MAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER}"
+        )
+        assert reaction_for(RelayReason.HELD_FAR_SIDE) == "\N{HEAR-NO-EVIL MONKEY}"
+        assert reaction_for(RelayReason.SESSION_ENDED) == "\N{GHOST}"
+
+    def test_the_two_that_are_only_words_wear_nothing(self) -> None:
+        assert reaction_for(RelayReason.QUESTION_UNANSWERABLE) is None
+        assert reaction_for(RelayReason.DUPLICATE_RISK) is None
+
+    def test_the_technologist_keeps_its_zero_width_joiner(self) -> None:
+        """A stripped ZWJ is `REACTION_INVALID` on the wire."""
+        assert reaction_for(RelayReason.AWAITING_REPLY_WINDOW) == "\U0001f468\u200d\U0001f4bb"
+
+    def test_three_reasons_send_a_sentence_of_their_own(self) -> None:
+        speaking = {reason for reason in RelayReason if sentence_stands_alone(reason)}
+
+        assert speaking == {
+            RelayReason.HELD_FAR_SIDE,
+            RelayReason.QUESTION_UNANSWERABLE,
+            RelayReason.DUPLICATE_RISK,
+        }
+
+    def test_a_good_outcome_costs_no_message(self) -> None:
+        assert not sentence_stands_alone(RelayReason.DELIVERED)
+        assert not sentence_stands_alone(RelayReason.AWAITING_REPLY_WINDOW)
+        assert not sentence_stands_alone(RelayReason.SESSION_ENDED)
+
+    def test_every_reason_still_has_a_sentence_for_the_fallback_to_send(self) -> None:
+        """A failed reaction sends that reason's own words, so all of them keep one."""
+        for reason in RelayReason:
+            outcome = RelayOutcome(
+                request_id=RequestId("rq-1"),
+                target=CODEX,
+                state=Lifecycle.REPORTED_FAILED
+                if reason in {RelayReason.SESSION_ENDED, RelayReason.QUESTION_UNANSWERABLE}
+                else Lifecycle.RETAINED,
+                route=RelayRoute.DELIVER,
+                reason=reason,
+            )
+            if reason is RelayReason.DELIVERED:
+                continue
+            assert receipt_sentence(outcome).strip(), reason
+
+
+class TestTheMessageTheWordsWereTypedIn:
+    """Carried from the inbound event to every outcome the Relay ever has (#321)."""
+
+    def test_a_relay_that_went_straight_in_carries_it(self) -> None:
+        harness = Harness(window=ReplyWindow.OPEN)
+
+        assert harness.relay(message_id="4242").message_id == "4242"
+
+    def test_a_relay_that_queued_carries_it(self) -> None:
+        assert Harness().relay(message_id="4242").message_id == "4242"
+
+    def test_the_flush_at_the_next_window_carries_it_too(self) -> None:
+        harness = Harness()
+        harness.relay(message_id="4242")
+
+        (outcome,) = harness.window_opened()
+
+        assert outcome.message_id == "4242"
+
+    def test_a_refused_question_carries_it(self) -> None:
+        harness = Harness(targets=(CLAUDE,))
+        held_question(harness)
+        harness.agent.answerable_questions.clear()
+
+        outcome = asyncio.run(harness.pipeline.relay(CLAUDE, "main", message_id="4242"))
+
+        assert outcome.reason is RelayReason.QUESTION_UNANSWERABLE
+        assert outcome.message_id == "4242"
+
+    def test_a_relay_from_a_surface_with_no_message_ids_carries_none(self) -> None:
+        assert Harness(window=ReplyWindow.OPEN).relay().message_id == ""
+
+
+class TestWhatTheRouteMadeOfWordsThatWaited:
+    """The authority a Relay was taken with survives its wait (#321).
+
+    A receipt sent minutes later carries ADR 0013's clause on the same test as
+    one sent at once — the words answered a question the Session merely said,
+    and that is a fact about the route they took, not about what the Session is
+    doing by the time the sentence goes out.
+    """
+
+    def waiting_on_a_said_question(self) -> Harness:
+        """Words that went to a Session whose turn ended asking, and did not arrive.
+
+        The attempt **proved** it did not arrive, so the words wait for the next
+        window — the one way a Relay can be both retriable and carrying ADR
+        0013's clause.
+        """
+        harness = Harness(
+            window=ReplyWindow.OPEN,
+            agent=FakeAgent(
+                routes=frozenset(RelayRoute), outcome=Delivery.FAILED, reason="the far side refused"
+            ),
+        )
+        codex_ended_asking(harness)
+        return harness
+
+    def test_the_queued_relay_remembers_it(self) -> None:
+        harness = self.waiting_on_a_said_question()
+
+        outcome = harness.relay("main")
+
+        assert outcome.state is Lifecycle.RETAINED
+        assert outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION
+        (waiting,) = harness.relays.pending()
+        assert waiting.authority is RelayAuthority.WORDS_ON_A_QUESTION
+
+    def test_the_flush_at_the_next_window_still_carries_the_clause(self) -> None:
+        harness = self.waiting_on_a_said_question()
+        harness.relay("main")
+        harness.agent.outcome = Delivery.DELIVERED
+
+        (outcome,) = harness.window_opened()
+
+        assert outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION
+        assert NO_AUTHORITY_CLAUSE in receipt_sentence(outcome)
+
+    def test_a_session_that_ends_under_them_carries_it_too(self) -> None:
+        harness = self.waiting_on_a_said_question()
+        harness.relay("main")
+
+        (outcome,) = harness.pipeline.session_ended(CODEX)
+
+        assert outcome.authority is RelayAuthority.WORDS_ON_A_QUESTION

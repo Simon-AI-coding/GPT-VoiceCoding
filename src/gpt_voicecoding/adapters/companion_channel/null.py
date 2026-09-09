@@ -8,7 +8,7 @@ expose. So the absence is filled by something that answers both seam verbs
 honestly rather than by nothing at all — configuration names this adapter, and
 the engine can then say what it loaded.
 
-Two answers, and neither of them lies:
+Three answers, and none of them lies:
 
 - `send` returns **FAILED**. `Delivery` is a closed four-state vocabulary and no
   adapter may extend it, so the "not configured" class of outcome is expressed
@@ -18,6 +18,9 @@ Two answers, and neither of them lies:
   Core can never read this as delivered, which is the whole point: a Stop Notice
   that fell into an unconfigured channel must not be recorded as having reached
   anyone.
+- `react` returns **True**. It accepts and does nothing, which is the whole of
+  what the seam asks of a channel with no reactions; see the verb below for why
+  that is not the same shape of answer as `send`'s.
 - `verify` returns **MANUAL** with an empty `loaded`. Empty is the module string
   ADR 0003 reserves for exactly this, and `MANUAL` is the outcome for a question
   the check cannot answer: nothing is configured, so there is no far side to
@@ -62,14 +65,29 @@ class NullCompanionChannel:
         revises: tuple[str, ...] = (),
         notice: Notice | None = None,
         reply_bar: str = "",
+        reply_to: str = "",
     ) -> ChannelReceipt:
         """Report the truth: there was nowhere to send it, so it landed under no id.
 
         A structured brief changes nothing here: there is no surface to lay it
         out on, and the text beside it is the same words (ADR 0021 §5). Nor does
-        a reply bar: there is no bar to open and nobody to type into it.
+        a reply bar: there is no bar to open and nobody to type into it. Nor
+        does `reply_to`: this channel raises no message the user could have
+        sent, so there is nothing here to hang a reply under.
         """
         return ChannelReceipt(request_id=request_id, outcome=Delivery.FAILED, reason=NOT_CONFIGURED)
+
+    async def react(self, message_id: str, reaction: str | None) -> bool:
+        """Accept the reaction and do nothing with it — the honest answer here.
+
+        `True` rather than `False`, and it is not the lie `send`'s FAILED would
+        be: nothing on this channel ever *has* a message id, because it raises no
+        `InboundText` and so Core never learns of a message the user sent. There
+        is no id this can be called with that names something a reaction was
+        expected on, and a `False` would send the caller's fallback sentence
+        into a `send` that already reports it reached nobody.
+        """
+        return True
 
     async def verify(self) -> VerifyResult:
         """Report the null implementation as itself — the empty module string."""

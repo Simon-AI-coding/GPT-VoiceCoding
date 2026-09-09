@@ -3,9 +3,16 @@
 ADR 0021 §5: Core fills the brief and chooses every word in it; this module
 arranges those words and chooses none. What it adds is **symbols and markup**
 only — one state light per `BriefState`, the numbering of the option labels,
-and two entities: the question in bold and the original folded in an
-`expandable_blockquote`. Nothing here is a sentence the user reads that Core
-did not write.
+the two marks that stand for words left out, and two entities: the question in
+bold and the original folded in an `expandable_blockquote`. Nothing here is a
+sentence the user reads that Core did not write.
+
+**Two acts cut this surface's text, at opposite ends of the same message.** The
+fold gives way at the *back* to keep the notice inside the API's cap. The tail
+takes the *front* of what a preview shows and puts the **end** of a prose
+question's message there, because every preview surface cuts from the front and
+the ask lands at the end (`_tail`, #324). One is the API's limit and the other
+is the notification's; neither is a number anybody chose.
 
 **Plain text plus `entities`, never MarkdownV2.** MarkdownV2's eighteen-character
 escape list applies inside blockquote bodies too, and every escaping bug shows
@@ -17,7 +24,8 @@ Offsets and lengths are in UTF-16 code units, which is the API's ruler
 (`utf16_length`).
 
 **A notice is one message.** The headline — light, state word, agent, name,
-question, options, recommendation, and the lines below the fold — is never cut.
+question or tail, options, recommendation, and the lines below the fold — is
+never cut.
 The original is cut to what remains of `MESSAGE_LIMIT_UTF16_UNITS`, preferring
 the last line break, then the last space (`split_message`'s rule), and the fold
 then ends with the marker Core put on the brief (`cut_marker`), so the cut is
@@ -47,6 +55,7 @@ from typing import Final
 from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
     DEFAULT_BUTTON_LABEL_WIDTH,
     MESSAGE_LIMIT_UTF16_UNITS,
+    PREVIEW_WINDOW_UTF16_UNITS,
 )
 from gpt_voicecoding.seams.companion_channel import (
     BriefState,
@@ -77,6 +86,16 @@ EXPANDABLE_BLOCKQUOTE: Final = "expandable_blockquote"
 #: on the notice line, and the button only has to be recognisable as it.
 CUT_MARK: Final = "…"
 
+#: What opens the tail of a prose question — the editorial convention for "words
+#: are missing here", two characters wider than a bare ellipsis and that much
+#: harder to read as the message's own punctuation (Simon, 2026-09-10). A
+#: symbol, like the button's cut mark, which is why it lives here and not in
+#: Core's wording table: this module adds symbols and markup and no words. The
+#: fold's own marker is a sentence Core wrote for the place a surface *ended* a
+#: text; the tail is the other end of the same message, one screen below its
+#: own fold, and says so in punctuation.
+TAIL_MARK: Final = "[…]"
+
 
 def utf16_length(text: str) -> int:
     """How long Telegram thinks this string is. `len()` is the wrong ruler.
@@ -87,6 +106,11 @@ def utf16_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _width(character: str) -> int:
+    """What one code point costs on the API's ruler. The one place the rule is written."""
+    return 2 if ord(character) > 0xFFFF else 1
+
+
 def prefix_within(text: str, limit: int) -> int:
     """How many characters fit, counted the way the API counts them.
 
@@ -94,11 +118,24 @@ def prefix_within(text: str, limit: int) -> int:
     """
     units = 0
     for index, character in enumerate(text):
-        width = 2 if ord(character) > 0xFFFF else 1
-        if units + width > limit:
+        if units + _width(character) > limit:
             return index
-        units += width
+        units += _width(character)
     return len(text)
+
+
+def suffix_within(text: str, limit: int) -> int:
+    """Where the last `limit` code units begin, counted the way the API counts them.
+
+    `prefix_within` read backwards, and for the same reason: walking code points
+    from the end means a surrogate pair is never split down the middle.
+    """
+    units = 0
+    for index in range(len(text) - 1, -1, -1):
+        if units + _width(text[index]) > limit:
+            return index + 1
+        units += _width(text[index])
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,13 +278,22 @@ def _position(index: int, options: Sequence[str]) -> str:
 
 
 def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
-    """Headline, question block, fold, footer — and the fold is what gives way."""
+    """Headline, question block or tail, fold, footer — and the fold is what gives way."""
     head = [
         f"{STATE_LIGHT[notice.state]} {notice.state_word}",
         f"{notice.agent}{SEPARATOR}{notice.name}",
         "",
     ]
     entities: list[dict[str, object]] = []
+    # What the tail was given and did not spend. **The fold gives way to the
+    # tail's window, not to its length**, so the budget below comes out at the
+    # cap less the preview window however the tail's cut fell and whatever the
+    # state line says — and the `handled` edit, which shortens the state word
+    # and can therefore lengthen the tail by a whole line, leaves the fold
+    # exactly as it was sent (ADR 0021 §8, Simon 2026-09-10). Zero on every
+    # notice that lays out no tail, which is every notice this ticket did not
+    # touch.
+    reserved = 0
     if notice.question:
         head.append(notice.question)
         entities.append(_entity(BOLD, before="\n".join(head[:-1]) + "\n", covers=notice.question))
@@ -255,6 +301,15 @@ def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
         if notice.recommendation:
             head.append(notice.recommendation)
         head.append("")
+    elif notice.state is BriefState.DECISION:
+        headline = "\n".join(head) + "\n"
+        window = PREVIEW_WINDOW_UTF16_UNITS - utf16_length(headline)
+        tail = _tail(notice.newest, window=window)
+        if tail:
+            head.append(tail)
+            entities.append(_entity(BOLD, before=headline, covers=tail))
+            head.append("")
+            reserved = window - utf16_length(tail)
     above = "\n".join(head) + "\n"
 
     below_lines = []
@@ -262,7 +317,7 @@ def _session(notice: SessionNotice, *, limit: int) -> LaidOut:
         below_lines.append(notice.answer_wording)
     below = "".join(f"\n{line}" for line in below_lines)
 
-    budget = limit - utf16_length(above) - utf16_length(below)
+    budget = limit - utf16_length(above) - utf16_length(below) - reserved
     fold = _fitted(notice.newest, notice.cut_marker, budget)
     if fold:
         entities.append(_entity(EXPANDABLE_BLOCKQUOTE, before=above, covers=fold))
@@ -297,6 +352,54 @@ def _fitted(original: str, marker: str, budget: int) -> str:
     cut = window[:boundary] if boundary > 0 else window
     kept = cut.rstrip()
     return f"{kept}\n{marker}" if kept else marker
+
+
+def _tail(newest: str, *, window: int) -> str:
+    """The ending of the newest message, for the preview that cuts from its front.
+
+    **A prose question is a `DECISION` notice with an empty question slot**, and
+    that is the whole test — Core adds no flag and this module reads no prose
+    (#324). What it shows is not the question but the *end* of the message, on
+    the measured fact that the end is where the ask lands: the notice locates
+    nothing, so nothing here can locate it wrongly, and no option is offered,
+    because a menu parsed out of prose would route the user's choice to the
+    wrong answer.
+
+    **The window is computed, never chosen**: what the preview shows, less the
+    headline this layout has already built. `_fitted`'s cut, mirrored — the
+    first line break inside the window, else the first space, else the character
+    boundary — so the tail opens on a whole line wherever the window holds one,
+    and the mark and the space after it are paid for out of the same window.
+
+    **Laid out against the headline as it reads at that moment**, which is what
+    makes the `handled` edit honest rather than frozen (ADR 0021 §8): the closed
+    word is shorter, so the edit leaves more room and may show more run-up. It
+    can show no less and no other ending — both tails are suffixes of the same
+    message, taken from the same end. The fold is untouched by any of it because
+    `_session` reserves the whole window for this block rather than the tail's
+    own length: a wider window can swallow a whole earlier line and grow the
+    tail by far more than the state word gave up, which would otherwise take
+    that difference out of the fold.
+
+    **No tail where it would say nothing new.** A message the preview already
+    shows whole gets none, or the user would read the same words twice in one
+    screen; a headline that fills the preview by itself gets none, and its
+    fold's budget is untouched. A window whose only break is its last character
+    gets none rather than a lone mark: a mark with nothing after it is an
+    ending nobody can read.
+    """
+    if window <= 0 or utf16_length(newest) <= window:
+        return ""
+    room = window - utf16_length(TAIL_MARK) - 1
+    if room <= 0:
+        return ""
+    inside = newest[suffix_within(newest, room) :]
+    boundary = inside.find("\n")
+    if boundary < 0:
+        boundary = inside.find(" ")
+    kept = inside[boundary + 1 :] if boundary >= 0 else inside
+    kept = kept.lstrip()
+    return f"{TAIL_MARK} {kept}" if kept else ""
 
 
 def _entity(kind: str, *, before: str, covers: str) -> dict[str, object]:

@@ -20,7 +20,7 @@ import json
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -49,7 +49,13 @@ from gpt_voicecoding.adapters.companion_channel.telegram.adapter import (
     COMMAND_MENU,
     MENU_ATTEMPTS,
 )
-from gpt_voicecoding.adapters.companion_channel.telegram.layout import keyboard
+from gpt_voicecoding.adapters.companion_channel.telegram.layout import (
+    TAIL_MARK,
+    keyboard,
+)
+from gpt_voicecoding.adapters.companion_channel.telegram.settings import (
+    PREVIEW_WINDOW_UTF16_UNITS,
+)
 from gpt_voicecoding.config import NULL_COMPANION_CHANNEL
 from gpt_voicecoding.core.briefing import (
     ASSISTANT_REPLY_PLACEHOLDER,
@@ -510,6 +516,28 @@ def notice(**overrides: Any) -> SessionNotice:
     return SessionNotice(**table)
 
 
+#: The corpus's dominant prose-question shape: a long body, then a recommendation
+#: line, then the ask — the ending is what the user needs and the beginning is
+#: what a preview shows.
+CORPUS = (
+    "我看了 layout.py 和 bridge.py，情况是这样的：\n" + "细节说明。" * 60 + "\n"
+    "❓ Q2 §8 的 handled 编辑要不要覆盖散文提问？\n"
+    "➡️ 我建议覆盖，否则从 Telegram 回答过的问题会一直亮 🟡。\n"
+    "你选哪个？"
+)
+
+
+def prose_notice(**overrides: Any) -> SessionNotice:
+    """A Session that ended its turn on a question it typed, with no structured ask."""
+    return notice(question="", options=(), recommendation="", **overrides)
+
+
+def _three_blocks(text: str) -> tuple[str, str, str]:
+    """The laid-out text split on its two blank lines: headline, tail, fold."""
+    head, tail_block, fold = text.split("\n\n", 2)
+    return head, tail_block, fold
+
+
 def entity(laid_out, kind: str) -> str:
     """The text one entity covers, read back through the UTF-16 offsets it names."""
     (found,) = [e for e in laid_out.entities if e["type"] == kind]
@@ -711,6 +739,208 @@ class TestCuttingTheOriginalToOneMessage:
         assert lines[-1] == "sessions: 300 running"
         assert lines[0].endswith("task 000 · claude · running")
         assert 0 < len(lines) - 1 < 300
+
+
+class TestTheTailOfAProseQuestion:
+    """A question asked in prose is shown by its ending, ahead of the fold (#324).
+
+    Every preview surface cuts a message from the **front** — Telegram Desktop's
+    `notificationText()` at 255 characters, Android's collapsed shade, iOS's
+    push body — and drops the blockquote entity while keeping its text. So a
+    Session that ends its turn on a prose question, whose notice carries no
+    question slot to put in the headline, used to announce a decision the
+    preview never showed: the ask sits at the end of the message and the
+    preview showed its beginning. The tail puts the ending inside the window
+    the preview reads. The adapter still locates nothing and phrases nothing —
+    it takes the last characters that fit and opens them with an omission mark.
+    """
+
+    def test_a_prose_question_shows_the_end_of_its_message_above_the_fold(self) -> None:
+        laid_out = lay_out(prose_notice(newest=CORPUS))
+
+        head, tail_block, fold = _three_blocks(laid_out.text)
+        assert head == "🟡 waiting for your decision\ncodex · gpt-voicecoding · port the log"
+        assert tail_block.startswith(f"{TAIL_MARK} ")
+        assert tail_block.endswith("你选哪个？")
+        assert entity(laid_out, "bold") == tail_block
+        assert entity(laid_out, "expandable_blockquote") == fold
+
+    def test_a_terminal_only_prose_question_still_says_so_under_the_fold(self) -> None:
+        """The footer keeps its place: headline, tail, fold, then the answer line."""
+        laid_out = lay_out(
+            prose_notice(
+                newest=CORPUS, answerable_here=False, answer_wording="answer at the terminal"
+            )
+        )
+
+        assert laid_out.text.endswith("\nanswer at the terminal")
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        assert [e["type"] for e in laid_out.entities] == ["bold", "expandable_blockquote"]
+
+    def test_the_tail_carries_the_recommendation_line_and_the_closing_ask(self) -> None:
+        """The corpus's dominant shape: a grilling turn ending `➡️ 建议 …` then `你选哪个？`."""
+        tail = entity(lay_out(prose_notice(newest=CORPUS)), "bold")
+
+        assert "➡️ 我建议覆盖，否则从 Telegram 回答过的问题会一直亮 🟡。" in tail
+        assert tail.endswith("你选哪个？")
+
+    def test_the_tail_is_a_slice_of_the_newest_message_and_nothing_else(self) -> None:
+        tail = entity(lay_out(prose_notice(newest=CORPUS)), "bold")
+
+        assert tail.removeprefix(f"{TAIL_MARK} ") in CORPUS
+
+    def test_the_headline_and_the_tail_together_fit_the_preview_window(self) -> None:
+        laid_out = lay_out(prose_notice(newest=CORPUS))
+
+        head, tail_block, _ = _three_blocks(laid_out.text)
+        assert utf16_length(f"{head}\n\n{tail_block}") <= PREVIEW_WINDOW_UTF16_UNITS
+
+    def test_the_tail_opens_at_a_line_break_where_the_window_holds_one(self) -> None:
+        lines = "\n".join(f"line {n:03d} is here" for n in range(100))
+
+        tail = entity(lay_out(prose_notice(newest=lines)), "bold")
+
+        assert tail.removeprefix(f"{TAIL_MARK} ").startswith("line "), (
+            "the tail opened mid-line rather than at a line break"
+        )
+
+    def test_the_tail_opens_at_a_space_when_the_window_holds_no_line_break(self) -> None:
+        tail = entity(lay_out(prose_notice(newest="alpha bravo " * 60)), "bold")
+
+        kept = tail.removeprefix(f"{TAIL_MARK} ")
+        assert kept.startswith(("alpha", "bravo"))
+        assert kept in "alpha bravo " * 60
+
+    def test_the_tail_falls_back_to_the_character_boundary(self) -> None:
+        """Chinese prose has neither line breaks nor spaces; the window still yields a tail."""
+        original = "这是一段没有空格也没有换行的中文说明。" * 30
+
+        tail = entity(lay_out(prose_notice(newest=original)), "bold")
+
+        assert tail.removeprefix(f"{TAIL_MARK} ") in original
+        assert tail.endswith("。")
+
+    def test_no_surrogate_pair_is_split_by_the_tails_cut(self) -> None:
+        laid_out = lay_out(prose_notice(newest="\N{GRINNING FACE}" * 400))
+
+        laid_out.text.encode("utf-16", "strict")
+        assert utf16_length(entity(laid_out, "bold")) <= PREVIEW_WINDOW_UTF16_UNITS
+
+    def test_a_message_the_preview_already_shows_whole_gets_no_tail(self) -> None:
+        """No tail when it would say nothing new — and never the same words twice."""
+        laid_out = lay_out(prose_notice(newest="Can I commit the ADR?"))
+
+        assert TAIL_MARK not in laid_out.text
+        assert [e["type"] for e in laid_out.entities] == ["expandable_blockquote"]
+        assert laid_out.text.count("Can I commit the ADR?") == 1
+
+    def test_a_headline_that_fills_the_preview_window_leaves_no_tail(self) -> None:
+        """A zero or negative window is no tail and no negative budget."""
+        laid_out = lay_out(prose_notice(name="n" * PREVIEW_WINDOW_UTF16_UNITS, newest=CORPUS))
+
+        assert TAIL_MARK not in laid_out.text
+        assert [e["type"] for e in laid_out.entities] == ["expandable_blockquote"]
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+
+    def test_an_unread_newest_message_gets_no_tail(self) -> None:
+        """`not read` is Core naming an omission, not a turn's words to show the end of."""
+        laid_out = lay_out(prose_notice(newest="could not be read: no registry record for its pid"))
+
+        assert TAIL_MARK not in laid_out.text
+
+    def test_a_window_opening_inside_a_fence_is_plain_text_under_the_bold_entity(self) -> None:
+        original = "```python\n" + "print('x')\n" * 40 + "```\n所以要不要合并？"
+
+        laid_out = lay_out(prose_notice(newest=original))
+
+        assert entity(laid_out, "bold").endswith("所以要不要合并？")
+        assert [e["type"] for e in laid_out.entities] == ["bold", "expandable_blockquote"]
+
+    def test_the_fold_under_a_tail_still_gives_way_and_the_tail_never_does(self) -> None:
+        laid_out = lay_out(prose_notice(newest="word " * 2000))
+
+        assert utf16_length(laid_out.text) <= MESSAGE_LIMIT_UTF16_UNITS
+        assert entity(laid_out, "expandable_blockquote").endswith("\n" + MARKER)
+        assert entity(laid_out, "bold").startswith(f"{TAIL_MARK} word")
+
+    def test_a_prose_question_draws_no_buttons_and_offers_no_numerals(self) -> None:
+        laid_out = lay_out(prose_notice(newest=CORPUS))
+
+        assert laid_out.reply_markup is None
+
+    def test_the_closed_notice_ends_on_the_characters_it_was_sent_with(self) -> None:
+        """More run-up, never less, and never a different ending (Simon, 2026-09-10).
+
+        The tail is laid out against the headline **as it reads at that moment**,
+        and the closed word is shorter than the word it replaces, so the edit
+        leaves more room and may spend it on more of the message. It can never
+        show less and never a different ending: both tails are suffixes of the
+        same message, taken from the same end. The window is a fact about a
+        message being *pushed*, and an edit notifies nobody (ADR 0021 §8), so the
+        closed record has no preview to fit inside.
+        """
+        open_notice = prose_notice(newest="这是一段没有空格的说明。" * 45)
+        sent = entity(lay_out(open_notice), "bold").removeprefix(f"{TAIL_MARK} ")
+
+        closed = lay_out(replace(open_notice, state_word="handled", options=()))
+
+        kept = entity(closed, "bold").removeprefix(f"{TAIL_MARK} ")
+        assert kept.endswith(sent)
+        assert utf16_length(kept) >= utf16_length(sent)
+        assert closed.text.startswith("🟡 handled\n")
+
+    def test_the_closed_notice_takes_nothing_from_the_fold(self) -> None:
+        """The fold gives way to the tail's *window*, so neither the state word nor
+        where the tail's cut fell can move it.
+
+        Lines of differing lengths, because that is the shape that breaks the
+        arithmetic the other way round: the closed word frees 18 units, the wider
+        window swallows a whole earlier line, and a tail that grows by 87 would
+        take 69 out of a fold already at the cap. Reserving the window rather
+        than the tail's length is what makes the edited fold the sent one.
+        """
+        newest = "\n".join("x" * (53 + (n * 13) % 97) for n in range(400))
+        open_notice = prose_notice(newest=newest)
+        sent = lay_out(open_notice)
+
+        closed = lay_out(replace(open_notice, state_word="handled", options=()))
+
+        assert utf16_length(entity(closed, "bold")) > utf16_length(entity(sent, "bold"))
+        assert entity(closed, "expandable_blockquote") == entity(sent, "expandable_blockquote")
+        assert entity(closed, "expandable_blockquote").endswith("\n" + MARKER)
+        assert utf16_length(closed.text) <= MESSAGE_LIMIT_UTF16_UNITS
+
+    def test_a_structured_question_is_laid_out_as_it_was_before(self) -> None:
+        laid_out = lay_out(notice(newest=CORPUS))
+
+        assert TAIL_MARK not in laid_out.text
+        assert entity(laid_out, "bold") == "Which base?"
+
+    def test_a_permission_notice_is_laid_out_as_it_was_before(self) -> None:
+        laid_out = lay_out(
+            notice(
+                state=BriefState.PERMISSION,
+                state_word="waiting for permission",
+                question="allow rm -rf build?",
+                options=("allow", "deny"),
+                recommendation="",
+                newest=CORPUS,
+            )
+        )
+
+        assert TAIL_MARK not in laid_out.text
+        assert entity(laid_out, "bold") == "allow rm -rf build?"
+
+    @pytest.mark.parametrize(
+        "state",
+        [BriefState.FINISHED, BriefState.WAITING_ON, BriefState.RUNNING],
+    )
+    def test_a_notice_that_asks_nothing_gets_no_tail(self, state: BriefState) -> None:
+        """Only a state that asks the user is a prose question; the rest are unchanged."""
+        laid_out = lay_out(prose_notice(state=state, state_word=str(state), newest=CORPUS))
+
+        assert TAIL_MARK not in laid_out.text
+        assert [e["type"] for e in laid_out.entities] == ["expandable_blockquote"]
 
 
 class TestPushingOneMessage:

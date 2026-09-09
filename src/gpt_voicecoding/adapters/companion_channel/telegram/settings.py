@@ -20,7 +20,8 @@ way to state one fact, with no deployment asking for it, is a dormant parameter.
 
 The message cap is not configurable. 4096 UTF-16 code units is the API's own
 limit, so a key for it would be a "decision" with one workable value, which is
-mechanism identity rather than a choice.
+mechanism identity rather than a choice. The preview window is the same kind of
+fact and gets the same treatment.
 """
 
 from __future__ import annotations
@@ -49,6 +50,20 @@ DEFAULT_RETRY_SECONDS = 5.0
 #: The API's own per-message cap, counted in UTF-16 code units — which is why
 #: `len()` is the wrong ruler and an emoji costs two.
 MESSAGE_LIMIT_UTF16_UNITS = 4096
+
+#: How much of a message's **beginning** a preview surface shows, in UTF-16 code
+#: units — the push banner, the chat-list line and the collapsed shade. A
+#: Telegram fact of the same kind as the message cap, read off the three
+#: clients: Telegram Desktop's `notificationText()` returns the message text
+#: unmodified and cuts it at 255 characters; Android's `NotificationsController`
+#: returns the raw message with only spoilers masked, one line in the collapsed
+#: shade; iOS takes the body verbatim from the push payload. All three drop the
+#: `expandable_blockquote` **entity** and keep its text, so what hides a
+#: question is position and never the fold. This is why a notice that asks in
+#: prose lays the ending of its message inside this window (#324, ADR 0021 §5).
+#: Not configurable, for the reason the message cap is not: it is Telegram's
+#: number, not a decision anyone here makes.
+PREVIEW_WINDOW_UTF16_UNITS = 255
 
 #: How wide a button's label may be, in UTF-16 code units, and how wide one
 #: row of buttons is: a label past it is cut on the button (whole on the

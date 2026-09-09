@@ -132,9 +132,11 @@ STOP_GRACE_SECONDS = 10.0
 #:
 #: A pty on fds 0/1/2 is a terminal the child can read and write; it is not the
 #: child's **controlling** terminal, and `ps -o tty=` names only the latter. The
-#: engine's Codex roster is built on that column — `processes._interactive_pids`
-#: skips a `??` row by #144's rule, and ADR 0020 defines the vouching terminal as
-#: "a live interactive `codex` with a controlling terminal" — so a harness that
+#: engine's Codex roster is built on that column — `processes._candidate_pids`
+#: carries a `??` row and `roster.compose` lets it vouch only for a root no live
+#: terminal vouches for (#144's rule, as #319 relocated it), and ADR 0020 defines
+#: the vouching terminal as "a live interactive `codex` with a controlling
+#: terminal" — so a harness that
 #: only opened a pty started a Session the product was right not to list. That is
 #: what run `20260902T041923Z` measured as a red `roster` step (#208), against a
 #: composition rule that was correct.

@@ -15,7 +15,7 @@ from gpt_voicecoding.adapters.agent.codex.processes import (
     START_TIME_RESOLUTION_SECONDS,
     Candidate,
     elapsed_seconds,
-    enumerate_sessions,
+    enumerate_runs,
     is_interactive,
     session_id_from_argv,
 )
@@ -99,7 +99,7 @@ class TestReadingTheProcessTable:
 
     def found(self, listing: str, cwds: dict[int, str]) -> tuple[Candidate, ...]:
         return asyncio.run(
-            enumerate_sessions(run=self.build(listing, cwds), now=lambda: NOW)  # type: ignore[arg-type]
+            enumerate_runs(run=self.build(listing, cwds), now=lambda: NOW)  # type: ignore[arg-type]
         )
 
     def test_a_session_is_reported_by_pid_workspace_and_start_time(self) -> None:
@@ -144,7 +144,7 @@ class TestReadingTheProcessTable:
         )
 
         rows = asyncio.run(
-            enumerate_sessions(
+            enumerate_runs(
                 run=self.build(listing, {101: "/tmp/one", 102: "/tmp/two"}),  # type: ignore[arg-type]
                 now=lambda: next(ticking),
             )
@@ -184,7 +184,7 @@ class TestReadingTheProcessTable:
             return "p101\nfcwd\nn/tmp/workspace\n"
 
         rows = asyncio.run(
-            enumerate_sessions(run=run, now=lambda: reading[0])  # type: ignore[arg-type]
+            enumerate_runs(run=run, now=lambda: reading[0])  # type: ignore[arg-type]
         )
 
         started = rows[0].started_at
@@ -207,8 +207,14 @@ class TestReadingTheProcessTable:
     def test_a_fork_uuid_names_the_source_not_the_new_session(self) -> None:
         assert session_id_from_argv([CODEX, "fork", THREAD]) is None
 
-    def test_only_a_process_with_a_controlling_terminal_is_a_session(self) -> None:
-        """The detached shape captured by #144 is not a live interactive run."""
+    def test_a_process_with_no_controlling_terminal_is_carried_and_not_dropped(self) -> None:
+        """#144's detached shape reaches the caller now, marked (#319).
+
+        It used to be refused here. Refusing it *here* meant nobody upstream
+        could tell a run nobody can type into from a run that does not exist,
+        and the tier is Bridge Core's one rule for both lanes (ADR 0020 as
+        amended). So the evidence travels and the reader decides nothing.
+        """
         listing = "\n".join(
             (
                 f"  101 10 ttys001 00:05 {CODEX}",
@@ -218,7 +224,10 @@ class TestReadingTheProcessTable:
 
         rows = self.found(listing, {101: "/tmp/live", 102: "/tmp/detached"})
 
-        assert [row.pid for row in rows] == [101]
+        assert [(row.pid, row.has_controlling_terminal) for row in rows] == [
+            (101, True),
+            (102, False),
+        ]
 
     def test_the_jobs_beside_it_are_left_out(self) -> None:
         listing = "\n".join(
@@ -250,7 +259,7 @@ class TestReadingTheProcessTable:
             raise OSError("no ps on this machine")
 
         try:
-            asyncio.run(enumerate_sessions(run=run))  # type: ignore[arg-type]
+            asyncio.run(enumerate_runs(run=run))  # type: ignore[arg-type]
         except OSError:
             return
         raise AssertionError("a process table that cannot be read must not read as empty")

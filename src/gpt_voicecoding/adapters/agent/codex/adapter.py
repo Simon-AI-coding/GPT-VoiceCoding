@@ -492,6 +492,12 @@ class CodexAgentAdapter:
                 self._threads.pop(watched.target, None)
                 watched.target = target
                 self._threads[target] = watched
+            # **Discovery is the authority on this fact too** (#319). A Stop
+            # can be raised at any moment between two passes, and the row this
+            # pass composed is the freshest reading of the terminal behind this
+            # thread; carrying it here is what lets `_emit_stopped` report the
+            # tier without reading a process table of its own.
+            watched.has_controlling_terminal = row.has_controlling_terminal
             return
         if watched is not None:
             self._threads.pop(watched.target, None)
@@ -545,6 +551,7 @@ class CodexAgentAdapter:
             socket_path=self._daemon.socket_path or Path(),
             connection=client,
             shared=True,
+            has_controlling_terminal=row.has_controlling_terminal,
         )
         self._threads[target] = watched
         try:
@@ -1231,6 +1238,7 @@ class CodexAgentAdapter:
                 target=watched.target,
                 progress=progress,
                 waiting_for=waiting_for,
+                has_controlling_terminal=watched.has_controlling_terminal,
             )
         )
 

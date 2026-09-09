@@ -377,11 +377,11 @@ def foreign_codex_refusal(
     one case where it is not better.
 
     **A candidate the adapter cannot name a workspace for is not reported**, and
-    that is inherited rather than decided here: `enumerate_sessions` drops a row
+    that is inherited rather than decided here: `enumerate_runs` drops a row
     whose cwd `lsof` will not give up. Reporting it would need the second scanner
     this deliberately does not have.
 
-    **The clock is read once, here, and handed down.** `enumerate_sessions`
+    **The clock is read once, here, and handed down.** `enumerate_runs`
     dates every `etime` against one reading taken before its `ps`; passing that
     same moment in means the elapsed times in the refusal are computed against
     the moment the starts were, and keeps the read on the safe side of the `ps`
@@ -398,7 +398,7 @@ def foreign_codex_refusal(
     """
     sampled_at = now()
     try:
-        live = asyncio.run(codex_processes.enumerate_sessions(run=run, now=lambda: sampled_at))
+        live = asyncio.run(codex_processes.enumerate_runs(run=run, now=lambda: sampled_at))
     except (OSError, TimeoutError) as unreadable:
         return (
             "the process table could not be read, so this run cannot tell whether a Codex "
@@ -406,10 +406,17 @@ def foreign_codex_refusal(
             f"{unreadable!r}"
         )
     owned = acceptance_root().expanduser().resolve(strict=False)
+    # **Only a run that would reach the graded roster is worth refusing over**
+    # (#319). `enumerate_runs` carries a `??` candidate now instead of dropping
+    # it, and a run with no controlling terminal is a Headless Run: it is never
+    # announced and never addressable, so it cannot sit on the roster this walk
+    # is graded on — and refusing a run over one would be this gate stopping a
+    # walk for a process that cannot affect it.
     foreign = [
         candidate
         for candidate in live
-        if not candidate.workspace.expanduser().resolve(strict=False).is_relative_to(owned)
+        if candidate.has_controlling_terminal
+        and not candidate.workspace.expanduser().resolve(strict=False).is_relative_to(owned)
     ]
     if not foreign:
         return None
@@ -429,7 +436,7 @@ def foreign_codex_refusal(
 def _uptime_text(sampled_at: float, started_at: float | None) -> str:
     """How long a Session has been up, in the compact form the refusal reads in.
 
-    **The `None` arm is unreachable today and kept anyway.** `enumerate_sessions`
+    **The `None` arm is unreachable today and kept anyway.** `enumerate_runs`
     drops a row whose `etime` it cannot parse, so nothing it returns is missing a
     start — but `Candidate.started_at` is typed `float | None`, no CI gate type-
     checks (`.github/workflows/ci.yml`), and this is called from a session-scoped

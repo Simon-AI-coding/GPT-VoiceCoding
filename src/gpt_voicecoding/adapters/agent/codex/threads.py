@@ -104,6 +104,14 @@ class WatchedThread:
     #: fact said twice — which is the user asked twice for one decision. A
     #: different dialog, or none, is not this handle and stops as usual.
     stopped_on_dialog: str | None = None
+    #: Whether the terminal that vouched for this thread is a controlling one
+    #: (#319). Carried rather than read here: the fact belongs to the process
+    #: table and the composition rule is what joined it to this thread
+    #: (`codex/roster.py::compose`), so a Stop raised for this thread reports
+    #: what the discovery row that adopted it reported. `None` is a thread
+    #: watched before any row was adopted for it — the honest answer, and the
+    #: one Bridge Core reads as a Session.
+    has_controlling_terminal: bool | None = None
 
     @property
     def thread_id(self) -> str:

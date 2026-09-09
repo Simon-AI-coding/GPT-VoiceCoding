@@ -452,11 +452,17 @@ def roster(sessions: Sequence[Session], focus: SessionTarget | None) -> RosterBr
     `status` still carries it, which is where "appears in the roster" is true.
     The menu-bar panel already counts the user-facing roster this way
     (`shell/Sources/ShellCore/ControlPanel.swift:44`).
+
+    **And neither does a Headless Run** (#319, ADR 0021 §9 as amended). The same
+    gate and the same sentence: a row here is one the user may ask about and
+    reply to, and a run with no controlling terminal is neither. `/sessions`
+    omits it by consuming this brief (`core/menu.py::roster_screen`), so the
+    rule is stated once rather than once per surface.
     """
     rows = tuple(
         _row(session, focus=session.target == focus)
         for session in sessions
-        if session.is_live and session.child.is_main
+        if session.is_addressable
     )
     ordered = tuple(sorted(rows, key=lambda row: not row.focus))
     counts: dict[BriefState, int] = {}

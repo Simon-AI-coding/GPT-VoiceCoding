@@ -49,6 +49,7 @@ from typing import Final
 from gpt_voicecoding.core.errors import (
     ChildSessionError,
     DuplicateSessionError,
+    HeadlessRunError,
     StaleSessionError,
     UnknownSessionError,
 )
@@ -130,6 +131,11 @@ class Session:
     progress: ProgressObservation = field(default_factory=ProgressObservation)
     last_activity: datetime | None = None
     child: ChildClassification = MAIN_SESSION
+    #: Whether a person can type into this run, as the lane read it off the
+    #: process table (`seams/agent.py::SessionInspection`). The one fact the
+    #: tier below is decided from, held here rather than re-derived by every
+    #: reader — and merged rather than taken, by `climbed_to`.
+    has_controlling_terminal: bool | None = None
     #: The last Relay to this Session that finally failed, or `None` when the
     #: user's words have all landed. A field beside the wait and not a state:
     #: it says nothing about what the Session is doing (#197).
@@ -148,6 +154,39 @@ class Session:
     @property
     def is_live(self) -> bool:
         return self.lifecycle is SessionLifecycle.LIVE
+
+    @property
+    def is_headless_run(self) -> bool:
+        """Whether this run is one nobody can type into (#319, ADR 0020 amended).
+
+        **The tier, and Bridge Core's alone.** Both lanes carry the fact and
+        neither reads it: a rule decided here cannot drift into two rules, which
+        is what a lane that silenced its own rows would become.
+
+        `False` is the whole of it. `True` is a Session and so is `None` — a
+        read that could not tell is not a claim that nobody is there, and
+        silencing a real Session is the expensive error where an extra ended
+        line is the cheap one.
+        """
+        return self.has_controlling_terminal is False
+
+    @property
+    def is_addressable(self) -> bool:
+        """Whether the user may be told about this row and reply to it.
+
+        **The one predicate every surface that picks a Session asks**, so the
+        three tiers are read in one place rather than re-spelled at each. An
+        ended row is gone, a Child Process is seen and never spoken to (#68,
+        #79), and a Headless Run is kept and never announced (#319) — three
+        facts, one question, and the question is the one `resolve` answers by
+        raising.
+
+        It is deliberately *not* what `live()` reports. A Headless Run and a
+        Child Process are both still on the roster and still carried by
+        `status`, which is where "appears in the roster" is true; what this
+        decides is whether the user is offered them.
+        """
+        return self.is_live and self.child.is_main and not self.is_headless_run
 
     def observed(
         self,
@@ -181,6 +220,12 @@ class Session:
             state=row.state,
             last_activity=row.last_activity,
             child=row.child,
+            # The third merged field, and merged for the two reasons above said
+            # once more: a read that could not tell never replaces one, and a
+            # terminal that was there once is never taken away (#319).
+            has_controlling_terminal=climbed_to(
+                self.has_controlling_terminal, row.has_controlling_terminal
+            ),
         )
         return updated.with_waiting_for(
             row.waiting_for, waiting=row.state is SessionState.WAITING
@@ -284,6 +329,28 @@ class Session:
         if name is None:
             return (self.name, self.name_rung) if target == self.target else (None, None)
         return name, choice.rung
+
+
+def climbed_to(held: bool | None, seen: bool | None) -> bool | None:
+    """Which controlling-terminal answer to keep when a run has been read twice.
+
+    **It climbs and never falls**, which is #319's two edge cases in one rule:
+
+    - *A reading that could not tell is not an answer*, so `None` never replaces
+      one. A Headless Run whose pid leaves the process table between the lane's
+      own read and the `ps` is read as `None`, and it stays a Headless Run —
+      taking that as "a terminal after all" would announce the end of exactly
+      the run this tier exists to silence.
+    - *A run seen with a terminal stays a Session.* A `claude` whose tty column
+      goes blank on a later pass is a misread of a Session, not a Session that
+      stopped being typeable, and falling would silence it.
+
+    So a run misread as headless climbs the moment a terminal is seen, and is
+    announced from then on — never retroactively, because nothing here replays.
+    """
+    if seen is None or held is True:
+        return held
+    return seen
 
 
 def _better_known(held: SessionTarget, seen: SessionTarget) -> SessionTarget:
@@ -556,6 +623,7 @@ class SessionRegistry:
         if held is None:
             fresh = session_from(row, first_seen=now, policy=self._policy)
             self._sessions[fresh.target] = fresh
+            self._note_tier(None, fresh)
             return fresh
 
         target = _better_known(held.target, row.target)
@@ -566,7 +634,23 @@ class SessionRegistry:
             updated = self._rekeyed(held.target, target, updated)
             del self._sessions[held.target]
         self._sessions[target] = updated
+        self._note_tier(held, updated)
         return updated
+
+    @staticmethod
+    def _note_tier(held: Session | None, updated: Session) -> None:
+        """Say once that a run is a Headless Run, on the reading that decides it.
+
+        **Once per row, on the pass that first reads `False`** — user story 6:
+        a run that produces no push at all is otherwise indistinguishable in
+        `engine.log` from one the engine never saw, and the verdict is the whole
+        explanation of the silence that follows. Repeating it every cadence
+        would bury the run's other lines under one fact that has not changed,
+        and `climbed_to` guarantees the transition happens at most once per row
+        in the falling direction.
+        """
+        if updated.is_headless_run and (held is None or not held.is_headless_run):
+            _log.info("%s is a Headless Run: no controlling terminal", updated.target)
 
     def _same_row(self, row: SessionInspection) -> Session | None:
         """The roster entry this reading is *about*, whatever it happens to name it.
@@ -649,6 +733,12 @@ class SessionRegistry:
             raise StaleSessionError(target, reason=f"that Session is {session.lifecycle}")
         if not session.child.is_main:
             raise ChildSessionError(target, session.child.parent)
+        # **A Headless Run is refused exactly as a Child Process is** (#319):
+        # here, so that `RelayPipeline.relay` refuses before any adapter is
+        # touched, and so that the control plane and the Companion Channel get
+        # one answer rather than each remembering the rule for itself.
+        if session.is_headless_run:
+            raise HeadlessRunError(target)
         return session
 
     def set_state(self, target: SessionTarget, state: SessionState) -> Session:
@@ -688,6 +778,7 @@ class SessionRegistry:
         waiting_for: WaitingFor,
         progress: ProgressObservation,
         now: float,
+        has_controlling_terminal: bool | None = None,
     ) -> Session:
         """Fold the whole reading a Stop carried into that Session's roster row.
 
@@ -750,8 +841,20 @@ class SessionRegistry:
         """
         held = self._held_or_stood_in_for(target, now=now)
         updated = held.with_waiting_for(waiting_for, waiting=True).with_progress(progress)
-        updated = replace(updated, state=updated.waiting_for.stopped_state)
+        updated = replace(
+            updated,
+            state=updated.waiting_for.stopped_state,
+            # **The tier is settled here, before the caller announces anything**
+            # (#319). A Stop can precede every discovery pass, so the row a Stop
+            # stands in for would otherwise be a Session by default and be
+            # announced once before the first pass could correct it — which is
+            # exactly the one push a Headless Run must not produce.
+            has_controlling_terminal=climbed_to(
+                held.has_controlling_terminal, has_controlling_terminal
+            ),
+        )
         self._sessions[held.target] = updated
+        self._note_tier(held, updated)
         return updated
 
     def _held_or_stood_in_for(self, target: SessionTarget, *, now: float) -> Session:
@@ -826,15 +929,31 @@ class SessionRegistry:
         """The roster, in the order the Sessions were first seen."""
         return tuple(held for held in self._sessions.values() if held.is_live)
 
+    def addressable(self) -> tuple[Session, ...]:
+        """The live rows the user may be told about and reply to, in first-seen order.
+
+        **What a surface picking a Session reads, where `live()` is what the
+        roster holds.** The two parted when the roster grew rows that are kept
+        and not offered: a Child Process (#68, #79) and, since #319, a Headless
+        Run. A surface reading `live()` to choose a target offers one of those
+        and is then refused by `resolve` a moment later — or, worse, is not
+        refused, because it chose the only row there was.
+        """
+        return tuple(held for held in self._sessions.values() if held.is_addressable)
+
     def sole_live(self) -> Session | None:
-        """The one main Session on the roster, or None when there are none or several.
+        """The one addressable Session on the roster, or None when there are none or several.
 
         Child Processes are not counted: a Session that spawned a subagent has
         not become two Sessions the user must choose between (#68), and counting
         one would make a roster of one look like a roster of many to every
-        caller that asks this in order to skip an ambiguity.
+        caller that asks this in order to skip an ambiguity. A Headless Run is
+        not counted for the same reason and one more: `spoken_first` reads this,
+        and a roster of one real Session beside one Headless Run would otherwise
+        report two — so the Session the user is owed a word about would only
+        ring (#319).
         """
-        main = [held for held in self.live() if held.child.is_main]
+        main = self.addressable()
         return main[0] if len(main) == 1 else None
 
     def all(self) -> tuple[Session, ...]:

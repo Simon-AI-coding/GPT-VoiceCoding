@@ -611,6 +611,20 @@ class SessionInspection:
     #: having said anything a reader would show, and #76 consumes both.
     last_activity: datetime | None = None
     child: ChildClassification = MAIN_SESSION
+    #: Whether `ps -o tty=` names a controlling terminal for this run: `True`
+    #: when it does, `False` when it reads `??`, and `None` when the read could
+    #: not be taken at all — a pid that left the table between the lane's own
+    #: reading and the `ps`, or a `ps` that failed.
+    #:
+    #: **The lane reports the fact and decides nothing from it** (#319, ADR 0020
+    #: as amended). Which tier a run is in — Session or Headless Run — is Bridge
+    #: Core's (`core/sessions.py`), from this one field, so the two lanes cannot
+    #: drift into two rules about what a person can type into.
+    #:
+    #: `None` is deliberately not `False`. Silencing a real Session is the
+    #: expensive error and an extra ended line is the cheap one, so a read that
+    #: could not tell leaves the run announced.
+    has_controlling_terminal: bool | None = None
     #: Project resolution is unchanged; candidate strings cross untouched.
     project_name: str | None = None
     user_name: str | None = None
@@ -775,6 +789,11 @@ class SessionStopped(Event):
     target: SessionTarget
     progress: ProgressObservation = field(default_factory=ProgressObservation)
     waiting_for: WaitingFor = field(default_factory=WaitingFor)
+    #: The same fact `SessionInspection` carries, and it rides here because a
+    #: Stop can precede every discovery pass (#319): `core/sessions.py::stand_in`
+    #: makes the row when the Stop arrives first, and a row made without this
+    #: would be announced before any pass could say it is a Headless Run.
+    has_controlling_terminal: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

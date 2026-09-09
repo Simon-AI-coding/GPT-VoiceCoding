@@ -61,6 +61,7 @@ from gpt_voicecoding.core.errors import (
     BridgeCoreError,
     CallInstructionsMissing,
     ChildSessionError,
+    HeadlessRunError,
     LaneUnreadable,
     ProgressUnavailable,
     StaleSessionError,
@@ -849,6 +850,11 @@ class BridgeCore:
         session, request = found
         if not session.child.is_main:
             raise ChildSessionError(session.target, session.child.parent)
+        # **And a Headless Run is refused in its own words too** (#319). An
+        # Approval Relay is a Relay, and this path does not go through
+        # `resolve`, so the registry's one rule is asked for here explicitly.
+        if session.is_headless_run:
+            raise HeadlessRunError(session.target)
 
         adapter = self._agents.get(session.target.agent)
         if adapter is None:
@@ -1154,7 +1160,16 @@ class BridgeCore:
             waiting_for=event.waiting_for,
             progress=event.progress,
             now=self._stamp(),
+            has_controlling_terminal=event.has_controlling_terminal,
         )
+        # **A Headless Run stops here, with its reading kept** (#319, ADR 0021
+        # §9 as amended). The row is written first and the tier read off it
+        # afterwards, so a Stop that beat every discovery pass is judged on the
+        # fact it carried rather than on the default a stand-in would otherwise
+        # have. Nothing follows: no Stop Notice, no Anchor, and no wake — a wake
+        # re-briefs a roster this row is not on, so it is work with no consumer.
+        if session.is_headless_run:
+            return
         await self._announce_waiting(
             session,
             event.target,
@@ -1200,6 +1215,12 @@ class BridgeCore:
         of the durable ledgers #67's port table leaves behind, and the rule that
         replaces it is #80's — reconcile the current state and replay nothing.
         """
+        if session.is_headless_run:
+            # **Read off the row, never off the event** (#319). This path is
+            # reached from a Stop and from an outlet transition alike, and only
+            # the row carries what every reading of this run has established.
+            _log.info("%s is a Headless Run, so nothing is announced about it", target)
+            return
         brief = stop_brief(
             session,
             waiting_for,
@@ -1280,7 +1301,7 @@ class BridgeCore:
         row's own classification answers that, because `resolve` refuses an
         ended Session before it reaches the question of whether it was a child.
         """
-        if ended is None or not ended.child.is_main:
+        if ended is None or not ended.child.is_main or ended.is_headless_run:
             return
         await self._push(briefing.ended_line(ended))
 

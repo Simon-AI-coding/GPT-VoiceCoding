@@ -97,6 +97,7 @@ def test_a_record_is_read_into_exactly_what_the_adapter_addresses(tmp_path: Path
     assert found == SessionRecord(
         pid=LIVE_PID,
         session_id="430b0def-38ef-4783-8d57-d800710d83bd",
+        messaging_socket=Path(f"/tmp/cc-socks/{LIVE_PID}.sock"),
         cwd=Path("/Users/someone/work"),
         version="2.1.238",
         status="idle",

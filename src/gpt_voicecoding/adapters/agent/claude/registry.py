@@ -17,9 +17,14 @@ refuse every live Session on the machine the day after an upgrade.
 Static re-probe against 2.1.238 confirmed the registry fields this module
 validates: `pid`, `sessionId`, `cwd`, `version`, `peerProtocol`,
 `messagingSocketPath` and `status`; the live re-probe against 2.1.251 recorded
-below found the same seven, and read a fourth word into `status`. The validated shape is
-retained so retiring its former consumer does not widen the records accepted by
-the remaining Reply Window and Session Launcher paths.
+below found the same seven, and read a fourth word into `status`.
+
+**`messagingSocketPath` is carried rather than validated and dropped.** It was
+parsed for the acceptance contract alone once its last consumer was retired, and
+#278 gave it a consumer again: an engine that restarted holds no `SessionStart`
+report for any Session that started before it, and this record is where that
+Session's inbox address is still written down. Reading a field and discarding it
+is the reader deciding what the caller may know.
 
 **`status` has four words, and the fourth is `idle` under another name**
 (#154). Claude Code rewrites `idle` to `shell` for the pid-file write when a
@@ -159,6 +164,12 @@ class SessionRecord:
 
     pid: int
     session_id: str
+    #: The peer socket this Session listens on, as it wrote the path down. Read
+    #: and never built: Claude Code chooses it inside the Session's own process
+    #: from `CLAUDE_CODE_TMPDIR`, `$XDG_RUNTIME_DIR` or `--messaging-socket-path`,
+    #: so a constructed path is a guess. A record that names none is refused,
+    #: which is the acceptance contract this field has always been parsed under.
+    messaging_socket: Path
     cwd: Path
     version: str
     #: What Claude Code says this Session is doing right now: `idle`, `busy`,
@@ -260,13 +271,10 @@ def _record(path: Path, raw: str, *, expected_pid: int | None) -> SessionRecord:
             f"{PEER_PROTOCOL} only (last re-probed against Claude Code "
             f"{PROVEN_AGAINST_VERSION}) and will not guess at another wire"
         )
-    # Keep the existing record-acceptance contract even though no surviving
-    # consumer needs to store this address.
-    _text(document, "messagingSocketPath", path)
-
     return SessionRecord(
         pid=pid,
         session_id=_text(document, "sessionId", path),
+        messaging_socket=Path(_text(document, "messagingSocketPath", path)),
         cwd=Path(_text(document, "cwd", path, default=str(path.parent))),
         version=_text(document, "version", path, default=""),
         status=_text(document, "status", path, default=""),

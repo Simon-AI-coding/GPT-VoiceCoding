@@ -975,6 +975,7 @@ def a_record(*, pid: int, session_id: str) -> SessionRecord:
     return SessionRecord(
         pid=pid,
         session_id=session_id,
+        messaging_socket=Path(f"/tmp/cc-socks/{pid}.sock"),
         cwd=Path("/a/workspace"),
         version="2.1.238",
         status="idle",

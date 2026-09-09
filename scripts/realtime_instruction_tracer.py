@@ -105,6 +105,7 @@ from gpt_voicecoding.adapters.call.realtime.settings import RealtimeCallSettings
 from gpt_voicecoding.adapters.call.realtime.webrtc import webrtc_transport  # noqa: E402
 from gpt_voicecoding.adapters.codex_app_server.process import OwnedAppServer  # noqa: E402
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings  # noqa: E402
+from gpt_voicecoding.cli.bridgectl import VALUE_FLAGS  # noqa: E402
 from gpt_voicecoding.config import default_socket_path  # noqa: E402
 from gpt_voicecoding.control_plane.commands import (  # noqa: E402
     CommandError,
@@ -118,7 +119,10 @@ from gpt_voicecoding.core.instructions.context import (  # noqa: E402
 )
 from gpt_voicecoding.core.lifecycle import Lifecycle, RelayReason  # noqa: E402
 from gpt_voicecoding.core.relays import receipt_line  # noqa: E402
-from gpt_voicecoding.seams.call import SpokenRosterBrief  # noqa: E402
+from gpt_voicecoding.seams.call import (
+    RETURN_LEG_BUDGET_BYTES,  # noqa: E402
+    SpokenRosterBrief,  # noqa: E402
+)
 from gpt_voicecoding.seams.delivery import Delivery  # noqa: E402
 
 #: Where a run's working files go — the stand-in and its log. Outside the repo:
@@ -379,17 +383,25 @@ from datetime import UTC, datetime
 LOG = {log!r}
 REAL = {real!r}
 STOPPED = {stopped!r}
+VALUE_FLAGS = {value_flags!r}
 RECEIPT = {receipt!r}
 
 
 def action(argv):
-    """The first word that is not a flag or a flag's value. See the generated rules."""
+    """The first word that is not a flag or a flag's value. See the generated rules.
+
+    **Every value-taking flag is skipped with its value**, from the one list the
+    real CLI declares (`VALUE_FLAGS`). Skipping only `--socket` was enough while
+    that was the only one generated; the moment a second appeared, its value was
+    read as the verb — `--reader voice relay ...` looked like a `voice` command,
+    missed STOPPED, and would have carried real words into somebody's Session.
+    """
     skip = False
     for word in argv:
         if skip:
             skip = False
             continue
-        if word == "--socket":
+        if word in VALUE_FLAGS:
             skip = True
             continue
         if word.startswith("-"):
@@ -448,7 +460,13 @@ def install_stand_in(*, real: Path, log: Path) -> Path:
     stand_in = PROBE_DIR / "bin" / "bridgectl"
     stand_in.parent.mkdir(parents=True, exist_ok=True)
     stand_in.write_text(
-        STAND_IN.format(log=str(log), real=str(real), stopped=STOPPED_ACTIONS, receipt=receipt),
+        STAND_IN.format(
+            log=str(log),
+            real=str(real),
+            stopped=STOPPED_ACTIONS,
+            value_flags=VALUE_FLAGS,
+            receipt=receipt,
+        ),
         encoding="utf-8",
     )
     stand_in.chmod(0o755)
@@ -898,6 +916,136 @@ def _carried(turn: Turn) -> str:
     return "**reworked by the Call Agent**"
 
 
+#: codex's two truncation markers, as they appear in text the Voice receives.
+#: The non-streaming item path writes the first (`utils/string/src/truncate.rs`,
+#: `:131-137`); the streaming hand-off path writes the second
+#: (`HANDOVER_STREAM_TRUNCATION_MARKER`, `realtime_conversation.rs:105`). A rule
+#: that keyed off one would miss the other, so both are named (#302 §6).
+TRUNCATION_MARKERS = (
+    re.compile(r"\u2026\d+ tokens truncated\u2026"),
+    re.compile(r"\n\u2026output truncated\u2026\n"),
+)
+
+#: The ordinal and role a rendered History line opens with, as `_history_lines`
+#: writes it: two spaces, the ordinal, the role, a colon.
+HISTORY_LINE = re.compile(r"^ {2}(?P<ordinal>\d+) (?P<role>user|assistant): ", re.MULTILINE)
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnLeg:
+    """One answer the Call Agent handed back, as the Voice received it (#302).
+
+    The leg the engine now boxes. Graded rather than asserted: the engine's fit
+    is unit-tested, and what this says is whether the fit held on a real call —
+    that codex's cut was never reached, and that a page the Voice read was
+    contiguous, so no entry vanished between the engine and the ear.
+    """
+
+    at: datetime
+    text: str
+
+    @property
+    def size_in_bytes(self) -> int:
+        """What codex measures: its own prefix and two newlines, then the answer."""
+        return len(f"{CODEX_RESPONSE_ITEM_PREFIX}\n\n{self.text}".encode())
+
+    @property
+    def marker(self) -> str:
+        """codex's own words for a cut, when one happened. Empty when none did."""
+        for pattern in TRUNCATION_MARKERS:
+            found = pattern.search(self.text)
+            if found:
+                return found.group(0)
+        return ""
+
+    @property
+    def ordinals(self) -> tuple[int, ...]:
+        return tuple(int(row["ordinal"]) for row in HISTORY_LINE.finditer(self.text))
+
+    @property
+    def contiguous(self) -> bool:
+        """Whether a page's ordinals step by one, so nothing went missing in transit.
+
+        Vacuously true of an answer that is not a page: `brief` carries no
+        ordinals, and a criterion that failed on their absence would fail every
+        brief on the call.
+        """
+        ordinals = self.ordinals
+        return all(
+            first - second == 1 for first, second in zip(ordinals, ordinals[1:], strict=False)
+        )
+
+
+def return_legs(recorder: TracingRecorder) -> list[ReturnLeg]:
+    """Every answer the Call Agent finished, which is what crosses the return leg.
+
+    **Read from `agentMessage`, because that is the shape this wire has.** The
+    first version of this looked for a `user` item carrying
+    `CODEX_RESPONSE_ITEM_PREFIX` — the form codex appends to the *Voice's* own
+    conversation — and found nothing at all on the real 0.153.4 records in
+    `docs/research/probes/`: their six `thread/realtime/itemAdded` items are all
+    `handoff_request`, and the Call Agent's replies arrive as `agentMessage`
+    under `item/completed`. A grader that reported "handed nothing back" over a
+    call with twelve of them would be worse than no grader, so this reads the
+    text codex will prefix and then truncate, on the side of the wire that has
+    it.
+
+    `item/completed` rather than `item/started`, so a message is counted once
+    and at its full length; the deltas that build it are ignored.
+    """
+    legs = []
+    for event in recorder.events:
+        if event.get("method") != "item/completed":
+            continue
+        params = event.get("params")
+        if not isinstance(params, dict):
+            continue
+        item = params.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            continue
+        text = str(item.get("text") or "")
+        if text.strip():
+            legs.append(ReturnLeg(at=recorder.at_utc(float(event["at"])), text=text))
+    return legs
+
+
+def _return_leg_lines(legs: list[ReturnLeg]) -> list[str]:
+    """The two criteria #302 is graded on, and the evidence for each."""
+    lines = [
+        "## The return leg, as the Voice received it",
+        "",
+        "The engine fits a marked `history` or `brief` to this line "
+        f"({RETURN_LEG_BUDGET_BYTES} bytes) so codex never cuts it (#302). Two criteria:",
+        "no truncation marker in anything the Voice received, and contiguous ordinals on",
+        "any page it read. Both are graded here rather than asserted in a unit test,",
+        "because only a real call crosses this hop.",
+        "",
+    ]
+    if not legs:
+        lines += ["The Call Agent handed nothing back on this call.", ""]
+        return lines
+
+    cut = [leg for leg in legs if leg.marker]
+    broken = [leg for leg in legs if not leg.contiguous]
+    lines += [
+        f"- **{'FAIL' if cut else 'PASS'}** — no truncation marker: "
+        f"{len(cut)} of {len(legs)} answers carried one.",
+        f"- **{'FAIL' if broken else 'PASS'}** — contiguous ordinals: "
+        f"{len(broken)} of {len(legs)} answers broke the run.",
+        "",
+    ]
+    for leg in legs:
+        size = leg.size_in_bytes
+        over = " **over the ceiling**" if size > RETURN_LEG_BUDGET_BYTES else ""
+        lines.append(f"- **[{_clock(leg.at)}]** {size} bytes{over}, {len(leg.ordinals)} entries")
+        if leg.marker:
+            lines.append(f"  - **cut by codex**: `{leg.marker}`")
+        if not leg.contiguous:
+            lines.append(f"  - **ordinals not contiguous**: {list(leg.ordinals)}")
+    lines.append("")
+    return lines
+
+
 def _block(label: str, body: str, *, empty: str) -> list[str]:
     """One labelled step of the chain. Quoted, so a sentence stays a sentence."""
     if not body.strip():
@@ -1336,6 +1484,8 @@ def timeline(
             f"{sum(1 for role, _ in item.entries if role == 'user')} of them the user's",
         ]
     lines.append("")
+
+    lines += _return_leg_lines(return_legs(recorder))
 
     lines += _cost_lines(cost)
 

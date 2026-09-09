@@ -27,8 +27,15 @@ final class ScriptedControlPlane: ControlPlaneDialing, @unchecked Sendable {
     func requests() -> [String] { lock.withLock { asked } }
 }
 
+/// The version these fixtures declare, read from the shell's own constant rather
+/// than written out. Fourteen replies carried the number literally, so every
+/// protocol bump edited fourteen behaviour tests that are about switches, calls
+/// and seams — and a stale one stayed legal for as long as the client under test
+/// was not the one reading it.
+private let wireProtocol = controlPlaneProtocolVersion
+
 private let allSwitchesOff = """
-    {"ok": true, "action": "status", "protocol": 3, "data": {
+    {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
       "switches": {"duty": false, "voice": false, "message": false, "auto_hangup": false},
       "sessions": [], "call_id": null, "pending_relays": []}}
     """
@@ -58,7 +65,7 @@ private let allSwitchesOff = """
         let engine = ScriptedControlPlane([
             .status: .success(allSwitchesOff),
             .switch: .success(
-                #"{"ok": true, "action": "switch", "protocol": 3, "data": {"name": "auto_hangup", "on": false, "previous": true}}"#
+                #"{"ok": true, "action": "switch", "protocol": \#(wireProtocol), "data": {"name": "auto_hangup", "on": false, "previous": true}}"#
             ),
         ])
         let panel = ControlPanel(client: engine)
@@ -74,7 +81,7 @@ private let allSwitchesOff = """
         let engine = ScriptedControlPlane([
             .status: .success(
                 """
-                {"ok": true, "action": "status", "protocol": 3, "data": {
+                {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
                   "switches": {"duty": true, "voice": false, "message": false,
                                "auto_hangup": true, "sound": true},
                   "sessions": [], "call_id": null, "pending_relays": []}}
@@ -92,7 +99,7 @@ private let allSwitchesOff = """
 
     @Test func aChildProcessFollowsItsParentAndAnUnknownChildIsLast() async {
         let status = """
-            {"ok": true, "action": "status", "protocol": 3, "data": {
+            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
               "switches": {"duty": true, "voice": true, "message": true},
               "sessions": [
                 {
@@ -162,7 +169,7 @@ private let allSwitchesOff = """
 
     @Test func aWaitingRowCarriesWhatItWaitsForAndWhenItLastMoved() async {
         let status = """
-            {"ok": true, "action": "status", "protocol": 3, "data": {
+            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
               "switches": {"duty": true, "voice": true, "message": true},
               "sessions": [
                 {
@@ -259,7 +266,7 @@ private let allSwitchesOff = """
         let engine = ScriptedControlPlane([
             .status: .success(allSwitchesOff),
             .switch: .success(
-                #"{"ok": true, "action": "switch", "protocol": 3, "data": {"name": "duty", "on": true, "previous": false}}"#
+                #"{"ok": true, "action": "switch", "protocol": \#(wireProtocol), "data": {"name": "duty", "on": true, "previous": false}}"#
             ),
         ])
         let panel = ControlPanel(client: engine)
@@ -273,7 +280,7 @@ private let allSwitchesOff = """
         let panel = ControlPanel(
             client: ScriptedControlPlane([
                 .switch: .success(
-                    #"{"ok": false, "action": "switch", "protocol": 3, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
+                    #"{"ok": false, "action": "switch", "protocol": \#(wireProtocol), "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
                 ),
                 .status: .success(allSwitchesOff),
             ]))
@@ -299,7 +306,7 @@ private let allSwitchesOff = """
         let panel = ControlPanel(
             client: ScriptedControlPlane([
                 .switch: .success(
-                    #"{"ok": true, "action": "switch", "protocol": 3, "data": {"name": "duty", "on": true, "previous": false}}"#
+                    #"{"ok": true, "action": "switch", "protocol": \#(wireProtocol), "data": {"name": "duty", "on": true, "previous": false}}"#
                 ),
                 .status: .success(allSwitchesOff),
             ]))
@@ -339,7 +346,7 @@ private let allSwitchesOff = """
         let panel = ControlPanel(
             client: ScriptedControlPlane([
                 .live: .success(
-                    #"{"ok": true, "action": "live", "protocol": 3, "data": {"state": "up", "call_id": "call-1"}}"#
+                    #"{"ok": true, "action": "live", "protocol": \#(wireProtocol), "data": {"state": "up", "call_id": "call-1"}}"#
                 ),
                 .status: .success(allSwitchesOff),
             ]))
@@ -352,7 +359,7 @@ private let allSwitchesOff = """
         let panel = ControlPanel(
             client: ScriptedControlPlane([
                 .live: .success(
-                    #"{"ok": true, "action": "live", "protocol": 3, "data": {"state": "down", "call_id": null}}"#
+                    #"{"ok": true, "action": "live", "protocol": \#(wireProtocol), "data": {"state": "down", "call_id": null}}"#
                 ),
                 .status: .success(allSwitchesOff),
             ]))
@@ -383,7 +390,7 @@ private let allSwitchesOff = """
         // which of start-or-end was happening. That decision is Bridge Core's.
         let engine = ScriptedControlPlane([
             .live: .success(
-                #"{"ok": true, "action": "live", "protocol": 3, "data": {"state": "up", "call_id": "call-1"}}"#
+                #"{"ok": true, "action": "live", "protocol": \#(wireProtocol), "data": {"state": "up", "call_id": "call-1"}}"#
             ),
             .status: .success(allSwitchesOff),
         ])
@@ -399,7 +406,7 @@ private let allSwitchesOff = """
             client: ScriptedControlPlane([
                 .verify: .success(
                     """
-                    {"ok": true, "action": "verify", "protocol": 3, "data": {"seams": [
+                    {"ok": true, "action": "verify", "protocol": \(wireProtocol), "data": {"seams": [
                       {"seam": "call", "outcome": "pass", "configured": "a:b", "loaded": "RealtimeCall", "detail": ""},
                       {"seam": "companion_channel", "outcome": "fail", "configured": "c:d", "loaded": "", "detail": "the far side would not open"}]}}
                     """)
@@ -429,7 +436,7 @@ private let allSwitchesOff = """
         let panel = ControlPanel(
             client: ScriptedControlPlane([
                 .live: .success(
-                    #"{"ok": true, "action": "live", "protocol": 3, "data": {"state": "up", "call_id": "call-1"}}"#
+                    #"{"ok": true, "action": "live", "protocol": \#(wireProtocol), "data": {"state": "up", "call_id": "call-1"}}"#
                 ),
                 .status: .failure(.engineUnreachable("no engine listening on /tmp/x.sock")),
             ]))
@@ -444,7 +451,7 @@ private let allSwitchesOff = """
         // — a surface that preferred its own answer would be holding call state.
         let engine = ScriptedControlPlane([
             .live: .success(
-                #"{"ok": true, "action": "live", "protocol": 3, "data": {"state": "up", "call_id": "call-1"}}"#
+                #"{"ok": true, "action": "live", "protocol": \#(wireProtocol), "data": {"state": "up", "call_id": "call-1"}}"#
             ),
             .status: .success(allSwitchesOff),
         ])

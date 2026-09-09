@@ -22,6 +22,7 @@ import pytest
 
 from fakes import FakeAgent, FakeCall, FakeCompanionChannel, instruction_context
 from gpt_voicecoding.control_plane.actions import ControlPlane
+from gpt_voicecoding.control_plane.commands import render
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.core.bridge import BridgeCore
 from gpt_voicecoding.core.briefing import ASSISTANT_OPENING_LINE, ASSISTANT_UNAVAILABLE_HINT
@@ -49,10 +50,12 @@ from gpt_voicecoding.seams.agent import (
     WaitingFor,
     WaitingKind,
 )
+from gpt_voicecoding.seams.call import RETURN_LEG_BUDGET_BYTES
 from gpt_voicecoding.seams.control_plane import (
     Action,
     ErrorCode,
     MalformedRequest,
+    Reader,
     Reply,
     Request,
 )
@@ -113,8 +116,10 @@ class Surface:
         """What the composition root's own closure does, over the fake Call seam."""
         return await self.call.open_conversation(model="a-model", instructions="the rules")
 
-    def ask(self, action: Action, **payload: object) -> Reply:
-        return asyncio.run(self.plane.handle(Request(action=action, payload=payload)))
+    def ask(self, action: Action, *, reader: Reader | None = None, **payload: object) -> Reply:
+        return asyncio.run(
+            self.plane.handle(Request(action=action, payload=payload, reader=reader))
+        )
 
     def register(self, target: SessionTarget = CODEX) -> Session:
         """Put one Session on the roster.
@@ -1081,6 +1086,432 @@ async def surface_asking_raw(action: str) -> Reply:
     """One line naming an action, read the way the socket reads it."""
     try:
         request = Request.of({"action": action})
+    except MalformedRequest as refused:
+        return Reply.refused(None, refused.code, str(refused))
+    return await Surface().plane.handle(request)
+
+
+class TestTheLiveCallsReturnLeg:
+    """#302: a `history` or `brief` marked for the Voice fits codex's 4,000-byte line.
+
+    The seam a real caller crosses, asserted on what that caller sees — the reply
+    document and its *rendered* text, which is what the Call Agent prints and
+    hands back. Never the JSON envelope: the Voice never sees one.
+    """
+
+    CHINESE = "\u4e00\u4e2a\u5f88\u957f\u7684\u6d88\u606f"
+
+    def page(self, reply: Reply) -> dict[str, object]:
+        """One page without its reading time.
+
+        `read_at` is the moment the lane was read, so two reads never carry the
+        same one. Comparing documents for equality means comparing what the
+        publication chose, and the clock is not that.
+        """
+        return {key: value for key, value in reply.data.items() if key != "read_at"}
+
+    def rendered(self, reply: Reply) -> int:
+        """What the Call Agent hands back, in the bytes codex counts."""
+        return len(render(reply).encode("utf-8"))
+
+    def record(self, said: tuple[str, ...]) -> tuple[ProgressEntry, ...]:
+        return tuple(
+            ProgressEntry(
+                ordinal=index,
+                role=ProgressRole.USER if index % 2 == 0 else ProgressRole.ASSISTANT,
+                text=text,
+            )
+            for index, text in enumerate(said)
+        )
+
+    def surface(self, said: tuple[str, ...], **kwargs: object) -> Surface:
+        surface = Surface(**kwargs)  # type: ignore[arg-type]
+        surface.register()
+        surface.agent.records[CODEX] = self.record(said)
+        return surface
+
+    def briefed(self, *, newest: str, prompt: str = "Which base?") -> Surface:
+        surface = Surface()
+        surface.register()
+        surface.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX,
+                    workspace=WORKSPACE,
+                    state=SessionState.WAITING,
+                    waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt=prompt),
+                    progress=ProgressObservation.readable(
+                        has_history=True,
+                        recent=(
+                            ProgressEntry(ordinal=0, role=ProgressRole.ASSISTANT, text=newest),
+                        ),
+                        read_at=READ_AT,
+                    ),
+                ),
+            )
+        )
+        return surface
+
+    # ---------------------------------------------------------------- history
+
+    def test_a_page_over_the_ceiling_arrives_shorter_with_every_entry_whole(self) -> None:
+        """User stories 1 and 2: shorter rather than cut, and nothing from the middle."""
+        surface = self.surface(tuple(f"{index}: " + "x" * 900 for index in range(6)))
+
+        reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+        entries = reply.data["entries"]
+        assert entries, "a page that dropped everything would say nothing"
+        assert all("omission" not in entry for entry in entries)
+        assert all(entry["text"] == f"{entry['ordinal']}: " + "x" * 900 for entry in entries)
+
+    def test_the_entries_dropped_are_the_oldest_and_the_ordinals_stay_contiguous(self) -> None:
+        """User story 5: the entry before a gap is never taken as the one that followed."""
+        surface = self.surface(tuple(f"{index}: " + "x" * 900 for index in range(6)))
+
+        ordinals = [
+            entry["ordinal"]
+            for entry in surface.ask(
+                Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE
+            ).data["entries"]
+        ]
+
+        assert ordinals == list(range(max(ordinals), min(ordinals) - 1, -1))
+        assert max(ordinals) == 5, "the newest entry is the one that is kept"
+
+    def test_the_cursor_names_the_oldest_entry_still_on_the_page(self) -> None:
+        """User story 3: asking again brings exactly what was left off, none skipped.
+
+        `--before` is an exclusive bound, so naming the oldest *kept* ordinal is
+        what makes the next page start at the first *dropped* one.
+        """
+        surface = self.surface(tuple(f"{index}: " + "x" * 900 for index in range(6)))
+
+        page = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE).data
+        assert page["older"] is True
+        cursor = min(int(entry["ordinal"]) for entry in page["entries"])
+
+        following = surface.ask(
+            Action.HISTORY, target=CODEX_ADDRESS, before=cursor, reader=Reader.VOICE
+        ).data
+
+        assert max(int(entry["ordinal"]) for entry in following["entries"]) == cursor - 1
+
+    def test_an_entry_too_large_for_the_call_keeps_its_slot_by_ordinal_and_role(self) -> None:
+        """User story 4: I know where the gap is and what kind of message it was."""
+        surface = self.surface(("small one", "x" * 5_000, "another small one"))
+
+        reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.data["entries"] == [
+            {"ordinal": 2, "role": "user", "text": "another small one"},
+            {"ordinal": 1, "role": "assistant", "omission": "oversize"},
+            {"ordinal": 0, "role": "user", "text": "small one"},
+        ]
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+        assert "(too large to carry)" in render(reply)
+
+    def test_a_page_of_one_entry_that_is_itself_oversize_is_the_slot_and_the_cursor(self) -> None:
+        surface = self.surface(("x" * 20_000,), page_entries=1)
+
+        reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert reply.data["entries"] == [{"ordinal": 0, "role": "user", "omission": "oversize"}]
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_the_last_entry_left_gives_up_its_text_rather_than_overrun_the_ceiling(self) -> None:
+        """The cursor line grows when the page starts paging, and the fit must survive it.
+
+        An entry can fit a page whose cursor says "that is the whole history"
+        and not the same page once dropping an older entry has turned that line
+        into "older entries remain — ask again with --before N", which is longer.
+        The last entry left has nothing older to give up, so it gives up its own
+        text and keeps its slot. Swept across the boundary rather than asserted
+        at one size, because the overrun was 25 bytes wide.
+        """
+        for size in range(3_600, 3_700):
+            surface = self.surface(("an older one", "x" * size))
+
+            reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+            assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES, (
+                f"a page carrying one {size}-byte entry overran the return leg"
+            )
+
+    def test_a_page_that_already_fits_is_byte_for_byte_the_unmarked_document(self) -> None:
+        surface = self.surface(("a short one", "and another"))
+
+        marked = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+        unmarked = surface.ask(Action.HISTORY, target=CODEX_ADDRESS)
+
+        assert self.page(marked) == self.page(unmarked)
+
+    def test_a_page_of_chinese_crosses_on_bytes_and_is_fitted_the_same_way(self) -> None:
+        """The ceiling is bytes and a character is three of them (#302)."""
+        surface = self.surface(tuple(self.CHINESE * 40 for _ in range(6)))
+
+        reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+        assert all("omission" not in entry for entry in reply.data["entries"])
+        assert all(entry["text"] == self.CHINESE * 40 for entry in reply.data["entries"])
+
+    def test_an_unmarked_page_keeps_every_entry_the_window_selected(self) -> None:
+        """User story 10 and 11: the call's limits never shrink the other surface.
+
+        A differential against the *same* page marked: the marked one is fitted
+        and the unmarked one is not. Comparing an unmarked reply with a second
+        unmarked reply would compare a path with itself and prove nothing.
+        """
+        said = tuple(f"{index}: " + "x" * 900 for index in range(6))
+        unmarked = self.surface(said).ask(Action.HISTORY, target=CODEX_ADDRESS)
+        marked = self.surface(said).ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert [entry["ordinal"] for entry in unmarked.data["entries"]] == [5, 4, 3, 2, 1]
+        assert all("omission" not in entry for entry in unmarked.data["entries"])
+        assert self.rendered(unmarked) > RETURN_LEG_BUDGET_BYTES, "unfitted, as it was"
+        assert len(marked.data["entries"]) < len(unmarked.data["entries"]), "the mark is what fits"
+
+    def test_the_wire_rule_still_binds_a_page_that_fits_the_return_leg(self) -> None:
+        """Both ceilings apply on a marked request, and the tighter one binds."""
+        surface = self.surface(("small one", "x" * 3_000, "another small one"), max_bytes=2_048)
+
+        reply = surface.ask(Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert len(wire(reply)) <= 2_048
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    @staticmethod
+    def carried_whole(reply: Reply) -> bool:
+        """Whether the page's one entry arrived with its text rather than as a slot."""
+        return "text" in reply.data["entries"][0]
+
+    @staticmethod
+    def newest_whole(reply: Reply) -> bool:
+        """Whether the brief still carries its newest message rather than naming it."""
+        return reply.ok and reply.data["session"]["newest"]["state"] != "oversize"
+
+    def largest_whole(self, build, whole=None) -> int:
+        """The biggest body this rendering carries whole, found rather than assumed.
+
+        Searched on *wholeness*, not on fit: every size fits, because that is
+        what the fit is for — past the edge the entry keeps its slot and gives up
+        its text. The edge is therefore the largest body still carried whole, and
+        it depends on labels this test does not own, so it is measured. A
+        hard-coded size would silently stop testing the edge the day a label
+        changed.
+        """
+        whole = whole or self.carried_whole
+        low, high = 1, 8_000
+        while low < high:
+            middle = (low + high + 1) // 2
+            if whole(build(middle)):
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def test_a_page_sits_just_under_exactly_at_and_over_the_ceiling(self) -> None:
+        """The `<=` boundary itself, so an off-by-one on it fails here."""
+
+        def page(size: int) -> Reply:
+            return self.surface(("x" * size,), page_entries=1).ask(
+                Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE
+            )
+
+        edge = self.largest_whole(page)
+
+        # ASCII costs one byte a character, so the edge lands on the ceiling itself.
+        assert self.rendered(page(edge)) == RETURN_LEG_BUDGET_BYTES, "exactly at"
+        assert self.carried_whole(page(edge)), "carried whole at the ceiling"
+        assert self.rendered(page(edge - 1)) == RETURN_LEG_BUDGET_BYTES - 1, "just under"
+        assert self.carried_whole(page(edge - 1))
+        assert page(edge + 1).data["entries"][0]["omission"] == "oversize", "over"
+        assert self.rendered(page(edge + 1)) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_a_chinese_page_sits_on_the_same_boundary_measured_in_bytes(self) -> None:
+        """A character is three bytes, so the edge lands on a third of the count."""
+
+        def page(size: int) -> Reply:
+            return self.surface(("中" * size,), page_entries=1).ask(
+                Action.HISTORY, target=CODEX_ADDRESS, reader=Reader.VOICE
+            )
+
+        edge = self.largest_whole(page)
+
+        # Three bytes a character, so the edge is within three of the ceiling
+        # rather than on it: no whole number of characters lands exactly there.
+        assert self.rendered(page(edge)) > RETURN_LEG_BUDGET_BYTES - 3
+        assert self.rendered(page(edge)) <= RETURN_LEG_BUDGET_BYTES
+        assert page(edge).data["entries"][0]["text"] == "中" * edge
+        assert page(edge + 1).data["entries"][0]["omission"] == "oversize"
+        assert len(("中" * edge).encode("utf-8")) == edge * 3
+
+    # ------------------------------------------------------------------ brief
+
+    def test_a_brief_whose_newest_alone_is_over_the_ceiling_names_it_absent(self) -> None:
+        """User story 7: an absent message is told apart from a Session that said nothing."""
+        surface = self.briefed(newest="x" * 5_000)
+
+        reply = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert reply.data["session"]["newest"] == {"state": "oversize", "text": None}
+        assert reply.data["session"]["decision"]["prompt"] == "Which base?"
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_a_brief_whose_newest_fits_but_whose_whole_does_not_gives_up_the_newest(self) -> None:
+        """The newest message is the only part a brief may give up.
+
+        Sized so the message *alone* is inside the ceiling (3,650 of 3,734) while
+        the brief it sits in is not (3,773) — the case that proves the fit is
+        taken on the whole answer and not on the message.
+        """
+        surface = self.briefed(newest="x" * 3_650)
+
+        reply = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert len(("x" * 3_650).encode("utf-8")) <= RETURN_LEG_BUDGET_BYTES
+        assert reply.data["session"]["newest"] == {"state": "oversize", "text": None}
+        assert reply.data["session"]["decision"]["prompt"] == "Which base?"
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_a_decision_that_alone_does_not_fit_is_refused_whole_never_partly(self) -> None:
+        """User story 6: a decision I am asked to make is never missing its choices."""
+        surface = self.briefed(newest="short", prompt="Which base? " + "y" * 4_000)
+
+        reply = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.error is not None
+        assert reply.error.code is ErrorCode.REFUSED
+        assert "y" * 4_000 not in reply.error.message
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_the_refusal_names_no_session_and_carries_no_free_text(self) -> None:
+        """A Session name has no byte bound, so a refusal that carried one would not either."""
+        surface = self.briefed(newest="short", prompt="Which base? " + "y" * 4_000)
+
+        message = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE).error
+        assert message is not None
+
+        assert str(NAME.project) not in message.message
+        assert str(NAME.task) not in message.message
+        assert len(message.message.encode("utf-8")) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_a_brief_that_already_fits_is_byte_for_byte_the_unmarked_document(self) -> None:
+        surface = self.briefed(newest="it stopped on a question")
+
+        marked = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE)
+        unmarked = surface.ask(Action.BRIEF, target=CODEX_ADDRESS)
+
+        assert marked.data == unmarked.data
+
+    def test_the_roster_brief_is_never_fitted_to_the_return_leg(self) -> None:
+        """User story 9: the overview at the top of a call is complete."""
+        surface = self.briefed(newest="x" * 5_000)
+
+        marked = surface.ask(Action.BRIEF, reader=Reader.VOICE)
+        unmarked = surface.ask(Action.BRIEF)
+
+        assert marked.data == unmarked.data
+        assert marked.data["kind"] == "roster"
+
+    def test_an_unmarked_brief_keeps_its_newest_message_whole(self) -> None:
+        """The Companion Channel keeps what it has today, byte for byte.
+
+        The same differential the page test makes: this brief is over the return
+        leg, the marked one gives up its newest, and the unmarked one does not.
+        """
+        unmarked = self.briefed(newest="x" * 3_650).ask(Action.BRIEF, target=CODEX_ADDRESS)
+        marked = self.briefed(newest="x" * 3_650).ask(
+            Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE
+        )
+
+        assert unmarked.data["session"]["newest"] == {"state": "said", "text": "x" * 3_650}
+        assert self.rendered(unmarked) > RETURN_LEG_BUDGET_BYTES, "unfitted, as it was"
+        assert marked.data["session"]["newest"]["state"] == "oversize"
+
+    def test_a_chinese_brief_crosses_on_bytes_and_gives_up_its_newest(self) -> None:
+        surface = self.briefed(newest=self.CHINESE * 400)
+
+        reply = surface.ask(Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE)
+
+        assert reply.ok
+        assert reply.data["session"]["newest"] == {"state": "oversize", "text": None}
+        assert self.rendered(reply) <= RETURN_LEG_BUDGET_BYTES
+
+    def test_a_brief_sits_just_under_exactly_at_and_over_the_ceiling(self) -> None:
+        """The same three-point boundary the page has, on the other rendering.
+
+        Past the edge a brief gives up its newest message — the only part it may
+        give up — so "over" is the message named absent rather than the brief
+        refused; a decision that alone will not fit is the separate case above.
+        """
+
+        def brief(size: int) -> Reply:
+            return self.briefed(newest="x" * size).ask(
+                Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE
+            )
+
+        edge = self.largest_whole(brief, self.newest_whole)
+
+        assert self.rendered(brief(edge)) == RETURN_LEG_BUDGET_BYTES, "exactly at"
+        assert brief(edge).data["session"]["newest"]["text"] == "x" * edge
+        assert self.rendered(brief(edge - 1)) == RETURN_LEG_BUDGET_BYTES - 1, "just under"
+        assert self.newest_whole(brief(edge - 1))
+        assert brief(edge + 1).data["session"]["newest"] == {"state": "oversize", "text": None}, (
+            "over"
+        )
+        assert self.rendered(brief(edge + 1)) <= RETURN_LEG_BUDGET_BYTES
+        # The part a brief may never give up survives the edge in every direction.
+        for size in (edge - 1, edge, edge + 1):
+            assert brief(size).data["session"]["decision"]["prompt"] == "Which base?"
+
+    def test_a_chinese_brief_sits_on_the_same_boundary_measured_in_bytes(self) -> None:
+        """A character is three bytes here too, so the edge lands within three."""
+
+        def brief(size: int) -> Reply:
+            return self.briefed(newest="中" * size).ask(
+                Action.BRIEF, target=CODEX_ADDRESS, reader=Reader.VOICE
+            )
+
+        edge = self.largest_whole(brief, self.newest_whole)
+
+        assert self.rendered(brief(edge)) > RETURN_LEG_BUDGET_BYTES - 3
+        assert self.rendered(brief(edge)) <= RETURN_LEG_BUDGET_BYTES
+        assert brief(edge).data["session"]["newest"]["text"] == "中" * edge
+        assert brief(edge + 1).data["session"]["newest"]["state"] == "oversize"
+        assert len(("中" * edge).encode("utf-8")) == edge * 3
+
+    # ----------------------------------------------------------------- the mark
+
+    def test_an_unrecognised_reader_is_refused_naming_the_values_there_are(self) -> None:
+        reply = asyncio.run(surface_asking_raw_reader("history", "the-voice"))
+
+        assert reply.error is not None
+        assert reply.error.code is ErrorCode.MALFORMED_REQUEST
+        assert "voice" in reply.error.message
+
+    def test_the_mark_is_carried_and_ignored_on_an_action_that_is_not_a_read(self) -> None:
+        """It rides on `history` and `brief`; every other action is already bounded."""
+        surface = Surface()
+        surface.register()
+
+        marked = surface.ask(Action.STATUS, reader=Reader.VOICE)
+        unmarked = surface.ask(Action.STATUS)
+
+        assert marked.data == unmarked.data
+
+
+async def surface_asking_raw_reader(action: str, reader: str) -> Reply:
+    """One line naming a reader, read the way the socket reads it."""
+    try:
+        request = Request.of({"action": action, "reader": reader})
     except MalformedRequest as refused:
         return Reply.refused(None, refused.code, str(refused))
     return await Surface().plane.handle(request)

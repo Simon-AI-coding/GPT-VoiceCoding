@@ -11,19 +11,38 @@ the encoded Reply's byte limit as a ceiling that omits an entry's text rather
 than its slot. The exact-detail publication that stood between them retired with
 the `progress` action (#171) — the Session Brief carries the newest entry whole
 and a page carries that entry and everything before it.
+
+**Two ceilings, chosen by the wire the reader is on** (#302, ADR 0016 as
+amended). The Control Plane's 65,536 bytes bound every reply, as before. A
+second and much tighter one bounds the Live Call's *return leg* — the line the
+Call Agent's answer crosses on its way to the Voice, where codex cuts anything
+over 4,000 bytes and leaves a marker saying how much went but never which part.
+A `history` or `brief` request is fitted to it only when the request says the
+reader is the Voice; a request that says nothing is answered exactly as it was
+before the field existed, which is what keeps the Companion Channel unchanged.
+
+The return-leg fit lives here, beside the wire's, because this module already
+owns capacity, whole-reply measurement, omission choice and the final check for
+both of these documents — so one owner measures, omits and finally checks every
+reply on this seam. The opening hand-over keeps its own fit in Briefing: a
+different seam with a different policy, and the two are not merged. What is
+measured here is the *rendered* text both surfaces share, not the JSON envelope,
+because the Voice never sees an envelope.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from gpt_voicecoding.control_plane import payloads
+from gpt_voicecoding.control_plane import commands, payloads
+from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.bridge import Status
+from gpt_voicecoding.core.briefing import RosterBrief, SessionBrief
 from gpt_voicecoding.core.sessions import Session
 from gpt_voicecoding.seams.agent import (
     HistoryPage,
@@ -35,10 +54,12 @@ from gpt_voicecoding.seams.agent import (
     ProgressRole,
     ReplyWindow,
 )
+from gpt_voicecoding.seams.call import RETURN_LEG_BUDGET_BYTES
 from gpt_voicecoding.seams.control_plane import (
     MAX_REQUEST_BYTES,
     Action,
     ErrorCode,
+    Reader,
     Reply,
 )
 from gpt_voicecoding.seams.identity import AgentKind, SessionTarget
@@ -94,17 +115,54 @@ class _ProgressCapture(ProgressCapture):
 #: be legal at ordinal 9 and illegal at ordinal 10.
 _WIDEST_ORDINAL = 10**18
 
+#: What the Voice is told when a Session's decision alone cannot cross the Live
+#: Call's return leg (#302). One **fixed** sentence, and both halves of that
+#: matter. It names no Session and carries no free text, because a Session name
+#: has no byte bound and a refusal that could itself fail the ceiling would be no
+#: bound at all — and the Voice already knows which Session it asked about. Its
+#: size is therefore a constant, checked against the ceiling once at
+#: construction rather than hoped for at runtime, exactly as the wire's own
+#: bounded refusal is.
+RETURN_LEG_REFUSAL = "this Session's decision is too large to be carried on the call"
+
+
+class OversizeDecision(Exception):
+    """A Session Brief cannot cross the return leg even with its newest given up.
+
+    Raised rather than returned because the answer is no longer a document: the
+    contract for a brief is *whole or refused*, never partial (ADR 0016 — a
+    decision with a choice missing is the failure #302 exists to prevent). It
+    carries the words it is refused in, so the caller renders and never rephrases.
+    """
+
+    def __init__(self, message: str = RETURN_LEG_REFUSAL) -> None:
+        super().__init__(message)
+
 
 @dataclass(frozen=True, slots=True)
 class ProgressPublication:
     """The one publication policy for this engine process."""
 
     max_bytes: int = MAX_REQUEST_BYTES
+    #: The Live Call's return leg — the line the Call Agent's answer crosses on
+    #: its way to the Voice. A *second* ceiling rather than a replacement: the
+    #: Control Plane keeps its own for every reply, and a marked `history` or
+    #: `brief` is held to both, the tighter one binding (ADR 0016 as amended).
+    #: Named here so a test can move it; derived from codex's own constants, so
+    #: nothing chooses it.
+    return_leg_bytes: int = RETURN_LEG_BUDGET_BYTES
     _capture: _ProgressCapture = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_bytes <= 0:
             raise ValueError("the Control Plane publication capacity must be positive")
+        if self.return_leg_bytes <= 0:
+            raise ValueError("the return leg's capacity must be positive")
+        # The bounded refusal is a constant, so whether it fits is a fact about
+        # this configuration and is settled here rather than at the moment a
+        # decision turns out to be too large.
+        if len(RETURN_LEG_REFUSAL.encode("utf-8")) > self.return_leg_bytes:
+            raise ValueError("the return leg cannot carry its bounded refusal")
         object.__setattr__(self, "_capture", self._derived_capture())
 
     @property
@@ -159,7 +217,9 @@ class ProgressPublication:
             progress_for=self.summary_document,
         )
 
-    def history_document(self, page: HistoryPage) -> dict[str, Any]:
+    def history_document(
+        self, page: HistoryPage, *, reader: Reader | None = None
+    ) -> dict[str, Any]:
         """One History page, bounded by its count and ceilinged by the wire (#171).
 
         **The count is the page and the bytes are the ceiling.** Every entry the
@@ -181,8 +241,18 @@ class ProgressPublication:
         here (`__post_init__`), which is ADR 0016's own rule — capacity decides
         what the source may be asked for — applied to the count instead of to
         the bytes. So the fully-omitted page below always fits.
+
+        **Marked for the Voice, the drop order is the opposite one** (#302). On a
+        64 KB line the one entry that does not fit is the honest edit; on a
+        4,000-byte line the honest edit is to keep the newest entries whole and
+        page the oldest away, because the page is one request away from
+        continuing and nothing is lost by it. Both rules are right for their
+        wire, and they are not unified. The wire's own pass still runs after the
+        return leg's, so both ceilings apply and the tighter one binds.
         """
         omitted: set[int] = set()
+        if reader is Reader.VOICE:
+            page, omitted = self._fitted_to_the_return_leg(page)
         order = sorted(
             page.entries,
             key=lambda entry: (-len(entry.text.encode("utf-8")), entry.ordinal),
@@ -193,6 +263,105 @@ class ProgressPublication:
                 return document
             omitted.add(entry.ordinal)
         return self._history_document(page, omitted=omitted)
+
+    def _fitted_to_the_return_leg(self, page: HistoryPage) -> tuple[HistoryPage, set[int]]:
+        """The page as the Live Call can carry it: whole entries, oldest paged away.
+
+        Two steps, in this order and for different reasons.
+
+        First, an entry whose slot *alone* is over the ceiling is named omitted
+        in place — ordinal, role and `omission="oversize"`, the existing shape
+        and the existing words. It can never reach the Voice whole on any
+        request, so dropping the page around it would page for ever; it keeps its
+        place and says so.
+
+        Then, while the page still does not fit, entries go from the **oldest**
+        end. `older` becomes true and the cursor keeps its existing meaning — the
+        oldest ordinal still on the page. `--before` is an exclusive bound, so
+        naming the oldest *kept* entry is what makes the next page start at the
+        first *dropped* one; naming the dropped entry itself would skip it.
+
+        **The last entry left gives up its text rather than overrun.** Paging
+        lengthens the cursor line — "that is the whole history" becomes "older
+        entries remain — ask again with `--before N`" — so an entry that fitted
+        the page it started on can fail the page it is left alone on, with
+        nothing older left to drop. It keeps its slot and gives up its text,
+        which is the same edit the first step makes and always fits. Without
+        this the page overran the ceiling by up to 25 bytes.
+        """
+        omitted = {
+            entry.ordinal
+            for entry in page.entries
+            if not self._return_leg_fits(
+                Action.HISTORY,
+                self._history_document(replace(page, entries=(entry,)), omitted=set()),
+            )
+        }
+        kept = list(page.entries)  # newest first, so the oldest is the last
+        older = page.older
+        while kept and not self._return_leg_fits(
+            Action.HISTORY,
+            self._history_document(
+                replace(page, entries=tuple(kept), older=older), omitted=omitted
+            ),
+        ):
+            if len(kept) > 1:
+                kept.pop()
+                # Dropping any entry means there are older ones to ask for,
+                # whatever the window said: the cursor is what brings them back.
+                older = True
+            elif kept[0].ordinal not in omitted:
+                omitted.add(kept[0].ordinal)
+            else:
+                # A page of one fully-omitted slot is the smallest honest page
+                # there is. If that does not fit, no page of this Session does,
+                # and the wire's own final check is what says so.
+                break
+        return replace(page, entries=tuple(kept), older=older), omitted
+
+    def brief_document(
+        self, brief: RosterBrief | SessionBrief, *, reader: Reader | None = None
+    ) -> dict[str, Any]:
+        """One brief, fitted to every wire it will cross (#302, ADR 0016).
+
+        The wire's own fit first, unchanged: `newest` travels twice — as a field
+        and inside `text` — so a message that fits one publication can overflow
+        this one, and it is named as omitted rather than sliced.
+
+        Then, when the reader is the Voice, the same rule at the tighter ceiling.
+        **The newest message is the only part a brief may give up.** If the whole
+        still does not fit once it has, the brief is *refused* with a fixed
+        sentence: the state, the question, every option and the recommendation
+        are spoken whole or not at all, because a decision the user is asked to
+        make is never missing its choices. Nothing is sliced and no option is
+        dropped.
+
+        The roster brief is never fitted to the return leg — it carries no
+        message bodies, costs ~15 tokens per Session, and would not cross until
+        70 concurrent Sessions.
+        """
+        document = payloads.brief_document(brief)
+        if not isinstance(brief, SessionBrief):
+            return document
+        if not self.fits(Reply.answered(Action.BRIEF, document)):
+            document = payloads.brief_document(briefing.omitting_newest(brief))
+        if reader is not Reader.VOICE or self._return_leg_fits(Action.BRIEF, document):
+            return document
+        reduced = payloads.brief_document(briefing.omitting_newest(brief))
+        if not self._return_leg_fits(Action.BRIEF, reduced):
+            raise OversizeDecision
+        return reduced
+
+    def _return_leg_fits(self, action: Action, document: dict[str, Any]) -> bool:
+        """Whether the *rendered* answer fits the Live Call's return leg.
+
+        The rendered text and not the JSON envelope, because the envelope is not
+        what crosses: the Call Agent prints this and hands the print back, and
+        the Voice never sees a wire line. `commands.render` is the one renderer
+        both surfaces share, so what is measured here is what is carried.
+        """
+        rendered = commands.render(Reply.answered(action, document))
+        return len(rendered.encode("utf-8")) <= self.return_leg_bytes
 
     def _history_document(self, page: HistoryPage, *, omitted: set[int]) -> dict[str, Any]:
         return {

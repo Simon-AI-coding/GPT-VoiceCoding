@@ -142,6 +142,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from gpt_voicecoding.adapters.agent.claude import waiting_labels
 from gpt_voicecoding.adapters.agent.claude.registry import (
@@ -310,11 +311,16 @@ class ReplyWindowWatcher:
         self,
         *,
         settings: ClaudeSettings,
+        registry_directory: Path,
         emit: Callable[[AgentEvent], None],
         stopped_on: Callable[[SessionTarget, WaitingFor | None], StopReading] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
+        #: Which registry to sweep, handed in rather than read off `settings`:
+        #: unset there means "this installation's", and the adapter is what holds
+        #: the config directory that answer is derived from (#303).
+        self._registry_directory = registry_directory
         self._emit = emit
         #: The catch-up budget is measured in seconds, so something has to
         #: supply them. Injected because the sweep is driven by `poll_once` and
@@ -589,7 +595,7 @@ class ReplyWindowWatcher:
             return None, True
         alive = pid_is_live(target.pid)
         try:
-            return read_record(self._settings.registry_directory, target.pid), alive
+            return read_record(self._registry_directory, target.pid), alive
         except RegistryError:
             return None, alive
 

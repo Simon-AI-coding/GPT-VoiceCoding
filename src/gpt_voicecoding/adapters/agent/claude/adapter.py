@@ -88,7 +88,11 @@ from gpt_voicecoding.adapters.agent.claude.bootstrap import (
     withdraw_address,
 )
 from gpt_voicecoding.adapters.agent.claude.inbox import InboxError, ReplyInbox
-from gpt_voicecoding.adapters.agent.claude.registry import RegistryError, read_record
+from gpt_voicecoding.adapters.agent.claude.registry import (
+    RegistryError,
+    default_registry_directory,
+    read_record,
+)
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import (
     TranscriptReader,
@@ -247,6 +251,16 @@ class ClaudeAgentAdapter:
             if claude_config_directory is not None
             else claude_hooks.default_config_directory(os.environ)
         )
+        #: The registry, resolved once and here alone. `ClaudeSettings` leaves it
+        #: unset to mean "this installation's", and the installation is the config
+        #: directory just resolved — so `verify`, the roster read, the Reply Window
+        #: and the reply inbox's key all spend this attribute and none of them
+        #: reads the settings field again (#303).
+        self._registry_directory = (
+            self._settings.registry_directory
+            if self._settings.registry_directory is not None
+            else default_registry_directory(self._claude_config_directory)
+        )
         self._installation_base_dir = installation_base_dir
         #: The inbox socket each registered Session's own `SessionStart` hook
         #: reported. Read, never built: 2.1.245 derives the directory from
@@ -274,7 +288,10 @@ class ClaudeAgentAdapter:
         #: rather than inside `discovery` so the cache outlives one tick.
         self._projects = ProjectNames()
         self._windows = ReplyWindowWatcher(
-            settings=self._settings, emit=self._emit, stopped_on=self.stop_reading
+            settings=self._settings,
+            registry_directory=self._registry_directory,
+            emit=self._emit,
+            stopped_on=self.stop_reading,
         )
         #: The socket this adapter owns: hook processes dial in here holding a
         #: dialog open, so this adapter is the server on this route.
@@ -566,7 +583,7 @@ class ClaudeAgentAdapter:
     def _with_naming(self, row: SessionInspection) -> SessionInspection:
         """Carry the registry name under the source the registry actually states."""
         try:
-            record = read_record(self._settings.registry_directory, row.target.pid)
+            record = read_record(self._registry_directory, row.target.pid)
         except RegistryError:
             record = None
         if record is not None and record.session_id == row.target.session_id:
@@ -884,7 +901,7 @@ class ClaudeAgentAdapter:
 
     def registry_directory(self) -> Path:
         """Where launches find the Session records this adapter later observes."""
-        return self._settings.registry_directory
+        return self._registry_directory
 
     def approval_socket_path(self) -> Path:
         """Where a launch should tell this Session's hook to find us.
@@ -981,7 +998,7 @@ class ClaudeAgentAdapter:
         address a Session's registration reported.
         """
         loaded = f"{type(self).__module__}:{type(self).__name__}"
-        registry_directory = self._settings.registry_directory
+        registry_directory = self._registry_directory
         if not registry_directory.is_relative_to(self._claude_config_directory):
             return VerifyResult(
                 outcome=VerifyOutcome.FAIL,
@@ -1102,9 +1119,7 @@ class ClaudeAgentAdapter:
             existing = self._replies.get(directory)
             if existing is not None:
                 return existing
-            replies = ReplyInbox(
-                directory=directory, registry_directory=self._settings.registry_directory
-            )
+            replies = ReplyInbox(directory=directory, registry_directory=self._registry_directory)
             await replies.start()
             self._replies[directory] = replies
             _log.info("reply inbox bound at %s", replies.address)

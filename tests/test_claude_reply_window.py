@@ -158,9 +158,8 @@ class Clock:
 def watching(tmp_path: Path, sink: Sink | AllEvents) -> ReplyWindowWatcher:
     """A watcher over that stand-in registry, polling fast enough for a test to see it."""
     return ReplyWindowWatcher(
-        settings=ClaudeSettings(
-            registry_directory=registry(tmp_path), reply_window_poll_seconds=0.02
-        ),
+        settings=ClaudeSettings(reply_window_poll_seconds=0.02),
+        registry_directory=registry(tmp_path),
         emit=sink.emit,
     )
 
@@ -549,9 +548,8 @@ class TestReportingAStopTheMomentADialogGoesUp:
 
         sink = AllEvents()
         watcher = ReplyWindowWatcher(
-            settings=ClaudeSettings(
-                registry_directory=registry(tmp_path), reply_window_poll_seconds=0.02
-            ),
+            settings=ClaudeSettings(reply_window_poll_seconds=0.02),
+            registry_directory=registry(tmp_path),
             emit=sink.emit,
             stopped_on=stopped_on,
         )
@@ -574,9 +572,8 @@ class TestReportingAStopTheMomentADialogGoesUp:
 
         sink = AllEvents()
         watcher = ReplyWindowWatcher(
-            settings=ClaudeSettings(
-                registry_directory=registry(tmp_path), reply_window_poll_seconds=0.02
-            ),
+            settings=ClaudeSettings(reply_window_poll_seconds=0.02),
+            registry_directory=registry(tmp_path),
             emit=sink.emit,
             stopped_on=stopped_on,
         )
@@ -639,10 +636,10 @@ class Scene:
         say(tmp_path, status)
         self.watcher = ReplyWindowWatcher(
             settings=ClaudeSettings(
-                registry_directory=registry(tmp_path),
                 reply_window_poll_seconds=0.02,
                 stop_catch_up_budget_seconds=budget,
             ),
+            registry_directory=registry(tmp_path),
             emit=self.sink.emit,
             stopped_on=None if readings is None else self._stopped_on,
             clock=self.clock,

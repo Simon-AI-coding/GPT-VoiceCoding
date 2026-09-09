@@ -78,10 +78,10 @@ import pytest
 from gpt_voicecoding import locations
 from gpt_voicecoding.adapters.agent.claude import bootstrap
 from gpt_voicecoding.adapters.agent.claude.inbox import ReplyInbox
-from gpt_voicecoding.adapters.agent.claude.registry import DEFAULT_REGISTRY_DIRECTORY
+from gpt_voicecoding.adapters.agent.claude.registry import default_registry_directory
 from gpt_voicecoding.adapters.agent.codex import shared_daemon
 from gpt_voicecoding.adapters.agent.codex.shared_daemon import SharedDaemon
-from gpt_voicecoding.installation import codex_launch_agent
+from gpt_voicecoding.installation import claude_hooks, codex_launch_agent
 from launchd_fake import FakeLaunchd
 
 
@@ -158,14 +158,27 @@ def _codex_absence_is_never_the_machines(monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.fixture(autouse=True)
 def _no_real_claude_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test publishes this process as a peer of the real machine's Sessions."""
+    """No test publishes this process as a peer of the real machine's Sessions.
+
+    "Real" is every registry this machine actually keeps Sessions in, and since
+    #303 that is two directories rather than one: the registry follows the Claude
+    config directory, so a suite run under `CLAUDE_CONFIG_DIR` has its live
+    Sessions there, while the home default stays real whether or not the variable
+    is set. Both are derived from the product's own resolver, so this guard cannot
+    drift from what the adapter would choose.
+    """
     real = ReplyInbox._publish_key  # noqa: SLF001
+    machine_registries = {
+        default_registry_directory(claude_hooks.default_config_directory(environ))
+        for environ in (os.environ, {})
+    }
 
     def refuse(self: ReplyInbox) -> None:
-        if self._key_path.parent == DEFAULT_REGISTRY_DIRECTORY:  # noqa: SLF001
+        directory = self._key_path.parent  # noqa: SLF001
+        if directory in machine_registries:
             raise AssertionError(
                 "a test published a peer key into the machine's own Claude registry at "
-                f"{DEFAULT_REGISTRY_DIRECTORY}. Pass a `registry_directory` in ClaudeSettings."
+                f"{directory}. Pass a `registry_directory` in ClaudeSettings."
             )
         real(self)
 

@@ -533,6 +533,7 @@ class TestTheRosterAndReplyWindowAgree:
         )
         watcher = ReplyWindowWatcher(
             settings=settings,
+            registry_directory=sessions,
             emit=raised.append,
             stopped_on=adapter.stop_reading,
         )
@@ -650,6 +651,7 @@ class TestTheStopNotice:
         raised: list[Any] = []
         watcher = ReplyWindowWatcher(
             settings=ClaudeSettings(),
+            registry_directory=tmp_path / "sessions",
             emit=raised.append,
             stopped_on=lambda target, roster=None: StopReading(
                 waiting_for=WaitingFor(
@@ -662,7 +664,9 @@ class TestTheStopNotice:
         )
         assert watcher._read_stop(TARGET).waiting_for.tool_name == "Bash"  # noqa: SLF001
 
-    def test_a_reader_that_raises_costs_the_words_and_never_the_notice(self) -> None:
+    def test_a_reader_that_raises_costs_the_words_and_never_the_notice(
+        self, tmp_path: Path
+    ) -> None:
         """A Stop is already proven at that point; silence would be the worse loss."""
         from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
         from gpt_voicecoding.adapters.agent.claude.window import ReplyWindowWatcher
@@ -671,7 +675,10 @@ class TestTheStopNotice:
             raise RuntimeError("the transcript reader is broken")
 
         watcher = ReplyWindowWatcher(
-            settings=ClaudeSettings(), emit=lambda event: None, stopped_on=raising
+            settings=ClaudeSettings(),
+            registry_directory=tmp_path / "sessions",
+            emit=lambda event: None,
+            stopped_on=raising,
         )
         assert watcher._read_stop(TARGET).waiting_for == WaitingFor()  # noqa: SLF001
 

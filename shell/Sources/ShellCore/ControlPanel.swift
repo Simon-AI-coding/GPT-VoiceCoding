@@ -49,7 +49,13 @@ public struct EngineStatus: Equatable, Sendable {
         sessionRows.count { $0.state == "waiting" && $0.waitingKind == "permission" }
     }
     /// Logical live main Sessions, not every visible roster row.
-    public var sessions: Int { sessionRows.count { !$0.isChild } }
+    ///
+    /// Two tiers are excluded, because neither is a Session a person can see
+    /// running: a Child Process, and — since the engine began reporting it — a
+    /// Headless Run, a run with no controlling terminal that the engine keeps
+    /// as a row and never announces. An engine that does not report the second
+    /// leaves ``SessionRow/isHeadlessRun`` false and this count unchanged.
+    public var sessions: Int { sessionRows.count { !$0.isChild && !$0.isHeadlessRun } }
     /// Visible subordinate rows, kept apart from the Session count.
     public var childProcesses: Int { sessionRows.count { $0.isChild } }
     public var emptyRosterMessage: String? {
@@ -113,6 +119,11 @@ public struct SessionRow: Equatable, Identifiable, Sendable {
     public var lastActivity: Date?
     public var waitingKind: String?
     public var isChild: Bool
+    /// Whether this row is a run with no controlling terminal — one nobody can
+    /// type into, which the engine keeps and never announces. Read from the
+    /// wire rather than inferred: an absent key is false, so an older engine
+    /// reads exactly as it did before.
+    public var isHeadlessRun: Bool
     public var parent: SessionAddress?
 
     public var id: SessionAddress { target }
@@ -136,6 +147,7 @@ public struct SessionRow: Equatable, Identifiable, Sendable {
         lastActivity = Self.readDate(value["last_activity"]?.string)
         waitingKind = value["waiting_for"]?["kind"]?.string
         isChild = value["child"]?["kind"]?.string == "child"
+        isHeadlessRun = value["headless_run"]?.bool == true
         if let parentValue = value["child"]?["parent"], !parentValue.isNull {
             parent = SessionAddress(parentValue)
         } else {

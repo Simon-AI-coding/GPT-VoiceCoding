@@ -23,6 +23,7 @@ import pytest
 from gpt_voicecoding.adapters.agent import _terminals
 from gpt_voicecoding.adapters.agent._terminals import TerminalMemo
 from gpt_voicecoding.adapters.agent.claude import discovery as claude_discovery
+from gpt_voicecoding.control_plane import payloads
 from gpt_voicecoding.core import briefing, menu
 from gpt_voicecoding.core.errors import HeadlessRunError
 from gpt_voicecoding.core.relay_queue import RelayQueue
@@ -266,6 +267,42 @@ class TestItIsOnNoRosterTheUserReads:
         registry = observed(row(has_controlling_terminal=False))
 
         assert [held.target for held in registry.live()] == [WITNESS]
+
+
+class TestItCarriesItsTierOnTheControlPlaneWire:
+    """`status` lists every row, so the row has to say what it is.
+
+    Placed by the wrap-up ruling. The row stays on the wire — that is where
+    "appears in the roster" is true, as it is for a Child Process — so a surface
+    counting the Sessions a person can see running needs a fact to exclude it
+    by. Without one, `shell/Sources/ShellCore/ControlPanel.swift` counted a
+    `claude --print` launched detached as a Session the user was running.
+    """
+
+    def wire(self, *, has_controlling_terminal: bool | None) -> dict:
+        return payloads.session_document(
+            Session(
+                target=WITNESS,
+                workspace=WORKSPACE,
+                first_seen=0.0,
+                state=SessionState.IDLE,
+                has_controlling_terminal=has_controlling_terminal,
+            ),
+            progress={},
+        )
+
+    def test_a_headless_runs_row_says_so(self) -> None:
+        assert self.wire(has_controlling_terminal=False)["headless_run"] is True
+
+    @pytest.mark.parametrize("terminal", [True, None])
+    def test_a_sessions_row_does_not(self, terminal: bool | None) -> None:
+        assert self.wire(has_controlling_terminal=terminal)["headless_run"] is False
+
+    def test_it_travels_beside_the_other_tier_and_replaces_nothing(self) -> None:
+        """Two tiers, two keys: a Child Process still says what it is."""
+        row = self.wire(has_controlling_terminal=False)
+
+        assert row["child"] == {"kind": "main", "parent": None}
 
 
 class TestItIsRefusedAsARelayTarget:

@@ -167,6 +167,77 @@ private let allSwitchesOff = """
         #expect(reading.sessionRows[3].parent == nil)
     }
 
+    @Test func aHeadlessRunIsAVisibleRowAndNotACountedSession() async {
+        // A run with no controlling terminal stays on this wire — `status`
+        // lists every row the engine holds — so the panel has to exclude it by
+        // the fact it carries rather than by not receiving it. Before the key
+        // existed there was nothing to exclude it by, and the panel counted a
+        // `claude --print` launched detached as a Session the user was running.
+        let status = """
+            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
+              "switches": {"duty": true, "voice": true, "message": true},
+              "sessions": [
+                {
+                  "target": {"agent": "claude", "session_id": "witness-1", "pid": 4242},
+                  "name": null,
+                  "lifecycle": "live",
+                  "state": "idle",
+                  "child": {"kind": "main", "parent": null},
+                  "headless_run": true
+                },
+                {
+                  "target": {"agent": "codex", "session_id": "real-1", "pid": null},
+                  "name": "GPT-VoiceCoding · port the log",
+                  "lifecycle": "live",
+                  "state": "idle",
+                  "child": {"kind": "main", "parent": null},
+                  "headless_run": false
+                }
+              ],
+              "call_id": null, "pending_relays": []}}
+            """
+        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
+
+        await panel.refresh()
+
+        guard case .read(let reading) = panel.reading else {
+            Issue.record("expected a reading")
+            return
+        }
+        #expect(reading.sessions == 1)
+        #expect(reading.childProcesses == 0)
+        #expect(reading.sessionRows.map(\.isHeadlessRun) == [true, false])
+    }
+
+    @Test func aRowFromAnEngineThatDoesNotReportTheTierCountsAsItAlwaysDid() async {
+        // The key is additive, so its absence must read as false rather than as
+        // a missing answer: an older engine keeps the count it had.
+        let status = """
+            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
+              "switches": {"duty": true, "voice": true, "message": true},
+              "sessions": [
+                {
+                  "target": {"agent": "codex", "session_id": "real-1", "pid": null},
+                  "name": "GPT-VoiceCoding · port the log",
+                  "lifecycle": "live",
+                  "state": "idle",
+                  "child": {"kind": "main", "parent": null}
+                }
+              ],
+              "call_id": null, "pending_relays": []}}
+            """
+        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
+
+        await panel.refresh()
+
+        guard case .read(let reading) = panel.reading else {
+            Issue.record("expected a reading")
+            return
+        }
+        #expect(reading.sessions == 1)
+        #expect(reading.sessionRows.map(\.isHeadlessRun) == [false])
+    }
+
     @Test func aWaitingRowCarriesWhatItWaitsForAndWhenItLastMoved() async {
         let status = """
             {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {

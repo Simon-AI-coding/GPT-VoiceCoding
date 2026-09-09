@@ -188,12 +188,24 @@ second question to render one line would be a second reader of the same Session:
               "read_at": "2026-08-26T02:44:39+00:00", "recent": []},
  "last_activity": "2026-08-26T02:44:39+00:00",
  "child": {"kind": "main", "parent": null},
+ "headless_run": false,
  "reply_window": "open"}
 ```
 
 `target` is the **address**; `label` is for speech and for matching. A label
 never crosses the wire as an address — resolving one to a target is Bridge
 Core's router, on the way in from the Companion Channel.
+
+`child` and `headless_run` are the two tiers a row can be in that are not a
+Session, and a row carries both because both stay on this wire: `status` lists
+every row the engine holds, and neither of these is a row the user may be
+offered. `child.kind` is `main` or `child` (ADR 0020's Child Process);
+`headless_run` is `true` for a run with no controlling terminal — a complete
+process nobody can type into, kept as a row and never announced (ADR 0020 as
+amended, `CONTEXT.md`'s *Headless Run*). A surface counting the Sessions a
+person can see running counts the rows where `child.kind` is `main` and
+`headless_run` is `false`. The key is additive: a reader that does not know it
+reads its absence as `false`, which is the count it had before.
 
 `first_seen` is wall-clock seconds, and it is when *this engine* first saw the
 Session — no agent knows it.

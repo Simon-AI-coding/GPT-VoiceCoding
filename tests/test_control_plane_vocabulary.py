@@ -42,7 +42,7 @@ class TestTheActionSet:
             "assistant",
         }
 
-    def test_the_reader_mark_moves_the_protocol_to_ten(self) -> None:
+    def test_the_reader_mark_moved_the_protocol_to_ten(self) -> None:
         """A surface can tell an engine that knows the mark from one that does not.
 
         Protocol 9 added the three menu verbs (#264). Ten adds the optional
@@ -51,7 +51,18 @@ class TestTheActionSet:
         cuts (#302). The Swift shell compares this number and nothing else, so
         the field cannot arrive under an unchanged version.
         """
-        assert PROTOCOL_VERSION == 10
+        assert PROTOCOL_VERSION >= 10
+
+    def test_the_new_state_word_moves_the_protocol_to_eleven(self) -> None:
+        """A closed set that changed under an unchanged number is a gate that lies.
+
+        `state` is what a surface lights a symbol on. #320 removed `unreadable`
+        and added `waiting_on`, so a version-10 surface would meet a word it has
+        no light for — and draw nothing where the user reads the one fact they
+        act on. Same rule as the two above, applied to a value set rather than
+        to an action set or a field.
+        """
+        assert PROTOCOL_VERSION == 11
 
     def test_the_three_menu_verbs_moved_the_protocol_to_nine(self) -> None:
         """A v8 surface would send `sessions` and be answered `unknown_action`.

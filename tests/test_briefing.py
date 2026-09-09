@@ -102,7 +102,14 @@ PERMISSION = WaitingFor(
 class TestTheFiveStates:
     def test_prose_questions_have_the_same_state_and_empty_decision_on_both_surfaces(self):
         for target in (CLAUDE, CODEX):
-            brief = briefing.session(row(target, progress=said("Pick 1 or 2?")))
+            asked = (
+                said("Pick 1 or 2?")
+                if target is CLAUDE
+                # Codex marks its final answer, and only a marked one is read
+                # (#188); nothing else about this case differs between the lanes.
+                else codex_said(("Pick 1 or 2?", ProgressPhase.FINAL_ANSWER))
+            )
+            brief = briefing.session(row(target, progress=asked))
             assert brief.state is BriefState.DECISION
             assert briefing.spoken(brief).state == "waiting for your decision"
             assert briefing.spoken(brief).decision == ()
@@ -144,24 +151,50 @@ class TestTheFiveStates:
         assert brief.state is BriefState.RUNNING
         assert brief.newest.state is NewestState.UNREADABLE
 
-    def test_a_stopped_session_whose_wait_is_unclassified_is_unreadable(self) -> None:
+    def test_a_stopped_session_whose_wait_is_unclassified_is_finished(self) -> None:
+        """#320 retired `unreadable`: a wait nobody could classify asks nothing."""
         brief = briefing.session(
             row(
                 state=SessionState.WAITING,
                 waiting_for=WaitingFor(kind=WaitingKind.UNKNOWN, caught_up=False),
             )
         )
-        assert brief.state is BriefState.UNREADABLE
+        assert brief.state is BriefState.FINISHED
 
-    def test_a_stopped_session_whose_progress_is_unreadable_is_unreadable(self) -> None:
+    def test_a_stopped_session_whose_progress_is_unreadable_is_finished_and_says_why(self) -> None:
+        """The failed read is a fact about the *message*, and it is still told (#320).
+
+        This is the whole of what replaced the sixth state word: the state says
+        nothing is being asked, and the omission sentence beside it says the
+        newest message could not be read. "The engine does not know" is never
+        dressed as "it is waiting for you".
+        """
         brief = briefing.session(
             row(progress=ProgressObservation.unreadable("the transcript could not be read"))
         )
-        assert brief.state is BriefState.UNREADABLE
+        assert brief.state is BriefState.FINISHED
+        assert brief.newest.state is NewestState.UNREADABLE
+        assert brief.newest.words.startswith("could not be read")
+        assert briefing.notice(brief).state_word == "finished"
 
-    def test_a_codex_turn_end_whose_answer_carries_no_phase_is_a_decision(self) -> None:
-        """#166 B2's default, and #188's fallback: no `phase`, no promotion."""
-        assert briefing.session(row(CODEX)).state is BriefState.DECISION
+    def test_a_codex_turn_end_whose_answer_carries_no_phase_is_finished(self) -> None:
+        """#320 reversed #166 B2's default: no answer read, so no question found."""
+        assert briefing.session(row(CODEX)).state is BriefState.FINISHED
+
+    def test_there_is_no_sixth_state_word(self) -> None:
+        """The five words are the whole table, and `ended` is not one of them."""
+        assert set(briefing.STATE_WORDING) == set(BriefState)
+        assert [state.value for state in BriefState] == [
+            "decision",
+            "permission",
+            "waiting_on",
+            "finished",
+            "running",
+        ]
+        assert not hasattr(BriefState, "UNREADABLE")
+        # `ended` lives beside the state words, not among them (ADR 0021 §9).
+        assert briefing.NOTICE_WORDING[NoticeWord.ENDED] == "ended"
+        assert briefing.ended_line(row()).startswith("⚫ ended · ")
 
     def test_an_exited_session_never_appears_in_a_roster_brief(self) -> None:
         ended = replace(row(), lifecycle=SessionLifecycle.ENDED)
@@ -213,11 +246,16 @@ def answered(text: str) -> BriefState:
 
 
 class TestACodexTurnThatAskedNothing:
-    """#188: FINISHED only when the final answer shows no sign of an ask.
+    """#320: a question mark makes a decision, and nothing else does.
 
-    A promotion gate, not a classifier: the default stays #166 B2's DECISION and
-    evidence is required to leave it, so every uncertain shape below stays a
-    decision. The rule and its measurements are #176
+    #188 read this the other way round — DECISION was the default and a final
+    answer with no sign of an ask was *promoted* out of it. The 2026-09-09
+    corpus measured what that cost: a turn nobody could read and a hand-over
+    that asked nothing were both announced as *waiting for your decision*, so
+    the light the user was told to act on was the light that meant the engine
+    could not tell. The evidence now runs the other way, and the two clauses
+    that read a menu as an ask are gone with the default they served. The rule's
+    measurements are still #176
     (`docs/research/2026-09-01-codex-turn-end-classification.md` §5).
     """
 
@@ -245,14 +283,29 @@ class TestACodexTurnThatAskedNothing:
         said = "已完成，见 [运行记录](https://ci.example/runs?id=7)。"
         assert answered(said) is BriefState.FINISHED
 
-    def test_a_labelled_option_block_asks_without_a_question_mark(self) -> None:
-        """`B → C`: a menu is an ask even when the interrogative is missing."""
-        said = "两条路:\n\nA) 保留当前实现\nB) 换成统一观察器\nC) 全部回退\n"
-        assert codex_state((said, FINAL_ANSWER)) is BriefState.DECISION
+    def test_a_labelled_option_block_with_no_question_mark_is_finished(self) -> None:
+        """The regression for the deleted clause (#320).
 
-    def test_a_named_option_asks(self) -> None:
-        assert answered("➡️ 我建议采用方案 B。") is BriefState.DECISION
-        assert answered("选项 A 最省事。") is BriefState.DECISION
+        A turn that lays out lettered options and asks nothing is a report of
+        what it considered, and the same shape must never get two words. It was
+        `_OPTION_BLOCK`, which was safe only while it merely *promoted* out of a
+        DECISION default; it now creates a 🟡 the user is told to act on.
+        """
+        said = "两条路:\n\nA) 保留当前实现\nB) 换成统一观察器\nC) 全部回退\n"
+        assert codex_state((said, FINAL_ANSWER)) is BriefState.FINISHED
+
+    def test_a_named_option_with_no_question_mark_is_finished(self) -> None:
+        """The regression for the other deleted clause, `_NAMED_OPTION`."""
+        assert answered("➡️ 我建议采用方案 B。") is BriefState.FINISHED
+        assert answered("选项 A 最省事。") is BriefState.FINISHED
+
+    def test_a_named_option_that_does_ask_is_still_a_decision(self) -> None:
+        """Nothing was lost that carried its own question mark."""
+        assert answered("选项 A 最省事，可以吗？") is BriefState.DECISION
+
+    def test_a_hand_over_that_states_the_next_move_is_finished(self) -> None:
+        """The 2026-09-09 fixture: a statement is not a question (#320, story 4)."""
+        assert answered("我这边到此为止，由你决定何时启动。") is BriefState.FINISHED
 
     def test_a_numbered_list_is_not_a_menu(self) -> None:
         """No numeric clause, deliberately: numbered lists are how findings are
@@ -272,17 +325,18 @@ class TestACodexTurnThatAskedNothing:
             is BriefState.FINISHED
         )
 
-    def test_commentary_alone_is_never_promoted(self) -> None:
+    def test_commentary_alone_asks_nothing(self) -> None:
         """A non-blocking mid-turn question is not the turn's answer, and a turn
-        with no answer at all is not evidence that it finished."""
-        assert codex_state(("先看一下目录。", COMMENTARY)) is BriefState.DECISION
+        with no answer read is a turn nobody found a question in (#320)."""
+        assert codex_state(("先看一下目录。", COMMENTARY)) is BriefState.FINISHED
 
     def test_the_answer_to_an_earlier_turn_is_not_this_turn_s_answer(self) -> None:
         """The tail carries several turns, and only this one ended (or did not).
 
         Without the boundary a turn still working — or one that produced only
-        commentary — would be briefed FINISHED on the *previous* turn's answer,
-        which is the ticket's "no final answer → DECISION" turned inside out.
+        commentary — would be briefed on the *previous* turn's answer: since
+        #320 that reads the question the user already settled and announces it
+        as one still waiting for them, which is exactly the wrong direction.
 
         These three name no turn, which is the **fallback** rule (#210): a
         Claude reading, or a Codex build whose turns carried no `id`, still
@@ -291,15 +345,15 @@ class TestACodexTurnThatAskedNothing:
         """
         working = codex_tail(
             told("do the first thing"),
-            answer("已完成第一件事。"),
+            answer("同意吗？"),
             told("now do the second"),
             answer("先看一下目录。", COMMENTARY),
         )
-        assert briefing.session(row(CODEX, progress=working)).state is BriefState.DECISION
+        assert briefing.session(row(CODEX, progress=working)).state is BriefState.FINISHED
 
     def test_a_turn_that_has_said_nothing_yet_is_not_the_turn_before_it(self) -> None:
-        silent = codex_tail(told("do the thing"), answer("已完成。"), told("now do the next"))
-        assert briefing.session(row(CODEX, progress=silent)).state is BriefState.DECISION
+        silent = codex_tail(told("do the thing"), answer("同意吗？"), told("now do the next"))
+        assert briefing.session(row(CODEX, progress=silent)).state is BriefState.FINISHED
 
     def test_this_turn_s_answer_is_read_across_the_boundary_behind_it(self) -> None:
         """The boundary stops the search; it does not stop this turn being read."""
@@ -319,10 +373,10 @@ class TestACodexTurnThatAskedNothing:
         """
         wordless = codex_tail(
             told("do the first thing", turn_id="turn_one"),
-            answer("Done. All tests pass.", turn_id="turn_one"),
+            answer("同意吗？", turn_id="turn_one"),
             answer("先看一下目录。", COMMENTARY, turn_id="turn_two"),
         )
-        assert briefing.session(row(CODEX, progress=wordless)).state is BriefState.DECISION
+        assert briefing.session(row(CODEX, progress=wordless)).state is BriefState.FINISHED
 
     def test_a_turn_named_by_the_source_bounds_the_search_at_both_ends(self) -> None:
         """The named boundary stops the search; it does not stop this turn being
@@ -343,14 +397,16 @@ class TestACodexTurnThatAskedNothing:
 
     def test_a_phase_this_build_cannot_read_is_not_an_answer(self) -> None:
         """The adapter maps an unrecognised codex word to `UNKNOWN`, and this is
-        what that member means here: the turn did not end on its answer."""
-        assert codex_state(("已完成。", ProgressPhase.UNKNOWN)) is BriefState.DECISION
+        what that member means here: the turn did not end on its answer, so the
+        question in it is not read either."""
+        assert codex_state(("同意吗？", ProgressPhase.UNKNOWN)) is BriefState.FINISHED
 
-    def test_a_session_nobody_read_stays_a_decision(self) -> None:
-        assert (
-            briefing.session(row(CODEX, progress=ProgressObservation())).state
-            is BriefState.DECISION
-        )
+    def test_a_session_nobody_read_is_finished_and_the_body_says_it_was_not_read(self) -> None:
+        """#320 story 5: "the engine does not know" is never dressed as "your turn"."""
+        brief = briefing.session(row(CODEX, progress=ProgressObservation()))
+        assert brief.state is BriefState.FINISHED
+        assert brief.newest.state is NewestState.NOT_READ
+        assert brief.newest.words == "not read"
 
     def test_the_claude_lane_also_reads_a_prose_question(self) -> None:
         finished = briefing.session(row(CLAUDE, progress=codex_said(("同意吗？", FINAL_ANSWER))))
@@ -400,8 +456,8 @@ class TestWhatADecisionCarries:
         assert brief.decision.tool == "sandbox network access"
         assert "sandbox network access" in briefing.text(brief)
 
-    def test_an_unreadable_session_keeps_whatever_was_read(self) -> None:
-        """B7: never counted as a decision, and never emptied either."""
+    def test_a_wait_nobody_could_classify_keeps_whatever_was_read(self) -> None:
+        """Never counted as a decision (B7), and never emptied either (#320)."""
         brief = briefing.session(
             row(
                 state=SessionState.WAITING,
@@ -409,8 +465,115 @@ class TestWhatADecisionCarries:
                 progress=said("halfway through"),
             )
         )
-        assert brief.state is BriefState.UNREADABLE
+        assert brief.state is BriefState.FINISHED
         assert brief.newest == Newest(state=NewestState.SAID, text="halfway through")
+
+
+PEER = SessionTarget(agent=AgentKind.CLAUDE, session_id="ghi", pid=4321)
+
+
+class TestWaitingOnSomebody:
+    """#320: the symmetric 🟣 state, and the one state word that names somebody."""
+
+    def peer_row(self) -> Session:
+        return row(PEER, name=SessionName(project="gpt-voicecoding", task="the driver"))
+
+    def waiting_row(self) -> Session:
+        return row(waiting_for=WaitingFor(kind=WaitingKind.PEER, awaiting=str(PEER)))
+
+    def test_a_peer_wait_is_named_by_that_sessions_own_session_name(self) -> None:
+        """Story 1: not my turn, and whose it is."""
+        peer = self.peer_row()
+        brief = briefing.session(self.waiting_row(), peers=(self.waiting_row(), peer))
+
+        assert brief.state is BriefState.WAITING_ON
+        assert brief.awaited == "gpt-voicecoding · the driver"
+
+    def test_the_three_readers_of_the_table_say_the_same_word(self) -> None:
+        """The Stop Notice, the Roster Brief row and the spoken brief, on one fixture.
+
+        The state word is a template only in the table; every reader is handed
+        the same filled sentence, because a template rendered at a call site is
+        one a call site will forget to render.
+        """
+        waiting, peer = self.waiting_row(), self.peer_row()
+        sessions = (waiting, peer)
+        word = "waiting on gpt-voicecoding · the driver"
+
+        brief = briefing.session(waiting, peers=sessions)
+        summary = briefing.roster(sessions, focus=None)
+        row_notice = next(
+            item
+            for item in briefing.roster_notice(summary).rows
+            if item.state is BriefState.WAITING_ON
+        )
+
+        assert briefing.notice(brief).state_word == word
+        assert briefing.spoken(brief).state == word
+        assert row_notice.state_word == word
+        assert word in briefing.text(brief)
+        assert word in briefing.text(summary)
+
+    def test_the_telegram_layout_lights_it_purple(self) -> None:
+        from gpt_voicecoding.adapters.companion_channel.telegram.layout import lay_out
+
+        brief = briefing.session(self.waiting_row(), peers=(self.waiting_row(), self.peer_row()))
+
+        assert lay_out(briefing.notice(brief)).text.startswith("🟣 waiting on ")
+
+    def test_the_ruling_and_the_escalation_read_the_same_way(self) -> None:
+        """Story 2: the transcript cannot tell an ask from a ruling, so neither does this."""
+        driver = row(PEER, name=SessionName(project="crew", task="the driver"))
+        worker = row(waiting_for=WaitingFor(kind=WaitingKind.PEER, awaiting=str(PEER)))
+        ruled = replace(driver, waiting_for=WaitingFor(kind=WaitingKind.PEER, awaiting=str(CLAUDE)))
+
+        both = (worker, ruled)
+        assert briefing.session(worker, peers=both).state is BriefState.WAITING_ON
+        assert briefing.session(ruled, peers=both).state is BriefState.WAITING_ON
+        assert briefing.session(ruled, peers=both).awaited == "gpt-voicecoding · a task"
+
+    def test_a_peer_the_roster_does_not_hold_is_named_by_its_address(self) -> None:
+        """The honest floor under every name, and the answer for a Session with none."""
+        brief = briefing.session(self.waiting_row(), peers=())
+
+        assert brief.state is BriefState.WAITING_ON
+        assert briefing.spoken(brief).state == f"waiting on {PEER}"
+
+    def test_a_child_wait_is_named_by_the_childs_own_name(self) -> None:
+        """Story 3: a subagent or teammate the tracking has a name for."""
+        waiting = row(waiting_for=WaitingFor(kind=WaitingKind.CHILD, awaiting="review-bridge"))
+
+        assert briefing.spoken(briefing.session(waiting)).state == "waiting on review-bridge"
+
+    def test_a_background_command_is_named_by_the_wording_table(self) -> None:
+        """Story 8, and the rule that a command line is never a name."""
+        waiting = row(waiting_for=WaitingFor(kind=WaitingKind.CHILD))
+        brief = briefing.session(waiting)
+
+        assert brief.state is BriefState.WAITING_ON
+        assert brief.awaited is None
+        assert briefing.spoken(brief).state == f"waiting on {briefing.BACKGROUND_COMMAND}"
+
+    def test_the_counts_line_names_nobody_because_it_groups_by_state(self) -> None:
+        """One roster line, several Sessions, and no one party to name."""
+        summary = briefing.roster(
+            (
+                self.waiting_row(),
+                replace(self.peer_row(), waiting_for=self.waiting_row().waiting_for),
+            ),
+            focus=None,
+        )
+
+        assert briefing.roster_notice(summary).counts == (
+            f"sessions: 2 waiting on {briefing.SOMEBODY_ELSE}"
+        )
+
+    def test_the_reply_window_stays_open_so_the_notice_is_an_anchor(self) -> None:
+        """Story 6: a 🟣 notice is an ordinary Anchor the user replies into."""
+        for kind in (WaitingKind.PEER, WaitingKind.CHILD):
+            waiting = WaitingFor(kind=kind, awaiting="somebody")
+            assert waiting.stopped_state is SessionState.IDLE
+            assert waiting.needs_the_user is False
 
 
 class TestAnswerableHere:
@@ -919,10 +1082,7 @@ class TestTheHandover:
         items = briefing.for_call((stopped, waiting), focus=None)
 
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
-        assert [item.state for item in briefs] == [
-            "waiting for your decision",
-            "requesting permission",
-        ]
+        assert [item.state for item in briefs] == ["finished", "requesting permission"]
         assert briefs[0].newest == "it stopped here"
 
     def test_a_session_that_stopped_is_briefed_exactly_once(self) -> None:

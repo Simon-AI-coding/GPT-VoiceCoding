@@ -43,7 +43,7 @@ under the Message Switch — which is the half a Live Call was never a surface f
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from gpt_voicecoding.core import briefing, menu
@@ -200,6 +200,7 @@ def stop_brief(
     *,
     progress: ProgressObservation | None = None,
     question_answerable: bool = False,
+    peers: Sequence[Session] = (),
 ) -> SessionBrief:
     """The Session Brief a Stop announces — this reading, on the row it is about.
 
@@ -242,7 +243,7 @@ def stop_brief(
         waiting_for=waiting_for,
         progress=progress if progress is not None else session.progress,
     )
-    return briefing.session(row, question_answerable=question_answerable)
+    return briefing.session(row, question_answerable=question_answerable, peers=peers)
 
 
 def _as_read_now(read: Session, fresh: ProgressObservation) -> Session:
@@ -637,8 +638,9 @@ class BridgeCore:
         *progress* could not be read: `history` exists to answer with a
         Session's own words and has nothing to say without them, while a brief
         still has a state, a wait and a name — so an unreadable reading becomes
-        the UNREADABLE state or an unreadable `newest`, which is the honest
-        answer and the one the five states were drawn to carry.
+        an unreadable `newest` beside a state read off the wait, which is the
+        honest answer and the one the five states were drawn to carry (#320
+        retired the sixth).
         """
         if target is None:
             return briefing.roster(self._state.sessions.all(), self._state.sessions.focus)
@@ -662,6 +664,7 @@ class BridgeCore:
             briefing.session(
                 _as_read_now(read, row.progress),
                 question_answerable=self._question_answerable(read.target),
+                peers=self._state.sessions.all(),
             ),
             read,
         )
@@ -1228,6 +1231,10 @@ class BridgeCore:
             question_answerable=(
                 waiting_for.kind is WaitingKind.QUESTION and self._question_answerable(target)
             ),
+            # The roster, for the one word a single row cannot supply: a Session
+            # waiting on another is announced by *that* Session's Session Name
+            # (#320).
+            peers=self._state.sessions.all(),
         )
         # The log carries the brief's text too, so the one wording is what the
         # run's own record shows (#166 B5/B6). `Session stopped:` opens it
@@ -1572,7 +1579,7 @@ class BridgeCore:
         except BridgeCoreError as refusal:
             await self._reply(str(refusal), origin=origin)
             return
-        await self._reply_screen(menu.greeting_screen(session), origin)
+        await self._reply_screen(menu.greeting_screen(session, self._state.sessions.all()), origin)
 
     async def _session_pick(self, target: SessionTarget, word: AnchorPick, *, origin: str) -> None:
         """`brief`, `history` or `send message`, about one Session."""

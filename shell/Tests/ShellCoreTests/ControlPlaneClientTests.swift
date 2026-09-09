@@ -8,7 +8,7 @@ import Testing
     @Test func oneRequestGetsOneReply() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": true, "action": "live", "protocol": 10, "data": {"state": "up", "call_id": "call-1"}}"#
+                #"{"ok": true, "action": "live", "protocol": 11, "data": {"state": "up", "call_id": "call-1"}}"#
             ))
         defer { engine.stop() }
 
@@ -22,7 +22,7 @@ import Testing
     @Test func aRefusalIsAnAnswer() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": false, "action": "switch", "protocol": 10, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
+                #"{"ok": false, "action": "switch", "protocol": 11, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
             ))
         defer { engine.stop() }
 
@@ -59,7 +59,24 @@ import Testing
         let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
 
         #expect(failure == .protocolMismatch(received: 9, supported: controlPlaneProtocolVersion))
-        #expect(controlPlaneProtocolVersion == 10)
+    }
+
+    /// #320: the engine before the sixth state word was retired. Its `state` is
+    /// a different closed set — `unreadable` where this shell expects nothing,
+    /// and no `waiting_on` at all — and `state` is what a surface lights a
+    /// symbol on, so a shell that spoke to it would draw nothing where the user
+    /// reads the one fact they act on. Refused like any other version.
+    @Test func theProtocolBeforeTheSixthStateWordWasRetiredIsAMismatch() async throws {
+        let engine = try FakeEngineSocket(
+            behaviour: .answer(
+                #"{"ok": true, "action": "status", "protocol": 10, "data": {}}"#
+            ))
+        defer { engine.stop() }
+
+        let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
+
+        #expect(failure == .protocolMismatch(received: 10, supported: controlPlaneProtocolVersion))
+        #expect(controlPlaneProtocolVersion == 11)
     }
 
     @Test func aMissingProtocolVersionKeepsTheAbsentDistinction() async throws {

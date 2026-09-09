@@ -60,9 +60,9 @@ from gpt_voicecoding.seams.companion_channel import (
 STATE_LIGHT: Final[Mapping[BriefState, str]] = {
     BriefState.DECISION: "🟡",
     BriefState.PERMISSION: "🔴",
+    BriefState.WAITING_ON: "🟣",
     BriefState.FINISHED: "🟢",
     BriefState.RUNNING: "🔵",
-    BriefState.UNREADABLE: "⚪",
 }
 
 #: What separates the facts on one line — `agent · project · task`. The same

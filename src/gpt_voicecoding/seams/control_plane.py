@@ -77,7 +77,13 @@ from typing import Any
 #: request, ignores the field and answers a page fitted to 64 KB alone, which is
 #: then cut in transit; so the disagreement has to be visible before the request
 #: is made. A request that sends no mark is answered exactly as it was at 9.
-PROTOCOL_VERSION = 10
+#: 11 changes the closed set of a Session's `state` (#320): `unreadable` is gone
+#: and `waiting_on` is new, and a brief carries the `awaited` name that fills it.
+#: A version-10 surface keys a light on that set, so an engine that answered a
+#: word it has no light for would draw nothing where the user reads the one fact
+#: they act on. The number is the only gate the Swift shell compares, so a
+#: closed set that changed under an unchanged number is a gate that lies.
+PROTOCOL_VERSION = 11
 
 #: The longest line either side will read. Generous for a roster, small enough
 #: that a peer cannot make the engine hold an unbounded buffer.

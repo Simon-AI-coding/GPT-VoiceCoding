@@ -973,7 +973,9 @@ class TestBrief:
 
         assert reply.ok
         assert reply.data["session"]["newest"] == {"state": "unreadable", "text": None}
-        assert reply.data["session"]["state"] == "unreadable"
+        # The failed read is a fact about the *message*, and since #320 it is
+        # told there and nowhere else: the state says nothing is being asked.
+        assert reply.data["session"]["state"] == "finished"
         # The roster still holds what it last read: a standing account does not
         # lose a fact because one pass could not answer.
         assert (
@@ -1026,7 +1028,8 @@ class TestBrief:
         history = surface.ask(Action.HISTORY, target=CODEX_ADDRESS)
 
         assert brief.ok
-        assert brief.data["session"]["state"] == "unreadable"
+        assert brief.data["session"]["state"] == "finished"
+        assert brief.data["session"]["newest"]["state"] == "unreadable"
         assert history.error is not None
 
     def test_a_newest_message_too_large_for_the_line_is_named_rather_than_sliced(self) -> None:

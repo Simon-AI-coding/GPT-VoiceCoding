@@ -23,13 +23,11 @@ from gpt_voicecoding.adapters.call.realtime import cues
 from gpt_voicecoding.adapters.call.realtime.adapter import VOICE_SAID_LINE
 from gpt_voicecoding.core.bridge import VOICE_QUIET_LINE, VOICE_SPEAKING_LINE
 from gpt_voicecoding.core.call_keeper import (
-    CARRIED_UNDELIVERED,
     COOL_DOWN_OWED_LINE,
     COOL_DOWN_PAID_LINE,
     MID_CALL_NOTHING_LINE,
     MID_CALL_SPOKEN_LINE,
 )
-from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.policy import (
     DEFAULT_COOL_DOWN_SECONDS,
     DEFAULT_SILENCE_END_SECONDS,
@@ -44,7 +42,6 @@ DISCOVERY_SECONDS = journey_module.DISCOVERY_SECONDS
 Instruction = journey_module.Instruction
 QUESTION_ASKED_SPOKEN_SUBSTRING = journey_module.QUESTION_ASKED_SPOKEN_SUBSTRING
 THE_QUESTION_ASKED = journey_module.THE_QUESTION_ASKED
-UNDELIVERED = journey_module.UNDELIVERED
 _address_of = journey_module._address_of
 _history_reading = journey_module._history_reading
 _newest_message = journey_module._newest_message
@@ -60,7 +57,6 @@ PHASES = (
     "long answer",
     "mid-call news",
     "hang-up",
-    "undelivered",
 )
 
 PHASE_GROUND: Mapping[str, tuple[str, ...]] = {
@@ -72,13 +68,7 @@ PHASE_GROUND: Mapping[str, tuple[str, ...]] = {
     "long answer": ("dial",),
     "mid-call news": ("dial", "relay"),
     "hang-up": ("dial",),
-    "undelivered": (),
 }
-
-#: The one phase that holds a call of its own rather than running inside the
-#: walk's first one ("one flow, three calls", #223), which is why its ground is
-#: empty above rather than naming `dial`.
-OUTSIDE_THE_FIRST_CALL = "undelivered"
 
 
 def in_call_phases(phases: Sequence[str]) -> tuple[str, ...]:
@@ -88,8 +78,13 @@ def in_call_phases(phases: Sequence[str]) -> tuple[str, ...]:
     silent red: the loop that drives the first call, and the step-level transport
     fact, which asks whether a wav utterance could have reached the track at all
     — only an in-call phase puts one there (#198).
+
+    Every phase is one, since the phase that held a call of its own went with the
+    Relay ceiling it graded (#321). The name stays because the two readers still
+    have to agree, and because a phase outside the first call is a shape this
+    walk has had before.
     """
-    return tuple(phase for phase in phases if phase != OUTSIDE_THE_FIRST_CALL)
+    return tuple(phases)
 
 
 class UnknownPhase(Exception):
@@ -317,14 +312,6 @@ COOL_DOWN_PAID_PATTERN = re.escape(COOL_DOWN_PAID_LINE)
 #: for `COOL_DOWN_OWED_PATTERN`'s reason.
 MID_CALL_SPOKEN_PATTERN = re.escape(MID_CALL_SPOKEN_LINE.split("%s")[0])
 MID_CALL_NOTHING_PATTERN = re.escape(MID_CALL_NOTHING_LINE)
-
-#: A mid-call announcement whose brief said the user's last reply never arrived
-#: (#197). The Keeper writes one code-shaped token at the end of the line it
-#: already writes, so this is that line with the token pinned; the *sentence* is
-#: Briefing's and is spoken, never logged.
-MID_CALL_UNDELIVERED_PATTERN = (
-    rf"{re.escape(MID_CALL_SPOKEN_LINE.split('%s')[0])}.*undelivered={CARRIED_UNDELIVERED}"
-)
 
 #: What the Voice actually said, as the realtime adapter writes it down (#197).
 VOICE_SAID_PATTERN = re.escape(VOICE_SAID_LINE.split("%s")[0])
@@ -990,12 +977,6 @@ class _LiveCallRun:
                             self._finish_outcomes(outcomes)
 
             left_up = not self._leave_no_call_up(LIVE_CALL_CUE_SECONDS)
-            if "undelivered" in self.selection.phases:
-                outcome = self._run_phase("undelivered", state)
-                outcomes.append(outcome)
-                if outcome.result.failed:
-                    self._finish_outcomes(outcomes)
-                left_up = not self._leave_no_call_up(LIVE_CALL_CUE_SECONDS)
 
         self._measured("live call", started, self._call_is_down())
         seen = live_call.observed(self.config.call_observations)
@@ -1082,7 +1063,6 @@ class _LiveCallRun:
             for phase, name in (
                 ("dial", "the engine's first call"),
                 ("hang-up", "the Cool-down's paid call"),
-                ("undelivered", "undelivered's own call"),
             )
             if phase in self.selection.phases
         )
@@ -1395,10 +1375,6 @@ class _LiveCallRun:
             ceiling=state.ceiling_seconds,
             facts=facts,
         )
-
-    def _phase_undelivered(self, state: _LiveCallState, facts: _PhaseFacts) -> str:
-        """A retained Relay is spoken after its delivery ceiling (#197)."""
-        return self._mid_call_a_relay_that_finally_failed(state, facts)
 
     def _fill_a_history_worth_paging(
         self,
@@ -2256,174 +2232,6 @@ class _LiveCallRun:
         document = tomllib.loads(self.config.path.read_text())
         given = document.get("policy", {}).get("speech_settle_seconds")
         return DEFAULT_SPEECH_SETTLE_SECONDS if given is None else float(given)
-
-    def _mid_call_a_relay_that_finally_failed(
-        self, state: _LiveCallState, facts: _PhaseFacts
-    ) -> str:
-        """Grade a retained Relay becoming spoken undelivered news (#173, #197)."""
-        ceiling = self._relay_ceiling_seconds()
-        settle = state.speech_settle_seconds
-        silence = state.ceiling_seconds
-        cool_down = state.cool_down_seconds
-        turn = state.turn_seconds
-        # **The ceiling has to fit inside the Silence Ceiling.** This phase waits
-        # a Relay ceiling out on a call it must still be holding afterwards, and
-        # the Voice says nothing while it waits — so a Relay ceiling longer than
-        # the silence one would end the call before the news it is waiting for.
-        if ceiling + settle + LIVE_CALL_CUE_SECONDS >= silence:
-            raise LaneBlocked(
-                f"this lane's Silence Ceiling is {silence:.0f}s and its Relay ceiling "
-                f"{ceiling:.0f}s: the wait this phase makes would be what ends the call, and "
-                "the announcement would be graded against a call that had already gone"
-            )
-        started = time.monotonic()
-        # The three Session lifetimes belong to `live_call`; this phase reuses
-        # the shared Focus Session and never starts a fourth one (#223 story 8).
-        extra = state.focus.session
-        workspace = state.focus.workspace
-        address = state.focus.address(self)
-        if not self._leave_no_call_up(LIVE_CALL_CUE_SECONDS):
-            raise LaneBlocked(
-                f"a Live Call was still up after this phase asked for it to end, so there "
-                f"is no call of its own to grade: {self._call_line()!r}"
-            )
-        # **The Focus Session has to be idle before its Stop can dial.** This
-        # phase reuses the Session the phases before it drove, and both `hang-up`'s
-        # Stop chain and the arranged `relay` ground leave a turn behind. A Session
-        # still mid-turn would take this phase's instruction *into* that turn
-        # instead of stopping on it, and the dial the announcement is graded
-        # against would never come — so a Session that is not idle is missing
-        # ground, not a failed rule.
-        settled = support.wait_for(
-            lambda: str((self._row_in(workspace) or {}).get("state")) == "idle",
-            deadline_seconds=turn,
-            poll_seconds=LIVE_CALL_POLL_SECONDS,
-        )
-        if not settled:
-            raise LaneBlocked(
-                f"{address} was still "
-                f"{str((self._row_in(workspace) or {}).get('state'))!r} after {turn:.0f}s "
-                "and never went idle, so the Stop this phase dials on is not its own to drive"
-            )
-        # Its Stop is what dials, so the call is up and about this Session.
-        self._drive_extra_session(extra, workspace, turn)
-        live_call.ask_for_nothing(self.config.call_wav_directory)
-        mark = len(self.engine.log_lines())
-        with self._voice_route_only():
-            opened = support.wait_for(
-                lambda: bool(support.matching_lines(self._log_since(mark), HAND_OVER_LINE)),
-                deadline_seconds=LIVE_CALL_OPEN_SECONDS + cool_down,
-                poll_seconds=LIVE_CALL_POLL_SECONDS,
-            )
-            up = support.wait_for(
-                lambda: not self._call_is_down(),
-                deadline_seconds=LIVE_CALL_CUE_SECONDS,
-                poll_seconds=LIVE_CALL_POLL_SECONDS,
-            )
-            facts.check(
-                "call dialled and up",
-                opened and up,
-                (
-                    f"a Session stopped and Voice came on with Message off, and no call "
-                    f"was up within {LIVE_CALL_OPEN_SECONDS + cool_down:.0f}s — dialled: "
-                    f"{opened}, up: {self._call_line()!r}"
-                ),
-            )
-            # Discovery can re-key a row as it learns more; resolve the
-            # address again immediately before Relay (`sessions.py::_better_known`).
-            address = self._extra_address(workspace, address)
-            # **The Relay is what makes it the Focus Session** (#165 Q2), and
-            # the instruction it carries is what shuts its Reply Window.
-            shutting = self.lane.actionable(workspace)
-            shut_at = shutting.path_in(workspace)
-            if shut_at is not None:
-                shut_at.parent.mkdir(parents=True, exist_ok=True)
-            asked = self.bridgectl(
-                "relay", address, shutting.words, timeout=support.RELAY_DEADLINE_SECONDS
-            )
-            facts.check(
-                "permission Relay accepted",
-                asked.ok,
-                f"the relay that arms this phase was refused: {asked.text}",
-            )
-            waiting = support.wait_for(
-                lambda: str((self._row_in(workspace) or {}).get("state")) == "waiting",
-                deadline_seconds=turn,
-                poll_seconds=LIVE_CALL_POLL_SECONDS,
-            )
-            if not waiting:
-                raise LaneBlocked(
-                    f"{address} never reached `waiting` on {self.lane.asks_about}, so its "
-                    "Reply Window was never shut and there is no Relay to hold"
-                )
-            holding = len(self.engine.log_lines())
-            address = self._extra_address(workspace, address)
-            held = self.bridgectl(
-                "relay", address, UNDELIVERED.words, timeout=support.RELAY_DEADLINE_SECONDS
-            )
-            receipt = _receipt_fields(held.text)
-            facts.check(
-                "Relay retained behind closed Reply Window",
-                held.ok and receipt.get("state") == str(Lifecycle.RETAINED),
-                (
-                    f"the words meant to wait out the ceiling were answered "
-                    f"{held.text!r}, and not as `{Lifecycle.RETAINED}` — the Session's "
-                    "Reply Window was open after all"
-                ),
-            )
-            announced = support.wait_for(
-                lambda: bool(
-                    support.matching_lines(self._log_since(holding), MID_CALL_UNDELIVERED_PATTERN)
-                ),
-                # Budget the Relay ceiling plus a complete Voice answer and
-                # the two-sided settle gap (#197, `realtime/webrtc.py`).
-                deadline_seconds=(
-                    ceiling + LIVE_CALL_ANSWER_SECONDS + settle + LIVE_CALL_CUE_SECONDS
-                ),
-                poll_seconds=LIVE_CALL_POLL_SECONDS,
-            )
-            spoken = support.wait_for(
-                lambda: bool(
-                    support.matching_lines(
-                        support.matching_lines(self._log_since(holding), VOICE_SAID_PATTERN),
-                        UNDELIVERED_SPOKEN_PATTERN,
-                    )
-                ),
-                deadline_seconds=LIVE_CALL_ANSWER_SECONDS,
-                poll_seconds=LIVE_CALL_POLL_SECONDS,
-            )
-            said = [
-                line.strip()
-                for line in support.matching_lines(self._log_since(holding), VOICE_SAID_PATTERN)
-            ]
-            self._end_any_live_call()
-        self._measured("live call undelivered", started, self._call_is_down())
-        facts.record("Relay ceiling seconds", ceiling)
-        facts.record("Focus Session address", address)
-        facts.record("retained receipt", receipt)
-        facts.record("Voice turns", said)
-        facts.check(
-            "undelivered brief announced",
-            announced,
-            (
-                f"a Relay to the Focus Session passed its {ceiling:.0f}s ceiling on a call "
-                f"that was up, and no announcement carried it. Engine log tail: "
-                f"{self._log_since(holding)[-10:]}"
-            ),
-        )
-        facts.check(
-            "Voice spoke undelivered reason",
-            spoken,
-            (
-                f"the brief carried the undelivered Relay and the Voice never said "
-                f"anything matching {UNDELIVERED_SPOKEN_PATTERN!r} (#173 §6). What it said: "
-                f"{said or 'nothing this call recorded'}"
-            ),
-        )
-        return (
-            f"a Relay held past {ceiling:.0f}s reached {address} as a spoken brief, and the "
-            f"Voice said so in its own words"
-        )
 
     @contextmanager
     def _an_extra_session(

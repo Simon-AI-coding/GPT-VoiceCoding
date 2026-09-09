@@ -711,7 +711,7 @@ def _arranged_relay(
     ("decision", "expected_mark"),
     (
         (
-            live_call_step.MID_CALL_SPOKEN_LINE % ("the dictated reply", "none"),
+            live_call_step.MID_CALL_SPOKEN_LINE % "the dictated reply",
             live_call_step._VoiceTrackMark(at=2, activity_owed=True),
         ),
         (
@@ -766,10 +766,7 @@ def test_focus_stop_becomes_the_latest_voice_stimulus_before_it_is_driven(
         walk.engine._lines.extend(
             (
                 _said(live_call_step.VOICE_QUIET_LINE),
-                _said(
-                    live_call_step.MID_CALL_SPOKEN_LINE
-                    % (live_call_step.THE_QUESTION_ASKED, "none")
-                ),
+                _said(live_call_step.MID_CALL_SPOKEN_LINE % live_call_step.THE_QUESTION_ASKED),
                 _said(live_call_step.VOICE_SAID_LINE % live_call_step.THE_QUESTION_ASKED),
             )
         )

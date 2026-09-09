@@ -219,13 +219,6 @@ class SpokenBrief:
     field is already worded,
     so the adapter assembles and never phrases (see the module docstring).
 
-    **`undelivered` is `CONTEXT.md`'s *Session Brief* promise, sourced** — "when
-    the user's last reply to it never arrived, that it did not and why". It is
-    the empty string when nothing is undelivered, which is the ordinary case and
-    reads as one: an adapter writes no line for it. Its verb is Briefing's, not
-    this seam's, because an attempt that proved nothing either way may not be
-    said to have failed (`core/relays.py::RelayReason`); the whole sentence
-    arrives here already worded, like every other field.
     """
 
     #: The identity seam's name, or the address when none is known.
@@ -236,9 +229,6 @@ class SpokenBrief:
     decision: tuple[str, ...]
     answerable_here: str
     last_activity_at: str
-    #: Why the user's last reply to this Session never arrived, in Briefing's
-    #: words — empty when nothing is undelivered.
-    undelivered: str = ""
 
     def __post_init__(self) -> None:
         if not self.state.strip():
@@ -253,7 +243,6 @@ class SpokenBrief:
             self.newest,
             self.answerable_here,
             self.last_activity_at,
-            self.undelivered,
             *self.decision,
         ) + (
             _bytes_of(self.name.project, self.name.task)

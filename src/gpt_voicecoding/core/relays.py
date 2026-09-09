@@ -27,9 +27,12 @@ Three rules hang off that, all of them here:
   (`legacy@1d32845:skill/SKILL.md:63-68` covers failure only) — **dropped**; its
   synchronous relay reply (`legacy@1d32845:bridge/__main__.py:656-661,683-780`)
   is **adapted** into this structured answer.
-- **A ten-minute ceiling, then a reported failure.** The number is
-  `CorePolicy`'s, not this module's, and expiry takes the entry *out* of the
-  ledger, so REPORTED_FAILED means what it says: nothing retries it.
+- **There is no ceiling.** Queued words wait for the Session's next turn or for
+  its end, and nothing else takes them out. A ten-minute wall clock used to,
+  and on 2026-09-09 it dropped a Relay ten seconds before the turn it was
+  waiting for and said nothing (#321) — a limit of this system's own, enforced
+  against words the user had not withdrawn. The user withdraws them by saying
+  something else; that is the only clock there is.
 - **Route follows the user's explicit intent.** Deliver (between turns) versus
   supplement (mid-turn) is what the user asked for, never what the Session
   happens to be doing — the same "busy" carries both "add this now" and "this
@@ -51,8 +54,8 @@ its durable ledger, its confirmed-request history and its crash enquiry left
 behind (#61 R1). So:
 
 - **DELIVERED completes.** The entry leaves the queue and nothing retries it.
-- **FAILED may go again** at the next window, under the existing ten-minute
-  ceiling (#61 R2). Nothing arrived, so nothing can arrive twice.
+- **FAILED may go again** at the next window (#61 R2). Nothing arrived, so
+  nothing can arrive twice.
 - **UNKNOWN never goes again on this system's own authority.** It is kept, as
   duplicate-risk information, and the user is told plainly that it may already
   have landed — a second attempt is theirs to authorise, by saying the words
@@ -61,6 +64,15 @@ behind (#61 R1). So:
 - **HELD never goes again either.** It is parked in front of a person on the far
   side and will settle on its own; sending it a second time is how one decision
   becomes two identical messages waiting for the same human.
+
+**And the receipt itself is a reaction on the user's own message** (ADR 0021,
+amended 2026-09-09). A sentence is a message of its own in the chat for news the
+user already expects, so the ordinary outcomes are worded in an emoji instead
+and only three carry a sentence: the two tables below say which is which, beside
+the sentences, because what a receipt *is* is one decision and it is this
+module's. Putting the emoji on the message is the surface's act
+(`seams/companion_channel.py::CompanionChannel.react`) and which message is the
+hub's to remember; the words and the emoji are chosen here.
 
 That is why an entry that has been attempted carries the grade that attempt
 produced, and one that has not carries `None`. Re-sending the user's own words
@@ -74,12 +86,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
 
 from gpt_voicecoding.core.briefing import brief_state
 from gpt_voicecoding.core.clock import Clock, default_clock
-from gpt_voicecoding.core.lifecycle import Lifecycle, RelayReason
-from gpt_voicecoding.core.policy import CorePolicy
+from gpt_voicecoding.core.lifecycle import Lifecycle, RelayAuthority, RelayReason
 from gpt_voicecoding.core.relay_queue import PendingRelay, RelayKind, RelayQueue
 from gpt_voicecoding.core.sessions import SessionRegistry
 from gpt_voicecoding.seams.agent import (
@@ -112,28 +122,6 @@ _REASON_BY_GRADE: Mapping[Delivery | None, RelayReason] = {
 #: What the grade field says when there is no attempt to grade. Not `unknown`:
 #: that is a positive observation, and this is the absence of one.
 NO_GRADE = "none"
-
-
-class RelayAuthority(StrEnum):
-    """What the route the words took made of them (ADR 0013 §3 and its amendment).
-
-    Three cases, and the third is the one that earns a clause on the receipt.
-    An answer through a question hook the lane still held (ADR 0015) and a
-    permission verdict are **the user's own**. Words into an inbox are a peer's
-    message: whether the Session acts on them is its call. That matters to the
-    user only when there was a question to answer — a Session that merely
-    *said* it, with no hook behind it — because "arrived" is then heard as
-    "accepted as mine". Words for a Session that asked nothing carry no more
-    authority, and nobody needs telling so.
-    """
-
-    #: The held-hook answer or the verdict: the user's own decision, carried whole.
-    AS_THE_USER = "as_the_user"
-    #: Plain text into a Session that ended its turn on a question it merely
-    #: said. The words travel; the user's say-so does not (ADR 0013 §3).
-    WORDS_ON_A_QUESTION = "words_on_a_question"
-    #: Plain text into a Session that asked nothing — an instruction, a supplement.
-    WORDS = "words"
 
 
 def reason_for(receipt: DeliveryReceipt | None) -> RelayReason:
@@ -175,7 +163,6 @@ _RECEIPT_WORDING: Mapping[RelayReason, str] = {
     RelayReason.HELD_FAR_SIDE: (
         "Your words are held on the far side, in front of a person, and will settle there."
     ),
-    RelayReason.CEILING_PASSED: "Your words waited too long and were dropped; nothing sends them.",
     RelayReason.SESSION_ENDED: "That Session ended before your words could go.",
     RelayReason.QUESTION_UNANSWERABLE: (
         "That question can no longer be answered from here; answer it at the terminal."
@@ -185,6 +172,49 @@ _RECEIPT_WORDING: Mapping[RelayReason, str] = {
 #: The one place the grade changes the sentence: words that wait after an
 #: attempt **proved** they did not arrive are not words that never went.
 _FAILED_AND_WAITING = "The attempt did not arrive; your words wait for the Session's next turn."
+
+#: The emoji each reason wears on the user's own message, or `None` for a reason
+#: that wears none. Total over the codes, like the wording above: a receipt is a
+#: reaction first, and a reason with no entry here would be a Relay whose
+#: standing the user cannot see. `AWAITING_REPLY_WINDOW` covers the
+#: failed-attempt-still-waiting case too — the sentence differs there and the
+#: standing does not, because in both the words are still going.
+#:
+#: Spelt in code points rather than pasted, because the surface accepts only the
+#: emoji on its own published list and one of these carries a zero-width joiner
+#: that an editor or a copy can quietly drop (#321).
+_RECEIPT_REACTION: Mapping[RelayReason, str | None] = {
+    RelayReason.DELIVERED: "\N{OK HAND SIGN}",
+    RelayReason.AWAITING_REPLY_WINDOW: "\N{MAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER}",
+    RelayReason.HELD_FAR_SIDE: "\N{HEAR-NO-EVIL MONKEY}",
+    RelayReason.DUPLICATE_RISK: None,
+    RelayReason.QUESTION_UNANSWERABLE: None,
+    RelayReason.SESSION_ENDED: "\N{GHOST}",
+}
+
+#: The three outcomes whose sentence is sent on its own, whatever the reaction
+#: did. News the user must act on: the words are in front of a person, the
+#: question can no longer be answered from here, or nobody can tell whether they
+#: arrived. Every other reason's sentence is the fallback for a reaction that
+#: failed, and is sent only then.
+_SENTENCE_ON_ITS_OWN = frozenset(
+    {
+        RelayReason.HELD_FAR_SIDE,
+        RelayReason.QUESTION_UNANSWERABLE,
+        RelayReason.DUPLICATE_RISK,
+    }
+)
+
+
+def reaction_for(reason: RelayReason) -> str | None:
+    """The emoji this standing wears, or `None` for a standing that wears none."""
+    return _RECEIPT_REACTION[reason]
+
+
+def sentence_stands_alone(reason: RelayReason) -> bool:
+    """Whether this reason's sentence is sent whatever the reaction did."""
+    return reason in _SENTENCE_ON_ITS_OWN
+
 
 #: The codes under which the words reached, or may yet reach, the Session — the
 #: only ones where saying what the Session may make of them means anything.
@@ -266,6 +296,11 @@ class RelayOutcome:
     #: will be heard as answering. A surface that reports arrival owes the user
     #: that last difference (`receipt_sentence`).
     authority: RelayAuthority = RelayAuthority.WORDS
+    #: The channel's opaque id of the user's own message these words came from,
+    #: empty when they came from anywhere else — a button, the CLI, the Voice.
+    #: What the receipt's reaction is put on, carried on the outcome because
+    #: every settlement re-renders it and the queue row is gone by the last one.
+    message_id: str = ""
 
     def __post_init__(self) -> None:
         if (self.state is Lifecycle.DELIVERED) is not (
@@ -296,13 +331,11 @@ class RelayPipeline:
         agents: Mapping[AgentKind, AgentAdapter],
         sessions: SessionRegistry,
         relays: RelayQueue,
-        policy: CorePolicy | None = None,
         clock: Clock = default_clock,
     ) -> None:
         self._agents = dict(agents)
         self._sessions = sessions
         self._relays = relays
-        self._policy = policy or CorePolicy()
         self._clock = clock
 
     async def relay(
@@ -312,11 +345,18 @@ class RelayPipeline:
         *,
         route: RelayRoute = RelayRoute.DELIVER,
         request_id: RequestId | None = None,
+        message_id: str = "",
     ) -> RelayOutcome:
         """Take the user's words for one Session. Delivers now, or queues them.
 
         Fails closed on the target: an unknown or stale identity raises rather
         than queueing words for a Session that will never take them.
+
+        `message_id` is the channel's id of the message the user typed these
+        words in, opaque here and carried onto every outcome this Relay ever
+        produces, because the receipt for them is a reaction on that message
+        (ADR 0021). Empty from every caller that has no message — the CLI, the
+        Voice, a button press — and those receipts stay sentences.
         """
         session = self._sessions.resolve(target)
         adapter = self._adapter(target)
@@ -351,6 +391,7 @@ class RelayPipeline:
                 state=Lifecycle.REPORTED_FAILED,
                 route=chosen,
                 reason=RelayReason.QUESTION_UNANSWERABLE,
+                message_id=message_id,
             )
         may_go_now = chosen is RelayRoute.SUPPLEMENT or window is ReplyWindow.OPEN
         # ADR 0015's route, and the only one here that carries the user's own
@@ -382,6 +423,7 @@ class RelayPipeline:
                     reason=RelayReason.DELIVERED,
                     receipt=attempt,
                     authority=authority,
+                    message_id=message_id,
                 )
             _log.info(
                 "relay %s not proven delivered (%s: %s); it waits",
@@ -398,7 +440,9 @@ class RelayPipeline:
 
         # Anything that did not prove delivery waits for the next window, and a
         # SUPPLEMENT that could not go mid-turn waits as an ordinary DELIVER.
-        self._enqueue(rid, target, text, receipt=receipt)
+        self._enqueue(
+            rid, target, text, receipt=receipt, message_id=message_id, authority=authority
+        )
         return RelayOutcome(
             request_id=rid,
             target=target,
@@ -407,6 +451,7 @@ class RelayPipeline:
             reason=reason_for(receipt),
             receipt=receipt,
             authority=authority,
+            message_id=message_id,
         )
 
     async def reply_window_opened(self, target: SessionTarget) -> tuple[RelayOutcome, ...]:
@@ -419,8 +464,8 @@ class RelayPipeline:
         **And it flushes only what `may_be_retried` allows** (P9). An entry whose
         attempt proved nothing either way is passed over, every time this fires,
         for as long as it is held: the window opening is news about the Session,
-        not evidence that the earlier attempt failed. It leaves on its ceiling,
-        on a late receipt, or when the user says the words again.
+        not evidence that the earlier attempt failed. It leaves on a late
+        receipt, on the Session's end, or when the user says the words again.
         """
         adapter = self._agents.get(target.agent)
         if adapter is None:
@@ -455,23 +500,15 @@ class RelayPipeline:
                     route=waiting.route,
                     reason=reason_for(receipt),
                     receipt=receipt,
+                    message_id=waiting.message_id,
+                    # What the route made of the words when they were taken
+                    # (ADR 0013 §3). A receipt sent minutes later owes the user
+                    # the same clause as one sent at once, and re-deriving it
+                    # here would read a Session that has moved on since.
+                    authority=waiting.authority,
                 )
             )
         return tuple(flushed)
-
-    def sweep_expired(self) -> tuple[RelayOutcome, ...]:
-        """Everything past its ceiling becomes a reported failure, once.
-
-        Taking the entry out is what makes "once" true, and what makes the retry
-        boundary structural: after this there is nothing left to retry.
-        """
-        now = self._clock()
-        expired = [
-            waiting for waiting in self._relays.expired(now=now) if waiting.kind is RelayKind.ANSWER
-        ]
-        return tuple(
-            self._report_failed(waiting, RelayReason.CEILING_PASSED) for waiting in expired
-        )
 
     def session_ended(self, target: SessionTarget) -> tuple[RelayOutcome, ...]:
         """That Session is gone. Words still waiting for it can never arrive."""
@@ -513,18 +550,20 @@ class RelayPipeline:
         text: str,
         *,
         receipt: DeliveryReceipt | None,
+        message_id: str = "",
+        authority: RelayAuthority = RelayAuthority.WORDS,
     ) -> PendingRelay:
-        queued_at = self._clock()
         return self._relays.enqueue(
             PendingRelay(
                 request_id=request_id,
                 target=target,
                 kind=RelayKind.ANSWER,
                 text=text,
-                queued_at=queued_at,
-                expires_at=queued_at + self._policy.relay_ceiling_seconds,
+                queued_at=self._clock(),
                 route=RelayRoute.DELIVER,
                 receipt=receipt,
+                message_id=message_id,
+                authority=authority,
             )
         )
 
@@ -550,6 +589,8 @@ class RelayPipeline:
             route=released.route,
             reason=reason,
             receipt=released.receipt,
+            message_id=released.message_id,
+            authority=released.authority,
         )
 
 
@@ -561,7 +602,9 @@ __all__ = [
     "RelayPipeline",
     "RelayReason",
     "may_be_retried",
+    "reaction_for",
     "reason_for",
     "receipt_line",
     "receipt_sentence",
+    "sentence_stands_alone",
 ]

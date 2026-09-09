@@ -164,7 +164,7 @@ Payload: none. Data:
   "sessions": [ /* see below */ ],
   "call_id": null,
   "pending_relays": [{"request_id": "…", "target": {…}, "kind": "answer", "text": "…",
-                      "route": "deliver", "queued_at": 0.0, "expires_at": 600.0,
+                      "route": "deliver", "queued_at": 0.0,
                       "outcome": "unknown" /* or null: nothing has been attempted */}]
 }
 ```
@@ -481,7 +481,7 @@ Data:
  "route": "deliver",
  "receipt": {"outcome": "delivered" | "failed" | "held" | "unknown", "reason": "…"} | null,
  "reason": "delivered" | "awaiting_reply_window" | "duplicate_risk" | "held_far_side"
-         | "ceiling_passed" | "session_ended" | "question_unanswerable"}
+         | "session_ended" | "question_unanswerable"}
 ```
 
 **The receipt is a grade and a reason, never a sentence.** Three facts and no
@@ -496,7 +496,6 @@ the top-level `reason` is one code from the closed `RelayReason` set
 | `awaiting_reply_window` | they wait, and may go again when the Session next takes a turn |
 | `duplicate_risk` | an attempt proved nothing either way, so they are kept and never re-sent on this system's authority (P9) |
 | `held_far_side` | the far side parked them in front of a person |
-| `ceiling_passed` | terminal: they waited past `relay_ceiling_seconds` |
 | `session_ended` | terminal: the Session ended while they waited |
 | `question_unanswerable` | terminal, before the wire: that question is no longer answerable from here (#68) |
 
@@ -692,7 +691,6 @@ codex  = "gpt_voicecoding.adapters.agent.codex:codex_agent"
 workspace = "~/code"                # where the bridge's own threads run; default is ~
 
 [policy]                            # optional; these are the locked defaults
-relay_ceiling_seconds   = 600
 silence_end_seconds     = 60
 cool_down_seconds       = 30
 speech_settle_seconds   = 5

@@ -54,7 +54,7 @@ from gpt_voicecoding.core.errors import (
 from gpt_voicecoding.core.lifecycle import Lifecycle
 from gpt_voicecoding.core.relays import RelayReason
 from gpt_voicecoding.core.router import Classification
-from gpt_voicecoding.core.sessions import Session, UndeliveredRelay
+from gpt_voicecoding.core.sessions import Session
 from gpt_voicecoding.core.switches import SwitchName
 from gpt_voicecoding.core.turns import DelegatedAnswer
 from gpt_voicecoding.seams.agent import (
@@ -110,16 +110,6 @@ def _only_request(hub: Hub) -> str:
     """The request id of the one send the fake channel saw."""
     (request,) = hub.channel.requests
     return request
-
-
-def _field_lines(caplog) -> list[str]:  # noqa: ANN001
-    """Every Bridge Core line about a change to a row's `undelivered` field (#226).
-
-    Both lines say `its brief`, because both are about what the Session's brief
-    will say from here on; nothing else the hub logs does.
-    """
-    said = (record.getMessage() for record in caplog.records)
-    return [line for line in said if ", and its brief " in line]
 
 
 class DeafCall(FakeCall):
@@ -1319,215 +1309,33 @@ class TestTheRelayPipelineEndToEnd:
         assert [call.text for call in hub.agent.calls] == ["ship it"]
         assert len(hub.channel.sent) == receipts
 
-    def test_ten_minutes_of_waiting_lands_on_the_row_and_not_in_the_channel(self) -> None:
-        """#197: the news travels as a brief field, never as a line pushed beside it."""
+    def test_words_that_wait_are_never_dropped_on_a_clock(self) -> None:
+        """#321: the ceiling is abolished — a slow turn cannot lose what the user said."""
         hub = Hub()
         hub.emit(InboundText(text="ship it"))
         pushed = list(hub.channel.sent)
 
-        hub.now += TEN_MINUTES
+        hub.now += TEN_MINUTES * 10
         hub.tick()
 
+        (waiting,) = hub.state.relays.pending()
+        assert waiting.text == "ship it"
+        assert hub.channel.sent == pushed, "nothing is said, because nothing happened"
+
+    def test_the_words_still_go_in_when_the_turn_finally_comes(self) -> None:
+        """The turn that used to arrive ten seconds after the ceiling (#321)."""
+        hub = Hub()
+        hub.emit(InboundText(text="ship it"))
+
+        hub.now += TEN_MINUTES * 10
+        hub.tick()
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        assert [call.text for call in hub.agent.calls] == ["ship it"]
         assert hub.state.relays.pending() == ()
-        assert hub.state.sessions.resolve(CODEX).undelivered == UndeliveredRelay(
-            reason=str(RelayReason.CEILING_PASSED)
-        )
-        assert hub.channel.sent == pushed, "no terminal line is pushed at the user any more"
-
-    def test_an_expired_relay_that_was_attempted_does_not_read_like_one_that_was_not(
-        self,
-    ) -> None:
-        """The grade travels onto the row, so `UNKNOWN` is not read as `FAILED`.
-
-        This is what the four deleted ceiling reports came in proven/unproven
-        pairs for: "it never reached the session" is true of words that never
-        went and a guess about an attempt that proved nothing. The code says
-        what happened here; the grade says what was proved, and Briefing's verb
-        is chosen from the pair.
-        """
-        hub = Hub()
-        hub.agent.outcome = Delivery.UNKNOWN
-        hub.agent.reason = "no readback"
-        hub.emit(InboundText(text="ship it"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-
-        undelivered = hub.state.sessions.resolve(CODEX).undelivered
-        assert undelivered == UndeliveredRelay(
-            reason=str(RelayReason.CEILING_PASSED), grade=Delivery.UNKNOWN
-        )
-        assert (
-            "may not have arrived"
-            in briefing.spoken(briefing.session(hub.state.sessions.resolve(CODEX))).undelivered
-        )
-
-    def test_a_second_failure_replaces_the_reason_the_first_one_left(self) -> None:
-        hub = Hub()
-        hub.emit(InboundText(text="ship it"))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        hub.agent.outcome = Delivery.UNKNOWN
-        hub.agent.reason = "no readback"
-        hub.emit(InboundText(text="and this"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-
-        assert hub.state.sessions.resolve(CODEX).undelivered == UndeliveredRelay(
-            reason=str(RelayReason.CEILING_PASSED), grade=Delivery.UNKNOWN
-        )
-
-    def test_a_relay_that_reaches_the_session_afterwards_clears_it(self) -> None:
-        hub = Hub()
-        hub.emit(InboundText(text="ship it"))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        assert hub.state.sessions.resolve(CODEX).undelivered is not None
-
-        hub.emit(InboundText(text="and this"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-
-        assert hub.state.sessions.resolve(CODEX).undelivered is None
-
-    def test_a_verdict_that_lands_clears_it_too(self) -> None:
-        """An Approval Relay is the user's own words arriving (#165 Q2, #197)."""
-        hub = Hub(voice=False)
-        hub.emit(InboundText(text="ship it"))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        hub.agent.discovery = LaneDiscovery(
-            rows=(
-                SessionInspection(
-                    target=CODEX,
-                    workspace=Path("/tmp/workspace"),
-                    state=SessionState.WAITING,
-                    waiting_for=WaitingFor(
-                        kind=WaitingKind.PERMISSION,
-                        tool_name="Bash",
-                        detail="push the branch",
-                        approval_id="a1",
-                    ),
-                ),
-            )
-        )
-        asyncio.run(hub.core.discover())
-        assert hub.state.sessions.resolve(CODEX).undelivered is not None
-
-        asyncio.run(hub.core.answer_approval("a1", ApprovalVerdict.ALLOW))
-
-        assert hub.state.sessions.resolve(CODEX).undelivered is None
-
-    def test_a_receipt_that_arrives_late_and_proves_delivery_clears_it(self) -> None:
-        """The proof came back minutes later on the inbox's own route (ADR 0013)."""
-        hub = Hub(voice=False)
-        hub.agent.outcome = Delivery.UNKNOWN
-        hub.agent.reason = "no readback"
-        hub.emit(InboundText(text="ship it"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        assert hub.state.sessions.resolve(CODEX).undelivered is not None
-        # A second Relay is queued and still waiting; its proof arrives late.
-        hub.emit(InboundText(text="and this"))
-        pending = hub.state.relays.pending()
-
-        hub.emit(
-            RelayReceipt(
-                target=CODEX,
-                receipt=DeliveryReceipt(
-                    request_id=pending[0].request_id,
-                    outcome=Delivery.DELIVERED,
-                    reason="the Session acknowledged it",
-                ),
-            )
-        )
-
-        assert hub.state.sessions.resolve(CODEX).undelivered is None
-
-    def test_a_ceiling_that_lands_on_the_row_says_so_in_the_log(self, caplog) -> None:
-        """#226: the write the field's two readers disagree over is on the record.
-
-        `brief` and the Stop Notice read one row at two moments, so a run that
-        finds them disagreeing has to be able to ask what happened in between.
-        Only a line at the write can answer that.
-        """
-        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
-        hub = Hub()
-        hub.emit(InboundText(text="ship it"))
-        (queued,) = hub.state.relays.pending()
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-
-        assert _field_lines(caplog) == [
-            f"a Relay to {CODEX} did not arrive, and its brief now says so: "
-            f"relay={queued.request_id} reason={RelayReason.CEILING_PASSED} grade=None"
-        ]
-
-    def test_a_receipt_that_clears_the_row_says_so_in_the_log(self, caplog) -> None:
-        """The other half of #226, and the one the `relay` acceptance reads."""
-        hub = Hub(voice=False)
-        hub.agent.outcome = Delivery.UNKNOWN
-        hub.agent.reason = "no readback"
-        hub.emit(InboundText(text="ship it"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        hub.emit(InboundText(text="and this"))
-        (queued,) = hub.state.relays.pending()
-        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
-
-        hub.emit(
-            RelayReceipt(
-                target=CODEX,
-                receipt=DeliveryReceipt(
-                    request_id=queued.request_id,
-                    outcome=Delivery.DELIVERED,
-                    reason="the Session acknowledged it",
-                ),
-            )
-        )
-
-        assert _field_lines(caplog) == [
-            f"a Relay to {CODEX} arrived after all, and its brief no longer says so: "
-            f"relay={queued.request_id}"
-        ]
-
-    def test_a_write_that_changes_nothing_says_nothing(self, caplog) -> None:
-        """The common case stays silent: only a change to the field is news."""
-        hub = Hub(window=ReplyWindow.OPEN)
-        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
-
-        hub.emit(InboundText(text="ship it"))
-
-        assert hub.state.sessions.resolve(CODEX).undelivered is None
-        assert _field_lines(caplog) == []
-
-    def test_a_relay_still_queued_leaves_the_field_exactly_as_it_stands(self) -> None:
-        hub = Hub()
-        hub.emit(InboundText(text="ship it"))
-        hub.now += TEN_MINUTES
-        hub.tick()
-        stood = hub.state.sessions.resolve(CODEX).undelivered
-
-        hub.emit(InboundText(text="and this"))
-
-        assert hub.state.sessions.resolve(CODEX).undelivered == stood
-
-    def test_a_relay_held_in_front_of_a_person_leaves_it_alone_too(self) -> None:
-        hub = Hub()
-        hub.agent.outcome = Delivery.HELD
-        hub.agent.reason = "parked for a human"
-        hub.emit(InboundText(text="ship it"))
-        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
-
-        assert hub.state.sessions.resolve(CODEX).undelivered is None
 
     def test_a_session_that_ends_reports_the_words_still_waiting_for_it(self) -> None:
-        """No wake and no field: an exited Session appears nowhere, so the log has it."""
+        """No push: an exited Session appears nowhere, so the log has it."""
         hub = Hub()
         hub.emit(InboundText(text="ship it"))
 
@@ -1536,8 +1344,258 @@ class TestTheRelayPipelineEndToEnd:
         assert hub.state.relays.pending() == ()
         ended = hub.state.sessions.all()[0]
         assert ended.lifecycle is SessionLifecycle.ENDED
-        assert ended.undelivered is None
         assert hub.call.calls_started == 0
+
+
+class TestTheReceiptIsAReactionOnTheUsersOwnMessage:
+    """ADR 0021 as amended 2026-09-09, end to end (#321).
+
+    A sentence is a message of its own in the chat for news the user already
+    expects, so the ordinary outcomes wear an emoji on the message the user
+    sent and three carry a sentence. The engine remembers what it last set,
+    because a bot cannot read a reaction back out of a private chat.
+    """
+
+    #: The four emoji Core's table sets, spelt as Telegram's list spells them.
+    GOOD = "\N{OK HAND SIGN}"
+    WAITING = "\N{MAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER}"
+    HELD = "\N{HEAR-NO-EVIL MONKEY}"
+    GONE = "\N{GHOST}"
+
+    #: The user's own message the words were typed in.
+    THEIRS = "4242"
+
+    def said(self, hub: Hub, text: str = "ship it", *, message_id: str = THEIRS) -> None:
+        hub.emit(InboundText(text=text, message_id=message_id))
+
+    def test_words_that_went_straight_in_cost_no_message(self) -> None:
+        hub = Hub(window=ReplyWindow.OPEN)
+
+        self.said(hub)
+
+        assert hub.channel.reactions == [(self.THEIRS, self.GOOD)]
+        assert hub.channel.sent == [], "a good outcome costs no message"
+
+    def test_words_that_queue_wear_the_waiting_emoji_and_swap_when_they_go_in(self) -> None:
+        hub = Hub()
+        self.said(hub)
+
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING), (self.THEIRS, self.GOOD)]
+        assert hub.channel.sent == []
+
+    def test_words_that_queue_swap_to_the_ghost_when_the_session_ends_first(self) -> None:
+        hub = Hub()
+        self.said(hub)
+
+        hub.emit(SessionEnded(target=CODEX))
+
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING), (self.THEIRS, self.GONE)]
+        # The ended line is the only thing said, and it is not a receipt.
+        assert "your words" not in " ".join(hub.channel.sent).casefold()
+
+    def test_a_second_settlement_at_the_same_standing_costs_no_call(self) -> None:
+        """The engine tracks what it set, so a re-render that changes nothing is silent."""
+        hub = Hub()
+        self.said(hub)
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "the far side refused"
+
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING)]
+
+    def test_two_queued_relays_each_wear_their_own(self) -> None:
+        hub = Hub()
+        self.said(hub, "ship it", message_id="1")
+        self.said(hub, "and this", message_id="2")
+
+        hub.emit(SessionEnded(target=CODEX))
+
+        assert hub.channel.reactions == [
+            ("1", self.WAITING),
+            ("2", self.WAITING),
+            ("1", self.GONE),
+            ("2", self.GONE),
+        ]
+
+    def test_words_held_in_front_of_a_person_earn_the_monkey_and_the_sentence(self) -> None:
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.agent.outcome = Delivery.HELD
+        hub.agent.reason = "parked for a human"
+
+        self.said(hub)
+
+        assert hub.channel.reactions == [(self.THEIRS, self.HELD)]
+        assert hub.channel.sent == [
+            "Your words are held on the far side, in front of a person, and will settle there."
+        ]
+
+    def test_words_nobody_can_vouch_for_earn_a_sentence_and_no_reaction(self) -> None:
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.agent.outcome = Delivery.UNKNOWN
+        hub.agent.reason = "no readback"
+
+        self.said(hub)
+
+        assert hub.channel.reactions == []
+        assert "Nobody can tell whether your words arrived" in hub.channel.sent[0]
+
+    def test_a_question_that_can_no_longer_be_answered_earns_a_sentence_alone(self) -> None:
+        hub = Hub(voice=False)
+        hub.agent.discovery = LaneDiscovery(
+            rows=(
+                SessionInspection(
+                    target=CODEX,
+                    workspace=Path("/tmp/workspace"),
+                    state=SessionState.WAITING,
+                    waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt="Which base?"),
+                ),
+            )
+        )
+        asyncio.run(hub.core.discover())
+
+        self.said(hub, "main")
+
+        assert hub.channel.reactions == []
+        assert "at the terminal" in hub.channel.sent[-1]
+
+    def test_a_refused_reaction_becomes_that_reason_s_own_sentence(self) -> None:
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.channel.react_stands = False
+
+        self.said(hub)
+
+        assert hub.channel.reactions == [(self.THEIRS, self.GOOD)]
+        assert hub.channel.sent == ["Your words arrived."]
+
+    def test_a_refused_reaction_on_a_queued_relay_says_so_in_words_too(self) -> None:
+        hub = Hub()
+        hub.channel.react_stands = False
+
+        self.said(hub)
+
+        assert hub.channel.sent == [
+            "Your words are waiting, and go in when the Session next takes a turn."
+        ]
+
+    def test_a_refused_reaction_on_an_ending_session_says_so_in_words_too(self) -> None:
+        hub = Hub()
+        hub.channel.react_stands = False
+        self.said(hub)
+
+        hub.emit(SessionEnded(target=CODEX))
+
+        assert "That Session ended before your words could go." in hub.channel.sent
+
+    def test_the_failed_attempt_still_waiting_keeps_its_own_sentence(self) -> None:
+        """The one case where the grade changes the words, and the emoji does not."""
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.channel.react_stands = False
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "the far side refused"
+
+        self.said(hub)
+
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING)]
+        assert hub.channel.sent == [
+            "The attempt did not arrive; your words wait for the Session's next turn."
+        ]
+
+    def test_a_reaction_is_never_retried_after_it_failed(self) -> None:
+        """The fallback already told the user what the emoji would have."""
+        hub = Hub()
+        hub.channel.react_stands = False
+        self.said(hub)
+        said = len(hub.channel.sent)
+
+        hub.channel.react_stands = True
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING), (self.THEIRS, self.GOOD)]
+        assert len(hub.channel.sent) == said
+
+    def test_a_reaction_that_failed_is_neither_retried_nor_said_twice(self) -> None:
+        """The fallback is the receipt for that standing, so the standing is done."""
+        hub = Hub()
+        hub.channel.react_stands = False
+        self.said(hub)
+        hub.agent.outcome = Delivery.FAILED
+        hub.agent.reason = "the far side refused"
+
+        hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.OPEN))
+
+        # The words are still waiting, so the standing has not moved: no second
+        # reaction call and no second sentence.
+        assert hub.channel.reactions == [(self.THEIRS, self.WAITING)]
+        assert len(hub.channel.sent) == 1
+
+    def test_a_sentence_hangs_under_the_message_the_words_were_typed_in(self) -> None:
+        """ADR 0021: the sentence is sent as a reply to the user's own message."""
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.agent.outcome = Delivery.HELD
+        hub.agent.reason = "parked for a human"
+
+        self.said(hub)
+
+        assert hub.channel.replies_to == [self.THEIRS]
+
+    def test_a_fallback_sentence_hangs_under_it_too(self) -> None:
+        hub = Hub(window=ReplyWindow.OPEN)
+        hub.channel.react_stands = False
+
+        self.said(hub)
+
+        assert hub.channel.replies_to == [self.THEIRS]
+
+    def test_a_sentence_for_words_with_no_message_hangs_under_nothing(self) -> None:
+        hub = Hub()
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.channel.replies_to == [""]
+
+    def test_a_press_has_no_message_to_react_on_and_keeps_its_sentence(self) -> None:
+        """A button is no message of the user's, so its receipt stays the toast (#321)."""
+        hub = Hub()
+
+        hub.emit(InboundText(text="ship it"))
+
+        assert hub.channel.reactions == []
+        assert hub.channel.sent == [
+            "Your words are waiting, and go in when the Session next takes a turn."
+        ]
+
+    def test_a_relay_from_the_cli_says_nothing_in_the_chat_at_all(self) -> None:
+        """No message, and no surface that asked: the CLI holds its own receipt."""
+        hub = Hub(window=ReplyWindow.OPEN)
+
+        asyncio.run(hub.core.relay(CODEX, "ship it"))
+
+        assert hub.channel.reactions == []
+        assert hub.channel.sent == []
+
+    def test_a_late_proof_of_delivery_swaps_the_waiting_emoji_for_the_good_one(self) -> None:
+        """The proof came back minutes later on the inbox's own route (ADR 0013)."""
+        hub = Hub(voice=False)
+        hub.agent.outcome = Delivery.UNKNOWN
+        hub.agent.reason = "no readback"
+        hub.emit(InboundText(text="ship it", message_id=self.THEIRS))
+        (pending,) = hub.state.relays.pending()
+
+        hub.emit(
+            RelayReceipt(
+                target=CODEX,
+                receipt=DeliveryReceipt(
+                    request_id=pending.request_id,
+                    outcome=Delivery.DELIVERED,
+                    reason="the Session acknowledged it",
+                ),
+            )
+        )
+
+        assert hub.channel.reactions[-1] == (self.THEIRS, self.GOOD)
 
 
 class TestTheInboundRouterEndToEnd:
@@ -3059,106 +3117,6 @@ class TestMidCallNewsThroughTheWholeHub:
 
         assert hub.call.spoken == []
         assert hub.call.calls_started == 1
-
-
-class TestARelayThatFinallyFailedReachesTheUser:
-    """#197, end to end: the reason travels as a brief field, through the Keeper.
-
-    Bridge Core folds one field onto the Session's row and wakes the Keeper with
-    the Focus judged *now* — a relay can pass its ceiling minutes after it was
-    queued, and the user may have answered another Session since (ADR 0017).
-    """
-
-    OTHER = SessionTarget(agent=AgentKind.CLAUDE, session_id="def", pid=100)
-
-    def waiting(self, hub: Hub, target: SessionTarget) -> None:
-        """Put a stopped, question-shaped reading on that row, as a Stop would."""
-        hub.state.sessions.set_stop_reading(
-            target,
-            waiting_for=WaitingFor(kind=WaitingKind.QUESTION, prompt="Which base?"),
-            progress=ProgressObservation.readable(
-                has_history=True,
-                read_at=datetime(2026, 9, 3, 1, 2, 3, tzinfo=UTC),
-                recent=(ProgressEntry(ordinal=0, role=ProgressRole.ASSISTANT, text="I got here"),),
-            ),
-            now=hub.now,
-        )
-
-    def failed_relay(self, hub: Hub, target: SessionTarget) -> None:
-        """The user's words, attempted and proven not to have arrived."""
-        hub.agent.answerable_questions.add(target)
-        hub.agent.outcome = Delivery.FAILED
-        hub.agent.reason = "the far side refused"
-        asyncio.run(hub.core.relay(target, "main"))
-
-    def test_a_failure_with_no_call_up_dials_and_hands_the_reason_over(self) -> None:
-        hub = Hub()
-        self.waiting(hub, CODEX)
-        self.failed_relay(hub, CODEX)
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-
-        assert hub.call.calls_started == 1
-        briefs = [item for item in hub.call.opened_on[0].hand_over if isinstance(item, SpokenBrief)]
-        assert [brief.undelivered for brief in briefs] == [
-            "your last reply did not arrive, because ceiling_passed"
-        ]
-
-    def test_a_failure_under_cool_down_owes_a_dial_rather_than_dialling_now(self) -> None:
-        hub = Hub(cool_down_seconds=3_600.0)
-        hub.toggle()
-        hub.toggle()  # the call the user opened ends, and a Cool-down begins
-        self.waiting(hub, CODEX)
-        self.failed_relay(hub, CODEX)
-        dialled = hub.call.calls_started
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-
-        assert hub.call.calls_started == dialled, "the Cool-down had not elapsed"
-        assert hub.core.status().dial_owed
-
-    def hub_on_a_call(self) -> Hub:
-        hub = Hub(
-            sessions=((CODEX, "port the log"), (self.OTHER, "the other one")),
-            silence_end_seconds=3_600.0,
-        )
-        hub.toggle()
-        return hub
-
-    def gap(self, hub: Hub) -> None:
-        hub.now += 5.0
-        hub.tick()
-
-    def test_a_failure_mid_call_is_spoken_at_the_gap_as_the_focus_brief(self) -> None:
-        hub = self.hub_on_a_call()
-        self.waiting(hub, CODEX)
-        self.failed_relay(hub, CODEX)
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-        self.gap(hub)
-
-        (spoken,) = hub.call.spoken
-        assert "port the log" in str(spoken.name)
-        assert spoken.undelivered == "your last reply did not arrive, because ceiling_passed"
-
-    def test_a_session_the_user_has_since_left_only_rings(self) -> None:
-        """`focus` is judged at the wake, not when the words were queued."""
-        hub = self.hub_on_a_call()
-        self.waiting(hub, self.OTHER)
-        self.failed_relay(hub, self.OTHER)
-        self.waiting(hub, CODEX)
-        hub.state.sessions.set_focus(CODEX)
-
-        hub.now += TEN_MINUTES
-        hub.tick()
-        self.gap(hub)
-
-        assert hub.call.spoken == []
-        assert hub.call.cues.count(Cue.EVENT) == 1
-        assert hub.state.sessions.resolve(self.OTHER).undelivered is not None
 
 
 class TestTheSoleLiveSessionWithNoFocus:

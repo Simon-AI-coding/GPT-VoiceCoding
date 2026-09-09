@@ -23,7 +23,6 @@ def test_no_phase_selection_grades_the_whole_walk_in_ticket_order() -> None:
         "long answer",
         "mid-call news",
         "hang-up",
-        "undelivered",
     )
 
     selected = live_call_step.select_phases()
@@ -74,7 +73,6 @@ def test_every_phase_has_backwards_only_declared_ground() -> None:
         "long answer": ("dial",),
         "mid-call news": ("dial", "relay"),
         "hang-up": ("dial",),
-        "undelivered": (),
     }
     assert tuple(live_call_step.PHASE_GROUND) == live_call_step.PHASES
     for phase, ground in live_call_step.PHASE_GROUND.items():
@@ -180,12 +178,8 @@ def test_only_an_in_call_phase_runs_inside_the_walks_first_call() -> None:
     selection that chose no in-call phase failed run `20260904T102740Z` for not
     exercising what it never selected, while the fact it did select was green.
     """
-    assert live_call_step.OUTSIDE_THE_FIRST_CALL == "undelivered"
-    assert live_call_step.in_call_phases(("undelivered",)) == ()
-    assert live_call_step.in_call_phases(("detail", "undelivered")) == ("detail",)
-    assert live_call_step.in_call_phases(live_call_step.PHASES) == tuple(
-        phase for phase in live_call_step.PHASES if phase != "undelivered"
-    )
+    assert live_call_step.in_call_phases(("detail",)) == ("detail",)
+    assert live_call_step.in_call_phases(live_call_step.PHASES) == live_call_step.PHASES
     # The whole run always selects in-call phases, so it still grades the fact.
     assert live_call_step.in_call_phases(live_call_step.select_phases().phases)
 

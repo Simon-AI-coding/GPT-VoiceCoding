@@ -380,7 +380,6 @@ def _policy(section: dict[str, Any], where: str) -> CorePolicy:
     """The locked dials, dialled. The pipelines own what they mean."""
     dials: dict[str, float | int] = {}
     for key in (
-        "relay_ceiling_seconds",
         "silence_end_seconds",
         "cool_down_seconds",
         "speech_settle_seconds",

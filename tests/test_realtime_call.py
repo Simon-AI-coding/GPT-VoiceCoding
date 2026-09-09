@@ -2968,6 +2968,49 @@ class _InboundTrack:
         return object()
 
 
+class _PaddingTrack:
+    """A peer that never stops sending — the stall #301 is about.
+
+    `_InboundTrack` yields a fixed list and then ends, which is a peer that
+    stops. This one keeps yielding for as long as anything receives, so the
+    playback buffer never reaches zero and the inbound stream never goes
+    quiet: the two facts the pre-#301 check needed, neither of which a padding
+    peer ever supplies.
+
+    Paced at one frame per `FRAME_SECONDS` of *real* time rather than spun as
+    fast as the loop will go, because a wait runs beside this one and a peer
+    that never yields would starve it. The test's own clock is advanced by the
+    same amount, so the inbound stream reads as continuous there too.
+    """
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+        self.frames = 0
+        self._wanted = 0
+        self._enough: asyncio.Event | None = None
+
+    async def recv(self) -> Any:
+        await asyncio.sleep(webrtc.FRAME_SECONDS)
+        self._clock.advance(webrtc.FRAME_SECONDS)
+        self.frames += 1
+        if self._enough is not None and self.frames >= self._wanted:
+            self._enough.set()
+        return object()
+
+    async def sent(self, frames: int) -> None:
+        """Return once this many frames are buffered, so a span starts holding a known amount.
+
+        The speaker buffers each frame before its next `recv` yields, so a
+        waiter released here always sees the frame that released it already
+        counted — which is what makes the span's audio an exact number of
+        frames and not a race.
+        """
+        self._wanted = frames
+        self._enough = asyncio.Event()
+        if self.frames < frames:
+            await self._enough.wait()
+
+
 @contextmanager
 def _av(*, samples: int = 0) -> Iterator[None]:
     """`av`, for the length of a test. CI does not install the real one."""
@@ -2986,25 +3029,24 @@ def _av(*, samples: int = 0) -> Iterator[None]:
             sys.modules["av"] = was
 
 
-class TestWhatAPlayoutSaysAboutItself:
-    """#230: a stalled stop edge has to be explainable from the engine log alone.
+class _PlayoutSeam:
+    """The speaker, driven directly, on a clock the test moves by hand.
 
-    `drained` is two facts — nothing inbound for `PLAYBACK_QUIET_FRAMES` frames,
-    and nothing still queued for the device — and the timeout line reported
-    neither. A remote peer that keeps RTP flowing through silence and an event
-    loop starved into delivering frames in bursts produce the same 180s wait and
-    the same single line, so no run could tell the two apart. The largest gap in
-    the window is the fact that separates them, and it is only worth anything
-    beside the frame count, the trailing gap and the bytes still buffered.
-
-    Built without `aiortc`, `av` or `sounddevice` — CI installs none of them —
-    and on a clock the test moves by hand.
+    Shared by the two classes below because they drive the same seam: one asks
+    what a span *reports*, the other what *closes* it, and a second copy of the
+    setup would let those two drift into two seams.
     """
 
     def speaker(self, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, _Clock]:
         clock = _Clock()
         monkeypatch.setattr(webrtc, "time", clock)
         return webrtc._Speaker(silent=True, device=None), clock
+
+    def buffering(self, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, _Clock]:
+        """A speaker with a real playback buffer, on a device that never drains it."""
+        clock = _Clock()
+        monkeypatch.setattr(webrtc, "time", clock)
+        return webrtc._Speaker(silent=False, device=None), clock
 
     def heard(self, speaker: Any, gaps: list[float], clock: _Clock) -> None:
         """Play one stretch of inbound audio into the speaker, to its end."""
@@ -3013,13 +3055,40 @@ class TestWhatAPlayoutSaysAboutItself:
             speaker.attach(_InboundTrack(gaps, clock))
             await speaker._task
 
-        with _av():
+        with _sounddevice(_Streams(blocks_on=None)), _av(samples=webrtc.FRAME_SAMPLES):
             asyncio.run(scenario())
 
     def transport(self, speaker: Any) -> Any:
         made = object.__new__(webrtc._WebRtcTransport)
         made._speaker = speaker
+        made._events_seen = set()
         return made
+
+    def line(self, caplog: Any) -> str:
+        """The one stop-edge line the wait wrote."""
+        return next(
+            said for said in (record.getMessage() for record in caplog.records) if "drained" in said
+        )
+
+
+class TestWhatAPlayoutSaysAboutItself(_PlayoutSeam):
+    """#230: a stalled stop edge has to be explainable from the engine log alone.
+
+    `drained` was two facts about the far side and the device, and the timeout
+    line reported neither. A remote peer that keeps RTP flowing through silence
+    and an event loop starved into delivering frames in bursts produce the same
+    180s wait and the same single line, so no run could tell the two apart. The
+    largest gap in the window is the fact that separates them, and it is only
+    worth anything beside the frame count, the trailing gap and the bytes still
+    buffered.
+
+    Since #301 those facts decide nothing — the span's end is computed from the
+    audio it began with — but they are still measured and still reported on both
+    exits, which is what this class is about and why it outlived the rule.
+
+    Built without `aiortc`, `av` or `sounddevice` — CI installs none of them —
+    and on a clock the test moves by hand.
+    """
 
     def drained(self, transport: Any, timeout_seconds: float) -> None:
         asyncio.run(transport.playback_drained(timeout_seconds))
@@ -3027,26 +3096,28 @@ class TestWhatAPlayoutSaysAboutItself:
     def test_a_timed_out_playout_says_what_the_inbound_stream_did(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The peer never stopped sending, so the wait ran out. Say so, with numbers.
+        """The wait ran out. Say so, with numbers — that is the whole of #230.
 
-        The clock is left where the last frame landed, which is the stall the
-        ticket describes: `_last_frame_at` is continuously fresh, the 60ms gap
-        never opens and `drained` stays False for the whole bound.
+        Since #301 the only way to reach the bound is a span holding more audio
+        than the caller allowed time for, so that is the shape here: five frames
+        the device never took, 100 ms of unheard audio behind a 20 ms bound. What the
+        line has to carry is unchanged.
         """
-        speaker, clock = self.speaker(monkeypatch)
+        speaker, clock = self.buffering(monkeypatch)
         self.heard(speaker, [0.02] * 5, clock)
 
         with caplog.at_level(logging.INFO):
-            self.drained(self.transport(speaker), 0.05)
+            self.drained(self.transport(speaker), 0.02)
 
         line = next(
             said for said in (record.getMessage() for record in caplog.records) if "drained" in said
         )
+        held = 5 * webrtc.FRAME_SAMPLES * webrtc.SAMPLE_BYTES
         assert "had not drained" in line
         assert "5 inbound frames" in line
         assert "last 0.000s ago" in line
         assert "largest gap 0.020s" in line
-        assert "0 bytes still buffered" in line
+        assert f"{held} bytes still buffered" in line
 
     def test_an_ordinary_stop_edge_says_the_same_four_things(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -3054,10 +3125,6 @@ class TestWhatAPlayoutSaysAboutItself:
         """A clean run and a stalled run are only comparable if both are written down."""
         speaker, clock = self.speaker(monkeypatch)
         self.heard(speaker, [0.02] * 5, clock)
-        # Past the quiet bound rather than exactly on it: `drained` compares two
-        # accumulated floats, and a test that sits on the boundary is deciding
-        # its own outcome by the last bit of 0.02.
-        clock.advance((webrtc.PLAYBACK_QUIET_FRAMES + 1) * webrtc.FRAME_SECONDS)
 
         with caplog.at_level(logging.INFO):
             self.drained(self.transport(speaker), 5.0)
@@ -3067,7 +3134,7 @@ class TestWhatAPlayoutSaysAboutItself:
         )
         assert "had not drained" not in line
         assert "5 inbound frames" in line
-        assert "last 0.080s ago" in line
+        assert "last 0.000s ago" in line
         assert "largest gap 0.020s" in line
         assert "0 bytes still buffered" in line
 
@@ -3202,167 +3269,159 @@ class TestWhatAPlayoutSaysAboutItself:
         assert "no gap measured" in line
 
 
-class TestWhatClosesTheVoicesSpan:
-    """#235: the stop edge closes on the server's word, and says which fact closed it.
+class TestWhatClosesTheVoicesSpan(_PlayoutSeam):
+    """#301: the engine decides the span's end from the audio it already holds.
 
-    The day's runs (`20260905T071849Z`, `075128Z`, `090222Z`, `092046Z`) decided
-    the cause: the bound fired seven times, every time with 0 bytes buffered,
-    the last frame milliseconds ago and gaps under a second — the peer keeps
-    streaming silence after the Voice has finished, so "nothing inbound for 60ms"
-    can never become true while it does. Whether the peer pads its stream is the
-    peer's business, so the first fact is now the server's own end-of-playout
-    event, latched on the speaker from the events data channel; the quiet rule
-    is the fallback for a peer that never sends it, and the bound the last
-    resort. Every exit names the fact that closed it.
+    #235 made the server's word the rule and kept quiet as the fallback. Across
+    91 spans of the engine log the server's word fired **0** times — the
+    `output_audio_buffer.*` family does not exist on this wire, which this
+    repo's own research had established four days earlier — quiet closed 84, and
+    the bound fired 7. Every one of those 7 reports 1920 or 3840 bytes still
+    buffered: a peer that pads its stream leaves a standing backlog of two to
+    four frames, so neither the buffer-empty gate nor the quiet rule can ever
+    become true while it pads.
+
+    So the span now ends when the audio the Voice generated has had time to be
+    heard: what the speaker is still holding when the wait begins, divided
+    by the stream's own byte rate. Audio arriving after that is not the Voice
+    speaking. The bound stays as a genuine last resort, and both exits still
+    report what the inbound stream did (#230).
 
     Built without `aiortc`, `av` or `sounddevice`, on a clock moved by hand, the
     way `TestWhatAPlayoutSaysAboutItself` is.
     """
 
-    def speaker(self, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, _Clock]:
-        clock = _Clock()
-        monkeypatch.setattr(webrtc, "time", clock)
-        return webrtc._Speaker(silent=True, device=None), clock
-
-    def heard(self, speaker: Any, gaps: list[float], clock: _Clock) -> None:
-        async def scenario() -> None:
-            speaker.attach(_InboundTrack(gaps, clock))
-            await speaker._task
-
-        with _av():
-            asyncio.run(scenario())
-
-    def transport(self, speaker: Any) -> Any:
-        made = object.__new__(webrtc._WebRtcTransport)
-        made._speaker = speaker
-        made._events_seen = set()
-        return made
-
     def drained_line(self, transport: Any, timeout_seconds: float, caplog: Any) -> str:
         with caplog.at_level(logging.INFO):
             asyncio.run(transport.playback_drained(timeout_seconds))
-        return next(
-            said for said in (record.getMessage() for record in caplog.records) if "drained" in said
-        )
+        return self.line(caplog)
 
-    def test_the_servers_word_closes_a_span_the_peer_keeps_padding(
+    def test_a_peer_that_never_stops_sending_no_longer_holds_the_span_open(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Frames still arriving, the last one just now — and the server said it is done.
+        """The regression test: the 2026-09-09 stall, and it is red without the rule.
 
-        This is the shape of all seven bound hits: with the 60ms rule alone the
-        wait ran its whole 180s. With the server's word it closes at once.
+        The peer keeps padding for the whole wait, so the buffer never reaches
+        zero and the inbound stream never goes quiet — the two facts the old
+        check needed. The span closes anyway, on the audio it began with, and
+        long before the 5s bound.
+        """
+        speaker, clock = self.buffering(monkeypatch)
+        padding = _PaddingTrack(clock)
+
+        async def scenario() -> None:
+            speaker.attach(padding)
+            await padding.sent(2)
+            await self.transport(speaker).playback_drained(5.0)
+            speaker.stop()
+
+        with caplog.at_level(logging.INFO):
+            with _sounddevice(_Streams(blocks_on=None)), _av(samples=webrtc.FRAME_SAMPLES):
+                asyncio.run(scenario())
+
+        line = self.line(caplog)
+        assert "had not drained" not in line
+        assert webrtc.SpanClosedBy.HEARD.value in line
+        # It began with the two frames the peer had already sent, and closed on
+        # those — while the peer went on sending, which is the whole point: the
+        # buffer never emptied and the stream never went quiet.
+        assert f"began with {2 * webrtc.FRAME_SAMPLES * webrtc.SAMPLE_BYTES} bytes" in line
+        assert padding.frames > 2
+        # The clean exit carries the whole record, not just the field that
+        # closed it: the inbound facts are the sentinel for the next stall and
+        # a run is only diagnosable against a clean one (#230).
+        assert f"{padding.frames} inbound frames" in line
+        assert "last 0.000s ago" in line
+        assert "largest gap 0.020s" in line
+        assert "bytes still buffered" in line
+
+    def test_a_peer_that_stops_closes_no_sooner_than_the_audio_it_left_behind(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The span is a duration, not a formality: the user hears all of it.
+
+        Three frames of 20 ms are 60 ms of audio nobody has heard yet when the
+        wait begins, and returning before then would cut the Voice off — the
+        one thing the old buffer-empty gate did get right.
+        """
+        speaker, clock = self.buffering(monkeypatch)
+        self.heard(speaker, [0.02] * 3, clock)
+        unheard = 3 * webrtc.FRAME_SECONDS
+
+        started = time.monotonic()
+        line = self.drained_line(self.transport(speaker), 5.0, caplog)
+        waited = time.monotonic() - started
+
+        assert waited >= unheard
+        assert "had not drained" not in line
+        assert webrtc.SpanClosedBy.HEARD.value in line
+
+    def test_a_span_that_begins_holding_nothing_closes_at_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nothing held is no wait: the device has already played all it was given."""
+        speaker, _ = self.buffering(monkeypatch)
+
+        started = time.monotonic()
+        line = self.drained_line(self.transport(speaker), 5.0, caplog)
+        waited = time.monotonic() - started
+
+        assert waited < webrtc.FRAME_SECONDS
+        assert webrtc.SpanClosedBy.HEARD.value in line
+        assert "began with 0 bytes" in line
+
+    def test_a_silent_run_closes_the_way_it_always_did(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No speaker, so nothing to wait out — and the inbound facts still reported.
+
+        Under the old rule this needed the peer to go quiet first. It no longer
+        does, which is the same outcome by a shorter road: there is no audio
+        trailing anywhere on a run with no device.
         """
         speaker, clock = self.speaker(monkeypatch)
         self.heard(speaker, [0.02] * 5, clock)
-        speaker.heard_from_server(webrtc.OutputAudioEvent.FINISHED)
-
-        line = self.drained_line(self.transport(speaker), 180.0, caplog)
-
-        assert "had not drained" not in line
-        assert webrtc.SpanClosedBy.SERVER.value in line
-        assert "5 inbound frames" in line
-        assert "last 0.000s ago" in line
-
-    def test_without_the_servers_word_quiet_still_closes_the_span(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A peer that stops sending is still recognised by the rule that always worked."""
-        speaker, clock = self.speaker(monkeypatch)
-        self.heard(speaker, [0.02] * 5, clock)
-        clock.advance((webrtc.PLAYBACK_QUIET_FRAMES + 1) * webrtc.FRAME_SECONDS)
 
         line = self.drained_line(self.transport(speaker), 5.0, caplog)
 
-        assert "had not drained" not in line
-        assert webrtc.SpanClosedBy.QUIET.value in line
+        assert webrtc.SpanClosedBy.HEARD.value in line
+        assert "began with 0 bytes" in line
+        assert "5 inbound frames" in line
+        assert "last 0.000s ago" in line
 
-    def test_with_neither_the_bound_fires_and_says_so(
+    def test_a_span_longer_than_the_bound_is_the_one_way_the_bound_still_fires(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        speaker, clock = self.speaker(monkeypatch)
-        self.heard(speaker, [0.02] * 5, clock)
+        """The last resort, and it still says everything the diagnosis needs.
 
-        line = self.drained_line(self.transport(speaker), 0.05, caplog)
+        Under the new rule nothing else can reach it: a span whose audio fits
+        inside the bound always closes on that. So the bound firing means
+        the engine was holding more audio than the caller allowed time for,
+        and the line has to carry both numbers.
+        """
+        speaker, clock = self.buffering(monkeypatch)
+        self.heard(speaker, [0.02] * 3, clock)
+
+        line = self.drained_line(self.transport(speaker), 0.02, caplog)
 
         assert "had not drained" in line
-        assert "neither the server's word nor quiet" in line
-        assert "5 inbound frames" in line
+        assert webrtc.SpanClosedBy.HEARD.value not in line
+        began = 3 * webrtc.FRAME_SAMPLES * webrtc.SAMPLE_BYTES
+        assert f"began with {began} bytes" in line
+        assert "3 inbound frames" in line
+        assert "last 0.000s ago" in line
+        assert "largest gap 0.020s" in line
+        assert f"{began} bytes still buffered" in line
 
-    def test_the_servers_word_does_not_close_over_audio_the_device_still_holds(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The server has sent everything; this side has not played it. Not drained."""
-        _, clock = self.speaker(monkeypatch)
-        speaker = webrtc._Speaker(silent=False, device=None)
-
-        async def scenario() -> None:
-            speaker.attach(_InboundTrack([0.02] * 3, clock))
-            await speaker._task
-
-        with _sounddevice(_Streams(blocks_on=None)), _av(samples=480):
-            asyncio.run(scenario())
-        speaker.heard_from_server(webrtc.OutputAudioEvent.FINISHED)
-
-        assert speaker.closed_by is None
-        assert speaker.playout.buffered_bytes > 0
-
-    def test_a_new_response_starting_takes_the_last_ones_word_back(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """`stopped` can lag a span the quiet rule already closed; `started` resets it.
-
-        Without this a stale `stopped` would sit latched into the next span and
-        close it the moment the buffer was empty — on a silent run, at once.
-        The reset is unconditional, and that is the intended behaviour even
-        while a wait is still polling for the previous span: the Voice speaking
-        again is what makes that wait stale in the adapter, and the span stays
-        open until this response's own `stopped` — which closes it.
-        """
-        speaker, clock = self.speaker(monkeypatch)
-        speaker.heard_from_server(webrtc.OutputAudioEvent.FINISHED)
-        speaker.heard_from_server(webrtc.OutputAudioEvent.STARTED)
-        self.heard(speaker, [0.02] * 3, clock)
-        assert speaker.closed_by is None
-
-        speaker.heard_from_server(webrtc.OutputAudioEvent.FINISHED)
-        assert speaker.closed_by is webrtc.SpanClosedBy.SERVER
-
-    def test_closing_the_window_consumes_the_servers_word(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """One word closes one span. The next wait starts without it."""
-        speaker, clock = self.speaker(monkeypatch)
-        self.heard(speaker, [0.02] * 3, clock)
-        speaker.heard_from_server(webrtc.OutputAudioEvent.FINISHED)
-        assert speaker.closed_by is webrtc.SpanClosedBy.SERVER
-
-        speaker.take_playout()
-        self.heard(speaker, [0.02] * 3, clock)
-
-        assert speaker.closed_by is None
-
-    def test_an_event_outside_the_family_changes_nothing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """`cleared`, `response.done` and the rest are dropped where the channel is read."""
-        speaker, clock = self.speaker(monkeypatch)
-        self.heard(speaker, [0.02] * 3, clock)
-        transport = self.transport(speaker)
-
-        transport._read_channel_event('{"type": "response.done"}')
-        transport._read_channel_event('{"type": "output_audio_buffer.cleared"}')
-
-        assert speaker.closed_by is None
-
-    def test_the_events_channel_is_read_for_the_servers_word(
+    def test_the_events_channel_still_names_each_type_it_carries(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A JSON event on the data channel, as text or bytes, reaches the speaker.
+        """The sentinel that answered #235's question, kept to answer the next one.
 
-        The line naming each event type is logged once per call: the next run is
-        what proves whether this backend sends the event at all, and it has to be
-        readable from the engine log alone.
+        Nothing on this channel closes a span any more, so the channel is read
+        for one purpose only: to say, once per type per call, what the backend
+        actually sends. A codex protocol change should be noticed in the log
+        rather than silently absorbed.
         """
         speaker, clock = self.speaker(monkeypatch)
         self.heard(speaker, [0.02] * 3, clock)
@@ -3370,28 +3429,29 @@ class TestWhatClosesTheVoicesSpan:
 
         heard = transport._read_channel_event
         with caplog.at_level(logging.INFO):
-            heard('{"type": "output_audio_buffer.started", "event_id": "e1"}')
-            heard(b'{"type": "output_audio_buffer.stopped", "response_id": "r1"}')
-            heard('{"type": "output_audio_buffer.stopped", "response_id": "r2"}')
+            heard('{"type": "turn.created", "event_id": "e1"}')
+            heard(b'{"type": "turn.done", "response_id": "r1"}')
+            heard('{"type": "turn.done", "response_id": "r2"}')
 
-        assert speaker.closed_by is webrtc.SpanClosedBy.SERVER
         carried = [
             said for said in (record.getMessage() for record in caplog.records) if "carried" in said
         ]
         assert len(carried) == 2
-        assert any("output_audio_buffer.started" in said for said in carried)
-        assert any("output_audio_buffer.stopped" in said for said in carried)
+        assert any("turn.created" in said for said in carried)
+        assert any("turn.done" in said for said in carried)
 
-    def test_what_is_not_an_event_on_the_channel_is_ignored(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_what_is_not_an_event_on_the_channel_is_not_named(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         speaker, clock = self.speaker(monkeypatch)
         self.heard(speaker, [0.02] * 3, clock)
         transport = self.transport(speaker)
 
-        transport._read_channel_event("not json")
-        transport._read_channel_event("[1, 2]")
-        transport._read_channel_event('{"event_id": "e1"}')
-        transport._read_channel_event('{"type": 7}')
+        with caplog.at_level(logging.INFO):
+            transport._read_channel_event("not json")
+            transport._read_channel_event("[1, 2]")
+            transport._read_channel_event('{"event_id": "e1"}')
+            transport._read_channel_event('{"type": 7}')
 
-        assert speaker.closed_by is None
+        said = [line.getMessage() for line in caplog.records]
+        assert [line for line in said if "carried" in line] == []

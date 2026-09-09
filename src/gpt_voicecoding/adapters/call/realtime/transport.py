@@ -73,13 +73,15 @@ class CallTransport(Protocol):
         than one that arrives a little early, because the whole point of the
         edge is that something downstream is waiting for the gap.
 
-        The span is over when nothing is still queued for the device, and one
-        of two facts about the far side holds: the server said the response's audio has finished
-        playing out, or nothing more has come in for the transport's own quiet
-        bound (#235 — the first is the rule, the second the fallback for a peer
-        that never says so). A silent run has no device and no queue, so the far
-        side's fact is the whole answer there — which is correct, not a
-        stand-in: there is no speaker to trail.
+        The span is over when the audio the Voice had already generated has had
+        time to be heard: what the transport was still holding for the device
+        when this call was made, at the rate that audio plays (#301). Nothing
+        about the far side decides it. A peer that keeps padding its stream
+        after the Voice has finished is not the Voice still speaking, and this
+        backend sometimes does exactly that — which is what used to hold the
+        span open for the whole bound. A silent run holds nothing and so
+        returns at once, which is correct and not a stand-in: there is no
+        speaker for audio to trail in.
         """
         ...
 

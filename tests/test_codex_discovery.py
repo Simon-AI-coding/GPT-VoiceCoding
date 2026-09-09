@@ -66,6 +66,11 @@ class FakeDaemon:
         self.threads = threads
         self.raises = raises
         self.asked: list[str] = []
+        #: What this stands in for is an `AppServerConnection`, which the
+        #: adapter stores on a `WatchedThread` and asks whether it is still
+        #: open (`_reachable`, and since #162 `_adopt_discovered` too). A
+        #: stand-in that answered only `request` was narrower than the thing.
+        self.is_open = True
 
     async def request(self, method: str, params: dict | None = None) -> dict:
         self.asked.append(method)

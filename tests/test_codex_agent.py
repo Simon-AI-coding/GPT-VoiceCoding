@@ -1904,6 +1904,101 @@ class TestWhatADiscoveredThreadGetsSubscribedTo:
 
         assert len(asyncio.run(scenario())) == 1
 
+    def test_a_watch_whose_connection_closed_is_re_adopted_by_the_next_pass(
+        self, socket_path: Path
+    ) -> None:
+        """#162: the discovery cadence is what self-heals a dead watch.
+
+        Before this, `_adopt_discovered` resolved a watch by thread id and
+        returned without consulting `is_open`, so every later pass treated the
+        thread as already watched. Nothing else would have replaced it: the
+        `on_closed` cleanup fires when the connection dies, which for the race
+        this fixes is *before* the watch exists, and the
+        `thread/status/changed` retry resubscribes on the watch's own — dead —
+        connection. The only path that did look was `_reachable`, which runs on
+        a Relay or an Approval, so the Session's permission prompts went
+        nowhere until the user happened to speak to it.
+        """
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await joined(server, Sink())
+                try:
+                    await adapter.discover()
+                    watched = adapter._thread_for(THREAD)  # noqa: SLF001 - the dead watch
+                    assert watched is not None
+                    await watched.connection.aclose()
+                    resumed_before = len(server.calls_to("thread/resume"))
+
+                    await adapter.discover()
+
+                    replaced = adapter._thread_for(THREAD)  # noqa: SLF001 - its replacement
+                    assert replaced is not None
+                    current = await adapter._shared_daemon()  # noqa: SLF001 - the current one
+                    # Read inside the scenario: `aclose` below closes the very
+                    # connection these three questions are about.
+                    return (
+                        replaced is not watched,
+                        replaced.connection is current,
+                        replaced.connection.is_open,
+                        resumed_before,
+                        server.calls_to("thread/resume"),
+                    )
+                finally:
+                    await adapter.aclose()
+
+        is_new, uses_current_shared_connection, is_open, resumed_before, resumed = asyncio.run(
+            scenario()
+        )
+        # Replaced, never mutated: `subscribed` on a watch has to keep meaning
+        # "on the connection this watch holds".
+        assert is_new
+        assert uses_current_shared_connection
+        assert is_open
+        # Resumed on the new connection, once — not a retry storm, and not a
+        # second subscription on the dead one.
+        assert resumed_before == 1
+        assert [call["threadId"] for call in resumed] == [THREAD, THREAD]
+
+    def test_a_refused_resume_on_an_open_connection_keeps_the_one_watch(
+        self, socket_path: Path
+    ) -> None:
+        """The pre-existing "not yet" stays a not-yet, and is not re-adopted.
+
+        A TUI the user started a moment ago has no rollout on disk, so
+        `thread/resume` answers `no rollout found`. `_adopt` leaves that watch in
+        place on the stated reasoning that the connection is the shared app-server's
+        and is still good — which #162 is what makes true, because `client()` now never
+        hands out one that is not open. So the next pass must find nothing to
+        heal here: one `thread/resume`, however many ticks pass.
+        """
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+
+                def no_rollout(_params: dict) -> dict:
+                    raise FakeRemoteError("no rollout found")
+
+                server.answers("thread/resume", no_rollout)
+                adapter = await joined(server, Sink())
+                try:
+                    await adapter.discover()
+                    await adapter.discover()
+                    watched = adapter._thread_for(THREAD)  # noqa: SLF001 - the unsubscribed watch
+                    assert watched is not None
+                    return (
+                        watched.subscribed,
+                        watched.connection.is_open,
+                        server.calls_to("thread/resume"),
+                    )
+                finally:
+                    await adapter.aclose()
+
+        subscribed, open_, resumed = asyncio.run(scenario())
+        assert subscribed is False
+        assert open_ is True
+        assert [call["threadId"] for call in resumed] == [THREAD]
+
     @pytest.mark.parametrize("rekeys", [1, 3, 10])
     def test_a_rekeyed_thread_stays_one_subscription_and_stops_at_its_current_target(
         self, socket_path: Path, rekeys: int

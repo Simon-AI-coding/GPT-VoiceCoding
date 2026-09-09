@@ -22,6 +22,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -48,13 +49,18 @@ from gpt_voicecoding.adapters.agent.claude.registry import PEER_PROTOCOL
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.core.briefing import _newest
 from gpt_voicecoding.seams.agent import (
+    LaneDiscovery,
+    Option,
     ProgressAvailability,
     ReplyWindow,
+    SessionInspection,
     SessionState,
     WaitingFor,
+    WaitingKind,
 )
 from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.identity import AgentKind, RequestId, SessionTarget
+from hub import Hub
 
 LIVE_PID = os.getpid()
 SESSION_ID = "430b0def-38ef-4783-8d57-d800710d83bd"
@@ -783,3 +789,80 @@ class TestARefusingRetryTakesTheRouteBack:
         assert target() not in adapter.reachable()
         assert target() not in adapter._inboxes  # noqa: SLF001
         assert adapter.reply_window(target()) is ReplyWindow.CLOSED
+
+
+class TestAStaleWaitingClearsThroughBridgeCore:
+    """Acceptance criterion 3's second half, driven rather than argued.
+
+    The incident shape (#278): the engine restarted holding a Session at
+    `waiting for your decision`, Claude Code's own roster went on reporting it
+    `idle`, and its transcript held no question — but with no transcript to read
+    the row stayed unreadable, so the brief could say nothing about it either.
+
+    **What each half is caused by, measured rather than assumed.** The wait
+    clears because the lane's own word stands once the reading agrees with it,
+    which needs no change to `_state_behind` or to `Session._keeps_its_wait` —
+    both are out of scope and both are untouched. What *recovery* adds is the
+    other half of the same row: the transcript becomes readable, so the Session
+    stops being reported `not read`. A roster row that still said `waiting`
+    would keep the known question by design (`adapter.py`, `_overlay`: a
+    transcript holding nothing leaves the roster's word standing), and that is
+    the correct behaviour rather than the bug.
+    """
+
+    def test_the_row_clears_and_becomes_readable_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = tmp_path / "config"
+        write_record(config / "sessions", entry())
+        transcript = config / "projects" / "-a" / f"{SESSION_ID}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isSidechain": False,
+                    "userType": "external",
+                    "timestamp": "2026-09-08T19:08:00.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "all done"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        row = SessionInspection(
+            target=target(), state=SessionState.IDLE, workspace=Path("/Users/someone/work")
+        )
+
+        async def roster(**_asked: object) -> LaneDiscovery:
+            return LaneDiscovery(rows=(row,))
+
+        monkeypatch.setattr(adapter_module.claude_discovery, "discover", roster)
+        hub = Hub(duty=False, voice=False, sessions=((target(), "do a thing"),))
+        hub.core._agents[AgentKind.CLAUDE] = ClaudeAgentAdapter(  # noqa: SLF001 - the real lane
+            progress_capture=PROGRESS_CAPTURE, claude_config_directory=config
+        )
+        sessions = hub.state.sessions
+        held = sessions.resolve(target())
+        # The stale decision this engine restarted holding.
+        sessions._sessions[target()] = replace(  # noqa: SLF001 - a pre-restart fact
+            held,
+            waiting_for=WaitingFor(
+                kind=WaitingKind.QUESTION,
+                prompt="Which one?",
+                options=(Option(text="a"), Option(text="b")),
+            ),
+            state=SessionState.WAITING,
+        )
+
+        asyncio.run(hub.core.discover())
+
+        settled = sessions.resolve(target())
+        assert settled.waiting_for.kind is WaitingKind.NONE
+        assert settled.state is SessionState.IDLE
+        # The half this ticket is responsible for: it is readable again.
+        assert settled.progress.availability is ProgressAvailability.READABLE
+        assert [entry.text for entry in settled.progress.recent] == ["all done"]

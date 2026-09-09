@@ -295,6 +295,69 @@ class TestRoster:
         assert len(registry.all()) == 1
 
 
+class TestTheSessionSpokenFirst:
+    """`focus` is the record of a reply; `spoken_first` is what the voice does with it."""
+
+    def test_a_sole_live_session_is_spoken_first_though_nothing_set_the_focus(self) -> None:
+        registry = SessionRegistry()
+        session = codex("abc")
+        registry.register(session)
+        assert registry.focus is None, "no reply, so no Focus Session"
+        assert registry.spoken_first == session.target
+
+    def test_two_live_sessions_with_no_focus_leave_nobody_spoken_first(self) -> None:
+        registry = SessionRegistry()
+        registry.register(codex("abc"))
+        registry.register(claude("def", pid=100))
+        assert registry.spoken_first is None
+
+    def test_a_held_focus_wins_over_the_roster(self) -> None:
+        registry = SessionRegistry()
+        first = codex("abc")
+        second = claude("def", pid=100)
+        registry.register(first)
+        registry.register(second)
+        registry.set_focus(second.target)
+        assert registry.spoken_first == second.target
+
+    def test_the_survivor_of_an_ended_focus_is_spoken_first(self) -> None:
+        registry = SessionRegistry()
+        first = codex("abc")
+        second = claude("def", pid=100)
+        registry.register(first)
+        registry.register(second)
+        registry.set_focus(second.target)
+        registry.mark_ended(second.target)
+        assert registry.focus is None, "ended is ended"
+        assert registry.spoken_first == first.target
+
+    def test_an_empty_roster_has_nobody_spoken_first(self) -> None:
+        assert SessionRegistry().spoken_first is None
+
+    def test_a_child_process_does_not_make_a_roster_of_one_look_like_two(self) -> None:
+        """A subagent is listed, never addressed — and never a Session to choose between."""
+        registry = SessionRegistry()
+        parent = codex("abc")
+        registry.register(parent)
+        child = replace(
+            claude("def", pid=100),
+            child=ChildClassification(kind=ChildKind.CHILD, parent=parent.target),
+        )
+        registry.register(child)
+        assert len(registry.live()) == 2
+        assert registry.sole_live() == parent
+        assert registry.spoken_first == parent.target
+
+    def test_an_ended_session_leaves_the_survivor_sole(self) -> None:
+        registry = SessionRegistry()
+        first = codex("abc")
+        second = claude("def", pid=100)
+        registry.register(first)
+        registry.register(second)
+        registry.mark_ended(second.target)
+        assert registry.spoken_first == first.target
+
+
 class TestTheFocusSession:
     """One pointer, cleared by the Session ending and by nothing else (#165 Q2)."""
 

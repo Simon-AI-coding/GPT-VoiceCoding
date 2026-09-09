@@ -96,6 +96,7 @@ from gpt_voicecoding.adapters.agent.claude.recovery import (
     recover,
 )
 from gpt_voicecoding.adapters.agent.claude.registry import (
+    STATUS_IDLE_WITH_BACKGROUND,
     RegistryError,
     default_registry_directory,
     pid_is_live,
@@ -607,8 +608,18 @@ class ClaudeAgentAdapter:
         if not lane.enumerated:
             return lane
         rows: list[SessionInspection] = []
-        for row in lane.rows:
-            rows.append(self._row_with_stop(self._with_naming(row)))
+        for listed in lane.rows:
+            # The registry overlay runs **first**, and both readers below see its
+            # answer (#325). The stop gate opens a transcript only for a row that
+            # is no longer `RUNNING`, so a `shell` row flipped to `IDLE` has to
+            # arrive here already flipped or its child wait is never asked for;
+            # and `under` gates its own listing on the same state word, so
+            # handing it the roster's word while the stop read gets the
+            # registry's would let one Session's two child readings disagree —
+            # which is the thing `children._live` exists as one function to
+            # prevent.
+            row = self._with_name_and_state(listed)
+            rows.append(self._row_with_stop(row))
             rows.extend(self._children.under(row, self._transcript_path(row.target)))
         projected = tuple(rows)
         return replace(
@@ -617,20 +628,57 @@ class ClaudeAgentAdapter:
             degraded=source_degradation(projected, lane.degraded),
         )
 
-    def _with_naming(self, row: SessionInspection) -> SessionInspection:
-        """Carry the registry name under the source the registry actually states."""
+    def _with_name_and_state(self, row: SessionInspection) -> SessionInspection:
+        """One roster row, overlaid with what only that Session's registry record says.
+
+        **Two facts, one read.** The record carries the Session's name under the
+        source the registry itself states, and it carries a status word the
+        roster command does not publish. Both are read off one `read_record` per
+        row, under one guard — the record's session id must match the row's, so a
+        pid recycled onto another Session cannot restate this one.
+
+        **`shell` is the roster's blind spot, and this is where it is closed**
+        (#325). Claude Code rewrites `idle` to `shell` for the pid-file write
+        when a `local_bash` task outlives the turn (#154), and `claude agents
+        --json` answers `busy` for that same Session — measured, and the reason
+        `discovery.py` maps three status words and not four. So the roster says
+        `RUNNING` for a Session whose turn has ended, and the row read `running`
+        while the Session's own Stop Notice read `waiting on`: two surfaces
+        describing one Session differently, on the machine's own cadence, because
+        `window.py` reads the registry and the roster projection cannot.
+
+        The overlay is deliberately one-directional and narrow. Only `RUNNING`
+        becomes `IDLE`, and only on `shell`: `busy` is the roster and the
+        registry agreeing, and `waiting` is a dialog on screen whose `waitingFor`
+        label the roster row already carries — overwriting either would be this
+        reader inventing a state rather than closing a gap. A record that is
+        missing, unreadable, or names another Session leaves the roster's word
+        exactly as it found it, which is the same fail-toward-the-observed rule
+        the name overlay above it already follows.
+
+        What follows from the flip is not decided here and needs no new code:
+        `IDLE` passes the stop gate, so the row is read into and the wait its own
+        live children put it in arrives through the existing child tracking (ADR
+        0021 as amended, #320) — `WaitingKind.CHILD`, whose `stopped_state` is
+        `IDLE` and whose Reply Window is therefore OPEN, which is what
+        `window.py` already reports for the same record.
+        """
         try:
             record = read_record(self._registry_directory, row.target.pid)
         except RegistryError:
             record = None
-        if record is not None and record.session_id == row.target.session_id:
-            user_named = bool(record.name_source) and record.name_source != "derived"
-            row = replace(
-                row,
-                user_name=record.name if user_named else None,
-                derived_name=record.name if not user_named else None,
-            )
-        return row
+        if record is None or record.session_id != row.target.session_id:
+            return row
+        user_named = bool(record.name_source) and record.name_source != "derived"
+        idle_with_background = (
+            record.status == STATUS_IDLE_WITH_BACKGROUND and row.state is SessionState.RUNNING
+        )
+        return replace(
+            row,
+            user_name=record.name if user_named else None,
+            derived_name=record.name if not user_named else None,
+            state=SessionState.IDLE if idle_with_background else row.state,
+        )
 
     def _row_with_stop(self, row: SessionInspection) -> SessionInspection:
         """One roster row, with everything its own transcript says about it.

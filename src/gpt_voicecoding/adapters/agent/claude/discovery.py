@@ -92,7 +92,11 @@ INTERACTIVE_KIND: Final = "interactive"
 #: read `status: "shell"`. So the roster projection reports what the roster
 #: itself says, and adding `shell` here would document a row this command has
 #: never produced. The measurement is beside `registry.PROVEN_AGAINST_VERSION`,
-#: and `window.py` is the reader that acts on it.
+#: and the readers that act on it read the record rather than the roster:
+#: `window.py` for the Reply Window, and the adapter's own per-row registry
+#: overlay for the state word on the roster row (#325) — which is where a
+#: `shell` Session stops reading `running` beside a Stop Notice that reads
+#: `waiting on`, without this projection claiming a row it never saw.
 STATUS_WORDS: Final = {
     "idle": SessionState.IDLE,
     "busy": SessionState.RUNNING,

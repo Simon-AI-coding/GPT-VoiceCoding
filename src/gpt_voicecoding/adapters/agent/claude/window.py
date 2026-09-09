@@ -147,6 +147,7 @@ from pathlib import Path
 from gpt_voicecoding.adapters.agent._terminals import TerminalMemo
 from gpt_voicecoding.adapters.agent.claude import waiting_labels
 from gpt_voicecoding.adapters.agent.claude.registry import (
+    STATUS_IDLE_WITH_BACKGROUND,
     RegistryError,
     SessionRecord,
     pid_is_live,
@@ -200,7 +201,7 @@ class StopReading:
 #: be statusless before its Session's first status write — so no sweep can have
 #: seen that pid in a turn, and this cannot announce late the way `shell` did.
 #: The measurement is beside `registry.PROVEN_AGAINST_VERSION`.
-STATUSES_MEANING_OPEN = frozenset(("idle", "shell"))
+STATUSES_MEANING_OPEN = frozenset(("idle", STATUS_IDLE_WITH_BACKGROUND))
 
 #: Registry statuses that prove a turn is still in progress. `waiting` is the
 #: permission-dialog pause described above, so it remains part of that turn.

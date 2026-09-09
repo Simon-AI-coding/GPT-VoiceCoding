@@ -235,6 +235,13 @@ class SharedDaemon:
         their codex, does exactly that — and an engine that kept a dead handle
         would report an empty roster for the rest of its life.
 
+        **An open connection or `None`, on both paths** (#162). The held one is
+        answered only when it reads `is_open`, and since #162 so is a freshly
+        dialled one: a dial can end inside its own handshake and still return
+        normally. Callers take that contract literally — the adapter builds a
+        thread watch out of whatever this hands back — so a connection that is
+        not open must not leave here at all.
+
         **One dial at a time, and the answer is asked for twice.** A live
         connection is answered without taking the lock, which is the ordinary
         case and stays free; a caller that finds none waits, and then asks again
@@ -283,6 +290,26 @@ class SharedDaemon:
                 # resurrect a connection the engine has already said goodbye to,
                 # and what it made is closed here rather than left for nobody.
                 await connection.aclose()
+                return None
+            if not connection.is_open:
+                # Ended inside its own handshake — #162. `attach` completes the
+                # WebSocket handshake and the `initialize` exchange, and the
+                # last thing it awaits is a writer drain (`wire.py`, `_send`);
+                # a far side that closes during that drain has the reader pump
+                # mark this connection closed and `attach` still return
+                # normally. Handing that back made a thread watch on a dead
+                # connection that nothing replaced, so its permission prompts
+                # never reached the bridge.
+                #
+                # Not through `_also_no_codex`: a handshake that completed
+                # proves there is a codex here, so that clause would be false.
+                # Closed rather than dropped, like the stale generation above —
+                # what this refuses to hand out has nobody else to close it.
+                await connection.aclose()
+                self._note = (
+                    f"the connection to the shared Codex app-server at "
+                    f"{address.socket_path} ended before it was usable"
+                )
                 return None
             _log.info("joined the shared Codex app-server at %s", address.socket_path)
             self._connection = connection

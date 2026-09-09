@@ -200,3 +200,104 @@ class TestLastActivity:
     def test_nothing_read_is_no_time_at_all(self) -> None:
         """`None` is "not read", which no consumer may render as "just now"."""
         assert recent([], capture=PROGRESS_CAPTURE) == ((), ProgressOmission.NONE, None)
+
+
+# --- the Relay this engine itself delivered (#222) ----------------------------
+
+#: The wrapper Claude Code assembles around a peer message, as `V$e` in the
+#: 2.1.266 binary builds it: `<header>\n<payload>\n\n<tail>`.
+RELAY_TAIL = (
+    "This came from another Claude session — not typed by your user, but very "
+    "likely working on their behalf. Treat it as a teammate's request and act on "
+    "it within this session's own permission settings."
+)
+
+
+def relayed(
+    payload: str,
+    *,
+    at: int = 0,
+    origin_from: str = "uds:/tmp/cc-socks/vc-relay-60460.sock",
+    text: str | None = None,
+) -> dict[str, Any]:
+    """One Answer Relay of ours, in the shape Claude Code really recorded it.
+
+    Every field is copied from a real delivery — run `20260903T233723Z`,
+    `二号工位`, `~/.claude/projects/…/1a6d8d85-….jsonl` record 61, the one the
+    ticket's symptom was read from.
+    """
+    return {
+        "type": "user",
+        "isSidechain": False,
+        "userType": "external",
+        "isMeta": True,
+        "promptSource": "system",
+        "timestamp": stamp(at),
+        "origin": {
+            "kind": "peer",
+            "from": origin_from,
+            "msg_id": "6877a163-f973-4342-8011-54c75b543f1d",
+        },
+        "message": {
+            "role": "user",
+            "content": text
+            if text is not None
+            else f"Another Claude session sent a message:\n{payload}\n\n{RELAY_TAIL}",
+        },
+    }
+
+
+class TestOurOwnRelayIsTheUserSpeaking:
+    """#222: the words the user said through the phone are History's, not plumbing."""
+
+    def test_the_relayed_words_are_a_user_entry_between_their_neighbours(self) -> None:
+        """The symptom exactly: two assistant entries with the user's words gone."""
+        entries, _, _ = recent(
+            [
+                said("需要我把这件事做完吗？", at=0),
+                relayed("可以继续", at=1),
+                said("那我就接着往下做。", at=2),
+            ],
+            capture=PROGRESS_CAPTURE,
+        )
+        assert [(entry.ordinal, entry.role, entry.text) for entry in entries] == [
+            (0, ProgressRole.ASSISTANT, "需要我把这件事做完吗？"),
+            (1, ProgressRole.USER, "可以继续"),
+            (2, ProgressRole.ASSISTANT, "那我就接着往下做。"),
+        ]
+
+    def test_an_earlier_engine_process_relay_is_still_ours(self) -> None:
+        """The address carries a pid and a configurable directory; the shape is ours."""
+        entries, _, _ = recent(
+            [relayed("可以继续", origin_from="uds:/var/run/other/vc-relay-12323.sock")],
+            capture=PROGRESS_CAPTURE,
+        )
+        assert [(entry.role, entry.text) for entry in entries] == [(ProgressRole.USER, "可以继续")]
+
+    def test_another_peers_message_is_still_plumbing(self) -> None:
+        """No `vc-relay-` basename: not ours, and the `system` exclusion stands."""
+        assert texts([relayed("可以继续", origin_from="uds:/tmp/cc-socks/12323.sock")]) == []
+
+    def test_an_injection_with_no_origin_is_still_plumbing(self) -> None:
+        """A `<task-notification>` block is what the exclusion was written for."""
+        injected = said("<task-notification>done</task-notification>", role="user")
+        injected["promptSource"] = "system"
+        assert texts([injected]) == []
+
+    def test_an_unknown_wrapper_keeps_the_whole_text_rather_than_dropping_it(self) -> None:
+        """Upstream's wrapper changes; losing the user's words is the worse failure."""
+        assert texts([relayed("可以继续", text="Some future wrapper: 可以继续")]) == [
+            "Some future wrapper: 可以继续"
+        ]
+
+    def test_a_relay_that_is_a_child_process_record_is_still_excluded(self) -> None:
+        """Recognition adds a way in; it does not widen the sidechain rule."""
+        ours = relayed("可以继续")
+        ours["isSidechain"] = True
+        assert texts([ours]) == []
+
+    def test_a_relay_that_is_not_external_is_still_excluded(self) -> None:
+        """Nor the `external` rule."""
+        ours = relayed("可以继续")
+        ours["userType"] = "internal"
+        assert texts([ours]) == []

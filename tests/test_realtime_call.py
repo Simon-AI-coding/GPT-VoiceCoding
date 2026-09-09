@@ -58,7 +58,11 @@ from gpt_voicecoding.adapters.codex_app_server.process import AppServerError, at
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
 from gpt_voicecoding.adapters.codex_app_server.wire import RemoteError
 from gpt_voicecoding.seams.call import (
+    CALL_AGENT_REMARK_ALLOWANCE_BYTES,
     CODEX_BYTES_PER_TOKEN,
+    HANDOVER_BUDGET_BYTES,
+    REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET,
+    RETURN_LEG_BUDGET_BYTES,
     CallDropped,
     CallEnded,
     CallStarted,
@@ -392,6 +396,33 @@ class TestBringingACallUp:
             assert spare >= CODEX_BYTES_PER_TOKEN - 1, (
                 f"{type(item).__name__} has {spare} bytes of slack, too few to round up in"
             )
+
+    def test_the_return_leg_ceiling_is_codexs_own_budget_less_what_rides_with_it(self) -> None:
+        """#302: the ceiling on the answer the Call Agent hands back to the Voice.
+
+        Derived, never chosen. codex cuts the Call Agent's answer at
+        `REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET` estimated tokens at
+        `ceil(bytes / 4)`, and it prepends `CODEX_RESPONSE_ITEM_PREFIX` and two
+        newlines *before* truncating, so those bytes are ours out of the budget.
+        The prefix is measured from the constant rather than written as a
+        literal, so a change to it moves this ceiling with it.
+        """
+        assert RETURN_LEG_BUDGET_BYTES == (
+            REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET * CODEX_BYTES_PER_TOKEN
+            - len((CODEX_RESPONSE_ITEM_PREFIX + "\n\n").encode("utf-8"))
+            - CALL_AGENT_REMARK_ALLOWANCE_BYTES
+        )
+
+    def test_the_return_leg_ceiling_leaves_the_call_agent_room_for_a_remark(self) -> None:
+        """The allowance is a deliberate over-estimate, in `WIRE_LINE_OVERHEAD_BYTES`' manner.
+
+        On the 2026-09-09 10:48 tracer run the Call Agent returned engine results
+        verbatim and its own remarks were separate messages of 43-70 bytes, so
+        256 is roughly four times the widest one observed. It is an allowance and
+        not a measurement; this holds the direction it may be wrong in.
+        """
+        assert CALL_AGENT_REMARK_ALLOWANCE_BYTES >= 70
+        assert RETURN_LEG_BUDGET_BYTES < HANDOVER_BUDGET_BYTES
 
     def test_a_brief_that_carries_an_undelivered_reply_writes_it_as_its_own_line(self) -> None:
         """#197: the sentence is Briefing's; this assembles it under a label."""

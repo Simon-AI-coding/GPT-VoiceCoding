@@ -22,9 +22,15 @@ from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
     QUESTION_TOOL,
     SUMMARY_MAX_CHARS,
     analyse,
+    is_own_relay_turn,
+    is_visible,
     summarise,
 )
 from gpt_voicecoding.seams.agent import WaitingKind
+
+# The real delivery record lives in one place (#305), and the boundary cases
+# below need the whole of it rather than the subset `RELAY` keeps.
+from test_claude_transcript_tail import relayed
 
 # --- the shapes Claude Code writes -------------------------------------------
 
@@ -381,6 +387,53 @@ class TestWhereTheTailBegins:
         waiting = analyse([*turn(), called("Bash", "b1", {"description": "push"}), result])
         assert waiting.kind is WaitingKind.PERMISSION
 
+    def test_our_own_relay_does_not_move_the_tail(self) -> None:
+        """A Relay is the user's words, and no evidence the Session moved on (#306).
+
+        #222 surfaced the relayed words in History and #305 gave the Session
+        Name the same read; both ask whether these are the user's words, and
+        they are. This boundary asks something else — whether the Session has
+        got past the stop it is held on — and a delivery answers that for no
+        kind of stop. Upstream refuses a peer message as approval for a pending
+        permission dialog (ADR 0013 §3), so the dialog is still open and still
+        the user's to settle; a held question is answered on the hook route
+        (ADR 0015) and reaches `analyse` as the `tool_result` that closes it.
+        Moving the boundary here would report a Session waiting on the user as
+        waiting on nothing, which is the one state this reader exists to find.
+
+        So `analyse` asks `is_visible` alone — by decision, not by omission.
+        """
+        waiting = analyse(
+            [*turn(), called("Bash", "b1", {"description": "push"}), relayed("可以继续")]
+        )
+        assert waiting.kind is WaitingKind.PERMISSION
+
+    def test_our_own_relay_does_not_close_a_held_question(self) -> None:
+        """The other kind the boundary decides, and the same answer (#306).
+
+        A question the Session is parked on is answered over the Approval hook
+        (ADR 0015), never over the inbox — and a mid-turn Relay takes the inbox
+        even while that question is held (ADR 0013, amended 2026-09-05). So the
+        question is still outstanding and still what the user is being asked.
+        """
+        waiting = analyse([*turn(), asked("q1", ("Ship it?", ["yes", "no"])), relayed("可以继续")])
+        assert waiting.kind is WaitingKind.QUESTION
+
+    @pytest.mark.parametrize(
+        "call", [called("Bash", "b1", {"description": "push"}), asked("q1", ("Ship it?", ["yes"]))]
+    )
+    def test_a_typed_turn_in_the_same_place_does_move_the_tail(self, call: dict[str, Any]) -> None:
+        """What the rule above excludes is a route, not the boundary itself.
+
+        The user typing into the Session is the evidence a Relay is not: an
+        outstanding call the user dealt with at the keyboard writes no
+        `tool_result` — a question answered there least of all — so their next
+        turn is the only thing that says the Session has moved past it
+        (`legacy@1d32845:bridge/transcript.py:1683-1712`). Without this case the
+        rule beside it would also pass a reader that never moved the boundary.
+        """
+        assert analyse([*turn(), call, said("never mind", role="user")]).kind is WaitingKind.NONE
+
     def test_slash_command_plumbing_does_not_move_the_tail(self) -> None:
         """Three records the pipeline writes as `user`, none of them a turn.
 
@@ -528,3 +581,46 @@ class TestRecordsThisBuildHasNeverSeen:
         """
         record = called(QUESTION_TOOL, "q1", {"questions": [{"question": "Which?"}]})
         assert analyse([*turn(), record]).kind is WaitingKind.NONE
+
+
+#: The least of an Answer Relay of ours that these two predicates read: who
+#: delivered it (`origin`), that it is this Session's own turn, and the
+#: `promptSource` that makes `is_visible` drop it. The full record shape lives in
+#: one place only — `test_claude_transcript_tail.relayed`, copied from a real
+#: delivery — and is not restated here, so upstream moving it has one place to
+#: move (#305).
+RELAY: dict[str, Any] = {
+    "type": "user",
+    "isSidechain": False,
+    "userType": "external",
+    "promptSource": "system",
+    "origin": {"kind": "peer", "from": "uds:/tmp/cc-socks/vc-relay-60460.sock"},
+}
+
+
+class TestTheVisibilityRuleItself:
+    """#305: the rule keeps its one reason, and recognition sits beside it.
+
+    Both readers that admit our own Relay do it by asking a second predicate, so
+    what `is_visible` answers about a Relay must not move. `analyse` asks it
+    alone (`TestWhereTheTailBegins.test_our_own_relay_does_not_move_the_tail`),
+    and this pins the other half of that: the answer it gets.
+    """
+
+    def test_our_own_relay_is_still_not_visible(self) -> None:
+        assert is_visible(RELAY) is False
+
+    def test_our_own_relay_is_recognised_as_ours(self) -> None:
+        assert is_own_relay_turn(RELAY) is True
+
+    def test_another_peers_message_is_not_ours(self) -> None:
+        """No `vc-relay-` basename: somebody else's peer, and plumbing to us."""
+        theirs = RELAY | {"origin": RELAY["origin"] | {"from": "uds:/tmp/cc-socks/12323.sock"}}
+        assert is_own_relay_turn(theirs) is False
+
+    @pytest.mark.parametrize("field, value", [("isSidechain", True), ("userType", "internal")])
+    def test_recognition_is_not_a_way_past_the_other_two_rules(
+        self, field: str, value: Any
+    ) -> None:
+        """A child's work and a turn that is not this Session's stay excluded."""
+        assert is_own_relay_turn(RELAY | {field: value}) is False

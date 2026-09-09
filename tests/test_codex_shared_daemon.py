@@ -276,10 +276,11 @@ class TestTheConnection:
         slow: bool = False,
         made: list[object] | None = None,
         order: list[str] | None = None,
+        dead: bool = False,
     ) -> SharedDaemon:
         class _Connection:
             def __init__(self) -> None:
-                self.is_open = True
+                self.is_open = not dead
                 self.closed = 0
 
             async def aclose(self) -> None:
@@ -333,6 +334,62 @@ class TestTheConnection:
 
         assert second is not first
         assert attached == [socket_path, socket_path]
+
+    def test_a_dial_that_ended_before_it_was_usable_is_refused_and_closed(
+        self, socket_path: Path
+    ) -> None:
+        """#162: the slow path re-checks `is_open`, as the fast path already did.
+
+        `attach` completes the handshake and the `initialize` exchange, and the
+        last thing it awaits is a writer drain
+        (`adapters/codex_app_server/wire.py`). A far side that closes during
+        that drain leaves the reader pump marking the connection closed and
+        `attach` returning normally — so what came back reads `is_open == False`
+        and was handed straight to a thread watch, where nothing replaced it.
+        Answering `None` here is what makes `client()`'s contract "an open
+        connection or `None`" true on both paths.
+
+        Closed rather than dropped, for the same reason the stale-generation
+        refusal above closes what it made: a connection this object refuses to
+        hand out has nobody else to close it.
+        """
+        attached: list[Path] = []
+        made: list[object] = []
+        daemon = self.daemon(attached, socket_path, made=made, dead=True)
+
+        assert asyncio.run(daemon.client()) is None
+        assert daemon.note != ""
+        assert [one.closed for one in made] == [1]  # type: ignore[attr-defined]
+
+    def test_a_dial_that_ended_before_it_was_usable_says_so_without_blaming_codex(
+        self, socket_path: Path
+    ) -> None:
+        """A handshake that completed proves there is a codex to have started one.
+
+        So this reason does not go through `_also_no_codex`: that clause is for
+        the dial failures that happen *before* a connection exists, where "there
+        is no codex on this machine" is the deeper fact behind them. Here it
+        would simply be false.
+        """
+        attached: list[Path] = []
+        daemon = self.daemon(attached, socket_path, dead=True)
+
+        asyncio.run(daemon.client())
+
+        assert "no codex on this machine" not in daemon.note
+
+    def test_a_refused_dial_is_not_kept_and_the_next_tick_dials_again(
+        self, socket_path: Path
+    ) -> None:
+        """Nothing is stored, so this is a re-check at hand-out and not a reconnect loop."""
+        attached: list[Path] = []
+        daemon = self.daemon(attached, socket_path, dead=True)
+
+        asyncio.run(daemon.client())
+        asyncio.run(daemon.client())
+
+        assert attached == [socket_path, socket_path]
+        assert daemon.socket_path is None
 
     def test_a_daemon_that_refuses_the_dial_leaves_the_lane_working(
         self, socket_path: Path

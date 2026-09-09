@@ -23,7 +23,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from gpt_voicecoding.core.relays import NO_GRADE, receipt_line
-from gpt_voicecoding.seams.control_plane import USAGE, Action, Reply, Request
+from gpt_voicecoding.seams.control_plane import (
+    USAGE,
+    Action,
+    Reader,
+    Reply,
+    Request,
+)
 from gpt_voicecoding.seams.identity import ADDRESS_SEPARATOR, address_of
 
 #: The word that asks for the page before one already given. Spelled out, and
@@ -40,15 +46,30 @@ class CommandError(Exception):
     """The line cannot be read as a command. Carries what to say instead."""
 
 
-def build_request(command: str, arguments: Sequence[str]) -> Request:
-    """Turn one command word and its arguments into one request."""
+def build_request(
+    command: str, arguments: Sequence[str], *, reader: Reader | str | None = None
+) -> Request:
+    """Turn one command word and its arguments into one request.
+
+    `reader` is who the answer is for, when that changes what may be carried
+    (#302). It is not read off the argument list: it comes from a flag beside
+    `--socket`, because it says something about the *caller* rather than about
+    what is being asked for, and the Companion Channel's `/` grammar has no way
+    to set it.
+
+    **It is carried, not judged.** A surface puts the word on the request and
+    does nothing else with it; whether this engine has a reader by that name is
+    the engine's answer to give, in the engine's own words. Refusing it here
+    would report a typo as an unreachable engine, and would be a second place
+    deciding what the wire accepts.
+    """
     try:
         action = Action(command.strip().casefold())
     except ValueError:
         known = ", ".join(sorted(str(name) for name in Action))
         raise CommandError(f"no command called {command!r}. There is: {known}") from None
 
-    return Request(action=action, payload=_payload(action, list(arguments)))
+    return Request(action=action, payload=_payload(action, list(arguments)), reader=reader)
 
 
 def _payload(action: Action, arguments: list[str]) -> dict[str, object]:

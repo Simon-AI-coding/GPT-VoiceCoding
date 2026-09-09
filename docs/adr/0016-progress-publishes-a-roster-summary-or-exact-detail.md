@@ -220,3 +220,50 @@ adapter cuts the folded original to what the message can hold and ends the fold 
 marker from Core's wording table saying the rest is on the terminal. A notice is one message by
 decision; splitting it would break the fold and fetching the rest was refused as machinery. The cut
 is marked where it happens, never silent, and this is the only place a text is cut.
+
+## Amendment 2026-09-09: a publication ceiling is chosen by the wire the reader is on
+
+Source: [#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302), the decision in
+[#298](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/298), under the map
+[#283](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/283). Evidence:
+`docs/research/2026-09-07-realtime-output-budget.md`.
+
+One observation, a publication per **wire**. The rule above bounds a publication by the line it
+crosses; what this adds is that a reply can cross more than one, and the ceiling is then the
+reader's rather than the Control Plane's alone. On a Live Call the Call Agent fetches a `history`
+page or a Session Brief and hands it to the Voice, and that last hop cuts at 4,000 UTF-8 bytes —
+keeping ~2,000 from each end, deleting the middle, and leaving a marker that says how much went
+but never which part. 35.4 % of real five-entry pages and 3.0 % of single-Session Briefs crossed
+it on this machine.
+
+- **The reader is named by the request, never inferred from the size or the transport.** The
+  Control Plane request carries an optional `reader`; its only value is the Voice. Absent is
+  exactly the behaviour that existed before it, which is what keeps the Companion Channel byte for
+  byte unchanged. An unrecognised value is refused as malformed, naming the values there are.
+  Inferring the reader from the transport was rejected: the tracer forwards `bridgectl` reads to a
+  live engine over the same socket, and a human at a terminal uses the same binary.
+- **The number is derived, not chosen.** `seams/call.py::RETURN_LEG_BUDGET_BYTES` is codex's own
+  `REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET` in bytes, less the bytes codex prepends before it
+  truncates, less an allowance for the Call Agent's own sentence.
+- **What is measured is the rendered text**, the one renderer both surfaces share — not the JSON
+  envelope, which the Voice never sees. The Control Plane's own check keeps measuring the encoded
+  line; both apply, and the tighter binds.
+- **A History page drops from the oldest end here, not the largest first.** On a 64 KB line the
+  one entry that does not fit is the honest edit; on a 4,000-byte line it is to keep the newest
+  whole and page the oldest away, because the page is one request away from continuing. The cursor
+  keeps naming the oldest ordinal *still on the page* — `--before` is exclusive, so that is what
+  makes the next page start at the first entry left off. Both rules are right for their wire and
+  are not unified.
+- **A Session Brief is whole or refused, never partial.** Its newest message is the only part it
+  may give up. When the decision alone still will not fit, the reply is refused with one fixed
+  bounded sentence rather than published with an option missing — a decision that reads as
+  complete and is not is the failure this amendment exists to prevent. Nothing is sliced: the rule
+  above is unchanged.
+- **The roster brief is never fitted to the return leg**, and the source-capture policy stays
+  derived from the Control Plane's ceiling: fitting the call's answer never reduces what is read.
+
+Ownership stays where the publications are. `ProgressPublication` already owned capacity, whole-reply
+measurement, omission choice and the final check for both of these documents; it gains the second
+ceiling and nothing else becomes public. The opening hand-over keeps its own fit in Briefing — a
+different seam with a different policy — and the two are not merged. `PROTOCOL_VERSION` moves from
+9 to 10 so a surface can tell an engine that knows the mark from one that does not.

@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -72,6 +73,7 @@ from gpt_voicecoding.adapters.agent.claude import (
     transcript_tail,
 )
 from gpt_voicecoding.adapters.agent.claude import discovery as claude_discovery
+from gpt_voicecoding.adapters.agent.claude import recovery as recovery_module
 from gpt_voicecoding.adapters.agent.claude.approval import (
     CWD_FIELD,
     MESSAGING_SOCKET_FIELD,
@@ -88,7 +90,16 @@ from gpt_voicecoding.adapters.agent.claude.bootstrap import (
     withdraw_address,
 )
 from gpt_voicecoding.adapters.agent.claude.inbox import InboxError, ReplyInbox
-from gpt_voicecoding.adapters.agent.claude.registry import RegistryError, read_record
+from gpt_voicecoding.adapters.agent.claude.recovery import (
+    SessionReport,
+    default_projects_directory,
+    recover,
+)
+from gpt_voicecoding.adapters.agent.claude.registry import (
+    RegistryError,
+    default_registry_directory,
+    read_record,
+)
 from gpt_voicecoding.adapters.agent.claude.settings import ClaudeSettings
 from gpt_voicecoding.adapters.agent.claude.transcript import (
     TranscriptReader,
@@ -175,33 +186,16 @@ class _Outstanding:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionReport:
-    """What one Session's own `SessionStart` hook said about where it can be reached.
+class _RecoveryAttempt:
+    """One reading of a Session's own records, and the moment it was taken.
 
-    Every field but the id is optional, because every one of them can honestly
-    be absent: a build that does not export the messaging variables, a Session
-    whose first turn has not created a transcript, a payload without a cwd. A
-    partial report is worth keeping — the fields that did arrive are still the
-    ones nothing else carries.
+    The moment is what makes a refusal expire rather than stand for ever, and it
+    is monotonic because this is an elapsed-time question: a wall clock that
+    steps backwards over an NTP correction would park a refusal indefinitely.
     """
 
-    session_id: str
-    #: The `claude` process this Session runs as. Not optional in practice and
-    #: optional in the type: it comes from `CLAUDE_PID`, which every build
-    #: measured so far exports, and a report without it cannot be turned into a
-    #: `SessionTarget` at all (`seams/identity.py:124`).
-    pid: int | None = None
-    workspace: Path | None = None
-    transcript_path: Path | None = None
-    messaging_socket: Path | None = None
-    messaging_token: str | None = None
-
-    @property
-    def target(self) -> SessionTarget | None:
-        """The exact Session this report is about, when it said enough to say."""
-        if self.pid is None:
-            return None
-        return SessionTarget(agent=AgentKind.CLAUDE, session_id=self.session_id, pid=self.pid)
+    at: float
+    found: recovery_module.Recovery
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +241,21 @@ class ClaudeAgentAdapter:
             if claude_config_directory is not None
             else claude_hooks.default_config_directory(os.environ)
         )
+        #: The registry, resolved once and here alone. `ClaudeSettings` leaves it
+        #: unset to mean "this installation's", and the installation is the config
+        #: directory just resolved — so `verify`, the roster read, the Reply Window
+        #: and the reply inbox's key all spend this attribute and none of them
+        #: reads the settings field again (#303).
+        self._registry_directory = (
+            self._settings.registry_directory
+            if self._settings.registry_directory is not None
+            else default_registry_directory(self._claude_config_directory)
+        )
+        #: Where this installation's transcripts are, resolved here for the
+        #: reason the registry is (#303): `default_projects_directory` follows
+        #: the config directory, so a run under `CLAUDE_CONFIG_DIR` recovers
+        #: from that installation's transcripts rather than the home one.
+        self._projects_directory = default_projects_directory(self._claude_config_directory)
         self._installation_base_dir = installation_base_dir
         #: The inbox socket each registered Session's own `SessionStart` hook
         #: reported. Read, never built: 2.1.245 derives the directory from
@@ -274,7 +283,10 @@ class ClaudeAgentAdapter:
         #: rather than inside `discovery` so the cache outlives one tick.
         self._projects = ProjectNames()
         self._windows = ReplyWindowWatcher(
-            settings=self._settings, emit=self._emit, stopped_on=self.stop_reading
+            settings=self._settings,
+            registry_directory=self._registry_directory,
+            emit=self._emit,
+            stopped_on=self.stop_reading,
         )
         #: The socket this adapter owns: hook processes dial in here holding a
         #: dialog open, so this adapter is the server on this route.
@@ -289,6 +301,23 @@ class ClaudeAgentAdapter:
         #: Sessions whose hook never ran. This is the two things that command
         #: does not carry — the inbox socket, and the transcript path (#71).
         self._reported: dict[SessionTarget, SessionReport] = {}
+        #: What one attempt at recovery said, per Session, and when it said it
+        #: (#278). Cached because a miss that re-ran would rescan the projects
+        #: directory on every five-second discovery tick — 2138 transcripts on
+        #: the machine of record.
+        #:
+        #: **A success is kept for the life of the engine; a refusal is the
+        #: exception, and expires.** The files a success was read from do not
+        #: change under a running Session, so re-reading them could only produce
+        #: the same answer. A refusal can stop being true — the Session writes
+        #: its first transcript, or a record that was momentarily unreadable
+        #: becomes readable — and keeping one forever would leave a live Session
+        #: unreadable for this engine's whole life, against ADR 0013's
+        #: consequence that every Session on the machine is reachable, including
+        #: the ones that started before this engine did. So a refusal stands for
+        #: `recovery_retry_interval_seconds` and is then attempted again, which
+        #: is the ticket's "not on every tick" bound rather than "never again".
+        self._recovered: dict[SessionTarget, _RecoveryAttempt] = {}
         #: Why `connect` published no approval address, if it published none
         #: (#204, generalising #202). `None` is both "this engine published it"
         #: and "connect has not run", which is the same thing to every reader:
@@ -458,6 +487,26 @@ class ClaudeAgentAdapter:
                 report.session_id,
             )
             return
+        # **The takeover is total, and that is the point.** A recovered
+        # registration is a stand-in for one the Session had not made, so the
+        # moment it makes one, everything read off disk for it is spent — the
+        # report, the refusal that named a gap this report closes, and the
+        # *route*. Replacing only the report would leave `_inboxes` and the
+        # Reply Window watch pointing at a disk-read socket while `reported()`
+        # said there was none, and a later Relay would be delivered on an
+        # address this Session never gave us (#278).
+        #
+        # **What is being superseded is read off the report itself**, not off
+        # which container held it: `recovered` is the one statement of where a
+        # report came from, so the precedence rule spends that field rather than
+        # inferring the same fact from cache membership.
+        attempt = self._recovered.pop(target, None)
+        previous = self._reported.get(target) or (
+            attempt.found.report if attempt is not None else None
+        )
+        if previous is not None and previous.recovered and report.messaging_socket is None:
+            self._inboxes.pop(target, None)
+            self._windows.forget(target)
         self._reported[target] = report
         _log.info(
             "registration received for session_id=%s pid=%s workspace=%s transcript=%s socket=%s",
@@ -484,7 +533,10 @@ class ClaudeAgentAdapter:
         self._inboxes.pop(target, None)
         self._approvals.clear_released_question(target)
         self._windows.forget(target)
-        report = self._reported.pop(target, None)
+        attempt = self._recovered.pop(target, None)
+        report = self._reported.pop(target, None) or (
+            attempt.found.report if attempt is not None else None
+        )
         if report is not None:
             self._transcripts.forget(report.transcript_path)
 
@@ -566,7 +618,7 @@ class ClaudeAgentAdapter:
     def _with_naming(self, row: SessionInspection) -> SessionInspection:
         """Carry the registry name under the source the registry actually states."""
         try:
-            record = read_record(self._settings.registry_directory, row.target.pid)
+            record = read_record(self._registry_directory, row.target.pid)
         except RegistryError:
             record = None
         if record is not None and record.session_id == row.target.session_id:
@@ -643,7 +695,16 @@ class ClaudeAgentAdapter:
             )
         if records is None:
             waiting = base if state is SessionState.RUNNING else self._overlay(target, base, base)
-            return _SessionRead(waiting_for=waiting, progress=ProgressObservation())
+            # A recovery that refused looked and could not read; a registration
+            # whose file has not appeared yet was never looked at. Two facts,
+            # and the seam keeps them apart (#278, ADR 0016).
+            refused = self._unread_reason(target)
+            return _SessionRead(
+                waiting_for=waiting,
+                progress=ProgressObservation.unreadable(refused)
+                if refused is not None
+                else ProgressObservation(),
+            )
 
         found = base if state is SessionState.RUNNING else stop_analysis.analyse(records)
         waiting = base if state is SessionState.RUNNING else self._overlay(target, base, found)
@@ -679,9 +740,134 @@ class ClaudeAgentAdapter:
             source_read=True,
         )
 
+    def _report_for(self, target: SessionTarget) -> SessionReport | None:
+        """Where this Session can be reached, from its own hook or from disk (#278).
+
+        **The hook's report is always preferred, and is never displaced.** A
+        Session speaking for itself beats any reading of it, so recovery is
+        attempted only on a miss and its result is never written over a report
+        that is already held. The rule itself is stated once, beside
+        `SessionReport.recovered`.
+
+        **Recovery is attempted once per Session and its outcome is kept,
+        refusals included.** A `SessionStart` hook fires once per Session, so a
+        Session that started before this engine did will never register with it
+        and re-asking would be re-reading the same three files — including a
+        glob over every transcript on the machine — on every discovery tick.
+
+        **What a refusal costs is the transcript, not the route.** A recovery
+        that read the registry record but found no transcript still carries the
+        inbox socket, and registering that socket is what starts the Reply Window
+        watch and lifts the CLOSED that `reply_window` returns for a Session with
+        no address.
+        """
+        held = self._reported.get(target)
+        if held is not None:
+            return held
+        attempt = self._recovered.get(target)
+        if attempt is not None and not self._worth_another_look(attempt):
+            return attempt.found.report
+        found = recover(
+            target,
+            registry_directory=self._registry_directory,
+            projects_directory=self._projects_directory,
+        )
+        self._recovered[target] = _RecoveryAttempt(at=time.monotonic(), found=found)
+        # The withdrawal belongs here, where the refusal is recorded, rather than
+        # in `_announce`: that method returns early on a report it cannot
+        # announce, and a cleanup behind an early return is a cleanup waiting to
+        # be skipped.
+        if found.report is None:
+            self._withdraw_route(target, superseded=attempt)
+        self._announce(target, found, previous=attempt)
+        return found.report
+
+    def _withdraw_route(
+        self, target: SessionTarget, *, superseded: _RecoveryAttempt | None
+    ) -> None:
+        """Take back a route a reading justified, once that reading has been refused.
+
+        **A route lives exactly as long as the reading that justified it.** A
+        recovered address is a reading of somebody else's file rather than
+        anything the Session told us, so a later reading that refuses the target
+        — the pid belongs to another process now, or its record has stopped
+        being readable — ends the route it granted. Leaving it would let
+        `reachable()` and `_deliver` go on naming a socket this adapter has just
+        decided is not this Session's, which is the delivery into the wrong
+        conversation the pid in a Claude target exists to prevent (#278).
+
+        The same pair is what a hook takeover performs in `_session_started`,
+        for the same reason under the other cause.
+        """
+        if superseded is None or superseded.found.report is None:
+            return
+        self._inboxes.pop(target, None)
+        self._windows.forget(target)
+
+    def _worth_another_look(self, attempt: _RecoveryAttempt) -> bool:
+        """Whether a cached outcome has stopped being the best answer available.
+
+        Only a refusal ever has. A recovery that found a transcript read files
+        that do not move under a running Session, so asking again could only
+        cost a directory scan to be told the same thing.
+        """
+        if attempt.found.unread_reason is None:
+            return False
+        return time.monotonic() - attempt.at >= self._settings.recovery_retry_interval_seconds
+
+    def _announce(
+        self,
+        target: SessionTarget,
+        found: recovery_module.Recovery,
+        *,
+        previous: _RecoveryAttempt | None = None,
+    ) -> None:
+        """Say what one recovery found, and register the route if it found one.
+
+        The refusal is logged with the same sentence the brief carries, so the
+        operator reading `engine.log` and the user hearing the brief are told the
+        same thing rather than two renderings of it (#278). A refusal that is
+        merely being repeated is not logged again — a retry every minute for a
+        Session that stays unrecoverable would otherwise fill the log with one
+        sentence — so what reaches it is the first refusal and every change.
+        """
+        unchanged = previous is not None and previous.found == found
+        if found.unread_reason is not None and not unchanged:
+            _log.info(
+                "no transcript for session_id=%s pid=%s: %s",
+                target.session_id,
+                target.pid,
+                found.unread_reason,
+            )
+        report = found.report
+        if report is None or unchanged:
+            return
+        _log.info(
+            "recovered a registration for session_id=%s pid=%s from disk: "
+            "workspace=%s transcript=%s socket=%s",
+            report.session_id,
+            report.pid,
+            report.workspace,
+            report.transcript_path,
+            report.messaging_socket,
+        )
+        if report.messaging_socket is not None:
+            self.register_session(target, report.messaging_socket)
+
+    def _unread_reason(self, target: SessionTarget) -> str | None:
+        """Why this Session has no transcript to read, when a recovery said why.
+
+        Only a *recovery* has a sentence here. A Session whose own hook reported
+        a path that does not exist yet is `NOT_READ` as it always was — nobody
+        looked and failed, the file simply is not there — and the seam keeps that
+        distinction (`seams/agent.py`, `ProgressAvailability`).
+        """
+        attempt = self._recovered.get(target)
+        return attempt.found.unread_reason if attempt is not None else None
+
     def _transcript_path(self, target: SessionTarget) -> Path | None:
         """Where this Session's own record is, as its registration named it."""
-        report = self._reported.get(target)
+        report = self._report_for(target)
         return report.transcript_path if report else None
 
     def stop_reading(self, target: SessionTarget, roster: WaitingFor | None = None) -> StopReading:
@@ -826,6 +1012,11 @@ class ClaudeAgentAdapter:
         except TranscriptUnavailable as unreadable:
             raise LaneUnavailable(AgentKind.CLAUDE, str(unreadable)) from None
         if records is None:
+            refused = self._unread_reason(target)
+            if refused is not None:
+                # Looked and could not read, which is a lane failure naming its
+                # cause — not the silent `read_at=None` that says nobody looked.
+                raise LaneUnavailable(AgentKind.CLAUDE, refused)
             return HistoryPage()
         return history_page(
             transcript_tail.visible(records),
@@ -884,7 +1075,7 @@ class ClaudeAgentAdapter:
 
     def registry_directory(self) -> Path:
         """Where launches find the Session records this adapter later observes."""
-        return self._settings.registry_directory
+        return self._registry_directory
 
     def approval_socket_path(self) -> Path:
         """Where a launch should tell this Session's hook to find us.
@@ -981,7 +1172,7 @@ class ClaudeAgentAdapter:
         address a Session's registration reported.
         """
         loaded = f"{type(self).__module__}:{type(self).__name__}"
-        registry_directory = self._settings.registry_directory
+        registry_directory = self._registry_directory
         if not registry_directory.is_relative_to(self._claude_config_directory):
             return VerifyResult(
                 outcome=VerifyOutcome.FAIL,
@@ -1038,6 +1229,13 @@ class ClaudeAgentAdapter:
         self, target: SessionTarget, text: str, *, request_id: RequestId
     ) -> DeliveryReceipt:
         """One attempt, classified into the hub's four states and nothing else."""
+        if target not in self._inboxes:
+            # A Session that registered before this engine started holds no
+            # address here until something has looked (#278). Ask on the way in,
+            # so a Relay does not depend on a discovery tick having gone first;
+            # a recovery that finds a socket registers it through the same door
+            # a hook registration takes.
+            self._report_for(target)
         socket_path = self._inboxes.get(target)
         if socket_path is None:
             return _failed(request_id, f"no Claude Session is registered as {target}")
@@ -1087,8 +1285,13 @@ class ClaudeAgentAdapter:
         return receipt
 
     def _messaging_token(self, target: SessionTarget) -> str | None:
-        """The Session's own inbox token, as its `SessionStart` hook reported it."""
-        report = self._reported.get(target)
+        """The Session's own inbox token, from its hook or from the key file beside it.
+
+        Through the same lookup the route itself comes from, so a recovered
+        Session relays with the token published for the socket it was recovered
+        on rather than with none (#278).
+        """
+        report = self._report_for(target)
         return report.messaging_token if report else None
 
     async def _reply_inbox(self, directory: Path) -> ReplyInbox:
@@ -1102,9 +1305,7 @@ class ClaudeAgentAdapter:
             existing = self._replies.get(directory)
             if existing is not None:
                 return existing
-            replies = ReplyInbox(
-                directory=directory, registry_directory=self._settings.registry_directory
-            )
+            replies = ReplyInbox(directory=directory, registry_directory=self._registry_directory)
             await replies.start()
             self._replies[directory] = replies
             _log.info("reply inbox bound at %s", replies.address)

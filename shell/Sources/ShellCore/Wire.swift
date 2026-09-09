@@ -7,7 +7,7 @@ public let maxRequestBytes = 65536
 
 /// The control-plane protocol this shell can interpret. Held to the engine's
 /// declaration by the cross-language agreement test in `tests/test_app_bundle.py`.
-public let controlPlaneProtocolVersion = 9
+public let controlPlaneProtocolVersion = 10
 
 /// Whether an Agent's authoritative progress source was read and answered.
 public enum ProgressAvailability: String, Sendable, CaseIterable {

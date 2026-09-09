@@ -8,7 +8,7 @@ import Testing
     @Test func oneRequestGetsOneReply() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": true, "action": "live", "protocol": 9, "data": {"state": "up", "call_id": "call-1"}}"#
+                #"{"ok": true, "action": "live", "protocol": 10, "data": {"state": "up", "call_id": "call-1"}}"#
             ))
         defer { engine.stop() }
 
@@ -22,7 +22,7 @@ import Testing
     @Test func aRefusalIsAnAnswer() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": false, "action": "switch", "protocol": 9, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
+                #"{"ok": false, "action": "switch", "protocol": 10, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
             ))
         defer { engine.stop() }
 
@@ -43,6 +43,23 @@ import Testing
         let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
 
         #expect(failure == .protocolMismatch(received: 5, supported: controlPlaneProtocolVersion))
+    }
+
+    /// #302: the engine before the reader mark. It answers `history` and `brief`
+    /// with a page fitted to 64 KB alone, which codex then cuts on the way to the
+    /// Voice, so a shell that spoke to it would be reading answers with holes in
+    /// them. Refused like any other version this shell does not implement.
+    @Test func theProtocolBeforeTheReaderMarkIsAMismatch() async throws {
+        let engine = try FakeEngineSocket(
+            behaviour: .answer(
+                #"{"ok": true, "action": "status", "protocol": 9, "data": {}}"#
+            ))
+        defer { engine.stop() }
+
+        let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
+
+        #expect(failure == .protocolMismatch(received: 9, supported: controlPlaneProtocolVersion))
+        #expect(controlPlaneProtocolVersion == 10)
     }
 
     @Test func aMissingProtocolVersionKeepsTheAbsentDistinction() async throws {

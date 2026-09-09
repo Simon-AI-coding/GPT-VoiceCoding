@@ -454,20 +454,47 @@ class CodexAgentAdapter:
         the watch backwards; `_reachable` uses the stable thread id only to find
         the connection that already exists.
 
+        **A watch whose connection has closed is replaced here** (#162), which
+        is what makes this cadence the thing that heals one. Resolving by thread
+        id and returning without consulting `is_open` was why nothing did: the
+        `on_closed` cleanup fires when a connection dies, and the race that
+        produces a dead watch closes it *before* the watch exists, so there was
+        nothing to drop; the `thread/status/changed` retry resubscribes on the
+        watch's own — dead — connection; and `_reachable` is the only other
+        reader of `is_open`, but it runs on a Relay or an Approval. Until the
+        user happened to send words to that Session, its permission prompts —
+        which the app-server delivers to subscribed clients only — reached
+        nobody, which is the opposite of what adoption on the cadence is for.
+
+        Dropped under the address the *watch* holds and re-adopted under
+        discovery's, exactly as `_reachable` drops a closed watch: a dead
+        connection is a reason to re-dial and never a reason to move a thread's
+        address, and re-keying to discovery's target is the same step it
+        already was. The watch is replaced rather than re-pointed, so
+        `subscribed` keeps meaning "on the connection this watch holds".
+
         **No legacy behaviour to port (ADR 0010).** Legacy learned Codex turn
         ends from hooks (`legacy@1d32845:bridge/hook.py:112-186`) and never
         watched an app-server thread, so it had no corresponding re-key state.
+        Nor did it have this one: generation 1 ran an app-server per hosted TUI
+        and used the daemon-owned socket as a catalog only, so it never
+        subscribed to a thread on a shared connection, and its reachability
+        check (`is_reachable`, `legacy@1d32845:bridge/codex.py`, ~`:1775-1786`)
+        failed closed through the store and the registry rather than through a
+        held socket.
         """
         target = row.target
         if target.session_id is None or not row.child.is_main:
             return
         watched = self._thread_for(target.session_id)
-        if watched is not None:
+        if watched is not None and watched.connection.is_open:
             if watched.target != target:
                 self._threads.pop(watched.target, None)
                 watched.target = target
                 self._threads[target] = watched
             return
+        if watched is not None:
+            self._threads.pop(watched.target, None)
         await self._adopt(row)
 
     async def _adopt(self, row: SessionInspection) -> None:
@@ -526,6 +553,12 @@ class CodexAgentAdapter:
             # Left in `_threads` deliberately: the connection is the daemon's and
             # is still good, `subscribed` is False, and `thread/status/changed`
             # retries it. Dropping the row here would re-resume on every tick.
+            #
+            # "Still good" is a fact rather than an assumption only since #162:
+            # `SharedDaemon.client()` answers an open connection or `None` on
+            # both paths, so the connection this watch holds was open when it
+            # was handed over — and one that closes later is replaced by
+            # `_adopt_discovered` on the next pass rather than kept.
             _log.info("could not resume %s on the shared daemon: %s", target.session_id, refused)
 
     async def _reachable(self, target: SessionTarget) -> tuple[WatchedThread | None, str]:

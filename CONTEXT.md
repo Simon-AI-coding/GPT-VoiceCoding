@@ -136,7 +136,7 @@ _Avoid_: assistant (unqualified), bot, chat, Session-level assistant
 
 **Codex Runtime**:
 The one codex the machine already has, as the three facts everything on this side is given about it: the **executable** the user gets when they type `codex`, the **control socket** it listens on when this product's login job starts it (derived from `CODEX_HOME`, never asked of a running process), and the **launch environment** that job needs to start it at all. The product starts that codex as a shared app-server the user's own terminals join; it never installs one, wraps one, or names a binary the user does not get (ADR 0022).
-_Avoid_: daemon (the subcommand family this replaced), managed binary, standalone, bundled codex
+_Avoid_: daemon as the name of the subcommand family this replaced — in code and the ADRs it is the defined short name for the shared app-server (ADR 0020, vocabulary amendment), and new prose says "shared app-server"; managed binary, standalone, bundled codex
 
 **Session**:
 One interactive terminal run of Claude Code or Codex. The system sees every Session on the machine, reads what it stopped on, and Relays into it. It sees one by recognising it from what the machine already shows — never by wrapping or instrumenting it — so a Session it cannot recognise is under-reported and said to be, never invented (ADR 0020).

@@ -4131,6 +4131,12 @@ class TestAClosedNoticeIsEditedInPlace:
     becomes the one fixed closed word and the buttons go, and everything else
     stays as sent, so the chat still reads as a record.
 
+    **One cause is exempt** (#323, §8 as amended 2026-09-09): a question the user
+    answered at the terminal leaves its notice as sent, unedited. The other causes
+    are unchanged, so the mechanism itself is proved here on a permission notice —
+    the kind the Reply Window closing still closes — and on a question notice
+    through the causes that still close one.
+
     Voice is off throughout, so every send is on the one surface and its id is
     the fake channel's count: the Stop Notice is `1`.
     """
@@ -4151,20 +4157,92 @@ class TestAClosedNoticeIsEditedInPlace:
         assert isinstance(notice, SessionNotice)
         return notice
 
-    def test_a_question_answered_at_the_terminal_edits_its_notice_to_handled(self) -> None:
+    @staticmethod
+    def edited(hub: Hub) -> list[tuple[str, ...]]:
+        """The ids of every edit actually attempted; a plain send revises nothing."""
+        return [revised for revised in hub.channel.revisions if revised]
+
+    def test_a_question_answered_at_the_terminal_leaves_its_notice_as_sent(self) -> None:
+        """No longer a cause (#323, ADR 0021 §8 as amended 2026-09-09): the user
+        resolved the stop themselves and nothing about the record needs to change."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
         hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
+        sent = self.revised(hub)
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
 
-        assert hub.channel.revisions[-1] == ("1",)
-        assert self.revised(hub).state_word == "handled"
+        assert self.edited(hub) == []
+        assert self.revised(hub) == sent
+
+    def test_two_open_question_notices_are_both_left_as_sent(self) -> None:
+        """An older notice and a newer one when the user types at the terminal: the
+        one fact reaches both, and it closes neither (#323)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert self.edited(hub) == []
+
+    def test_only_the_permission_closes_when_both_kinds_are_open(self) -> None:
+        """The cause is read off what each notice carried, not off the Session (#323)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+
+        assert self.edited(hub) == [("2",)]
+
+    def test_words_replied_to_a_stale_question_notice_still_edit_nothing(self) -> None:
+        """A terminal answer, then a Telegram reply seconds later to the notice it
+        left open. The reply takes today's Anchor route — here the refusal, because
+        the question is no longer answerable from this surface — and the notice it
+        was sent on is still the record it was (#323)."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+        sent = self.revised(hub)
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        assert hub.channel.sent[-1].startswith("That question can no longer be answered from here")
+        assert self.edited(hub) == []
+        assert hub.channel.notices[0] == sent
+
+    def test_a_stale_question_notice_whose_reply_is_relayed_closes_as_today(self) -> None:
+        """The other branch of the same edge case (#323). Once a discovery pass has
+        read the row `IDLE`, `RelayPipeline.relay` no longer refuses an unanswerable
+        question, so the words go in — and a delivered Relay is "answered from
+        Telegram", §8's first cause, which the ticket freezes. The reply target the
+        words consumed is marked, which is user story 2."""
+        hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
+        assert self.edited(hub) == []
+        hub.agent.discovery = LaneDiscovery(
+            rows=tuple(
+                SessionInspection(
+                    target=target, workspace=Path("/tmp/workspace"), state=SessionState.IDLE
+                )
+                for target in (CODEX, CLAUDE)
+            )
+        )
+        asyncio.run(hub.core.discover())
+
+        hub.emit(InboundText(text="ship it", in_reply_to="1"))
+
+        assert self.edited(hub) == [("1",)]
+        closed = hub.channel.notices[-2]
+        assert isinstance(closed, SessionNotice)
+        assert closed.state_word == "handled"
 
     def test_the_edit_draws_no_buttons_because_its_labels_are_empty(self) -> None:
         """Empty labels are what draws no keyboard; no "remove buttons" instruction exists."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
-        assert self.revised(hub).options == ("main", "dev")
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
+        assert self.revised(hub).options == ("allow", "deny")
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
 
@@ -4173,7 +4251,7 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_the_edit_adds_nothing_and_keeps_the_notice_as_sent(self) -> None:
         """The question, the numbered lines and the fold stay as sent (ADR 0021 §8)."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main", "dev")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         sent = self.revised(hub)
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
@@ -4208,11 +4286,11 @@ class TestAClosedNoticeIsEditedInPlace:
         assert notice.options == ()
         assert hub.channel.origins[-1] == "callback:9"
 
-    def test_two_open_notices_for_one_session_both_close_on_the_same_fact(self) -> None:
+    def test_two_open_permission_notices_both_close_on_the_same_fact(self) -> None:
         """Every open notice of the Session, not just the newest (ADR 0021 §8)."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a1")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a2")))
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
 
@@ -4220,8 +4298,8 @@ class TestAClosedNoticeIsEditedInPlace:
 
     def test_another_sessions_notice_is_left_alone(self) -> None:
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CODEX, waiting_for=self.question("main")))
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+        hub.emit(SessionStopped(target=CODEX, waiting_for=self.permission("a1")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a2")))
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
 
@@ -4240,7 +4318,7 @@ class TestAClosedNoticeIsEditedInPlace:
         """A permission settles, then the Session ends: the second edit would rewrite
         a message that already says what it has to say."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
 
         hub.emit(SessionEnded(target=CLAUDE))
@@ -4250,7 +4328,7 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_the_edit_still_happens_with_the_message_switch_off(self) -> None:
         """Stale buttons would invite a press that earns only a refusal (ADR 0021 §8)."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         hub.flip("message", False)
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
@@ -4261,7 +4339,7 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_the_duty_switch_off_leaves_the_notice_as_it_was_sent(self) -> None:
         """An edit is an unbidden act toward the user, and Duty answers for those."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         hub.flip("duty", False)
 
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
@@ -4279,7 +4357,7 @@ class TestAClosedNoticeIsEditedInPlace:
 
         hub.emit(InboundText(text="1", in_reply_to="2"))
 
-        assert [revised for revised in hub.channel.revisions if revised] == [("1",), ("2",)]
+        assert self.edited(hub) == [("1",), ("2",)]
 
     def test_words_that_only_queued_close_nothing(self) -> None:
         """Nothing was answered: the words are waiting for a turn the Session has
@@ -4289,7 +4367,7 @@ class TestAClosedNoticeIsEditedInPlace:
 
         hub.emit(InboundText(text="ship it", in_reply_to="1"))
 
-        assert [revised for revised in hub.channel.revisions if revised] == []
+        assert self.edited(hub) == []
 
     def test_a_verdict_that_did_not_arrive_leaves_the_buttons_where_they_are(self) -> None:
         """The dialog on screen is still the thing that can resolve it
@@ -4329,7 +4407,7 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_duty_off_leaves_the_row_open_for_the_next_fact_to_close(self) -> None:
         """A refusal is not a failed attempt: nothing was spent, so nothing is used up."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         hub.flip("duty", False)
         hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.CLOSED))
         hub.flip("duty", True)
@@ -4356,7 +4434,7 @@ class TestAClosedNoticeIsEditedInPlace:
 
         asyncio.run(hub.core.discover())
 
-        assert [revised for revised in hub.channel.revisions if revised] == [("1",)]
+        assert self.edited(hub) == [("1",)]
         closed = hub.channel.notices[-2]
         assert isinstance(closed, SessionNotice)
         assert closed.state_word == "handled"
@@ -4375,8 +4453,8 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_the_edit_does_not_make_an_old_notice_the_newest_anchor(self) -> None:
         """A revised row is not re-registered (ADR 0021 §8): `sent_at` is not refreshed."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CODEX, waiting_for=self.question("main")))
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("dev")))
+        hub.emit(SessionStopped(target=CODEX, waiting_for=self.permission("a1")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission("a2")))
         newest = hub.core.anchors.newest()
 
         hub.emit(ReplyWindowChanged(target=CODEX, window=ReplyWindow.CLOSED))
@@ -4402,7 +4480,7 @@ class TestAClosedNoticeIsEditedInPlace:
     def test_an_edit_telegram_rejects_is_logged_and_dropped(self, caplog) -> None:
         """No retry and no fresh message: a second copy is worse than a stale one."""
         hub = Hub(voice=False, sessions=self.TWO, window=ReplyWindow.OPEN)
-        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.question("main")))
+        hub.emit(SessionStopped(target=CLAUDE, waiting_for=self.permission()))
         hub.channel.outcome = Delivery.FAILED
         hub.channel.reason = "message to edit not found"
 

@@ -93,6 +93,29 @@ def analyse(records: Sequence[Mapping[str, Any]]) -> WaitingFor:
     caller knows the Session's state from the roster and is the one that turns a
     `NONE` from a Session the roster calls `waiting` into `UNKNOWN` with
     `caught_up=False`, which is the seam's word for *ask again, never guess*.
+
+    **An Answer Relay is not the user speaking here, and that is decided** (#306).
+    The boundary is asked `is_visible` alone, and every other reader of that
+    predicate now composes it with `is_own_relay_turn` — `transcript_tail.recent`
+    (#222) and `transcript.naming_records` (#305). The asymmetry is the point:
+    those two ask *are these the user's words*, and a Relay's are; this one asks
+    *has the Session got past the stop it is held on*, and a delivery is no
+    evidence of that for any kind of stop this returns. A permission dialog
+    cannot be closed by a peer message — upstream refuses one as approval for a
+    pending prompt and says so in the announcement it writes (ADR 0013 §3 and
+    its 2026-09-05 amendment). A held question is answered on the Approval hook
+    (ADR 0015), never on the inbox, and its answer reaches this walk as the
+    `tool_result` that closes the call — paired below *before* the visibility
+    rules, so a stop that really did end needs nothing from the Relay. And a
+    Session parked on a plain-text question has no open call for the boundary to
+    be consulted about.
+
+    So admitting a Relay could only lose stops, never find one: it would report
+    `NONE` for a dialog still open and still waiting on the user, which is the
+    one state this reader exists to surface. What does move the boundary is the
+    user's own turn in the Session — a keyboard answer writes no `tool_result`,
+    so their next words are the only record that the moment has passed
+    (`legacy@1d32845:bridge/transcript.py:1683-1712`).
     """
     open_calls: dict[str, _OpenCall] = {}
     last_spoken_at = -1
@@ -391,6 +414,15 @@ def is_own_relay_turn(record: Mapping[str, Any]) -> bool:
     `transcript.naming_records` needed the same question a ticket later; a second
     copy is the drift `is_this_sessions_own_turn` was split out to prevent, so
     the composition lives here beside its two halves and both readers ask it.
+
+    **Both, and only both** (#306). Three readers cross this seam and they ask
+    two different questions of it. *Are these the user's words?* is History's and
+    the Session Name's, and for a Relay the answer is yes — so they compose this
+    with `is_visible`. *Has the Session moved past its stop?* is `analyse`'s, and
+    a delivery answers that for no stop it can report, so `analyse` asks
+    `is_visible` alone and this predicate is deliberately not in its reach. Its
+    docstring carries the argument. A fourth reader should decide which of the
+    two questions it is asking before it picks.
     """
     return is_this_sessions_own_turn(record) and is_own_relay(record)
 

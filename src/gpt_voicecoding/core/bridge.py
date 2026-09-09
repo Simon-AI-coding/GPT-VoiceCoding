@@ -135,6 +135,7 @@ from gpt_voicecoding.seams.call import (
     VoiceSpeech,
 )
 from gpt_voicecoding.seams.companion_channel import (
+    BriefState,
     ChannelReceipt,
     CompanionChannel,
     InboundText,
@@ -1354,11 +1355,21 @@ class BridgeCore:
             for outcome in await self.relays.reply_window_opened(event.target):
                 await self._settle(outcome)
             return
-        # **The window closing is one of the three facts that close a notice**
-        # (ADR 0021 §8): whatever moved it — the question answered at the
-        # terminal, a permission handed back to the keyboard — the decision the
-        # notice carried can no longer be answered from this surface.
-        await self._close_open_notices(event.target)
+        # **The window closing closes a permission's notice and leaves a
+        # question's as sent** (ADR 0021 §8 as amended 2026-09-09, #323).
+        #
+        # The rule is stated as *why* the window closed, and on this path "why"
+        # reduces to *what the notice carried*, which is a fact Core holds. The
+        # other causes close at their own call sites before any window event
+        # reaches here — our settled verdict (`answer_approval`), our delivered
+        # Relay, `SessionEnded`, a Session gone from a discovery pass — and a
+        # notice closes once (`mark_handled`), so a question notice still open
+        # when the window shuts was answered at the terminal. That is the stop
+        # the user resolved themselves, and the record of it needs no edit. A
+        # permission handed back to the keyboard is the one cause left on this
+        # path, and it still closes: its buttons would invite a press that earns
+        # only a refusal.
+        await self._close_open_notices(event.target, close_questions=False)
 
     async def _relay_receipt(self, event: RelayReceipt) -> None:
         """A receipt that arrived after the call returned. The ledger records it.
@@ -1944,14 +1955,23 @@ class BridgeCore:
             receipt.reason,
         )
 
-    async def _close_open_notices(self, target: SessionTarget) -> None:
+    async def _close_open_notices(
+        self, target: SessionTarget, *, close_questions: bool = True
+    ) -> None:
         """Edit every notice this Session left open to the one closed word (ADR 0021 §8).
 
-        **One fact closes them, and Core does not distinguish which.** Answered
-        from Telegram, answered at the terminal, a permission handed back, the
-        Session ended or gone from the roster — each reaches here, and the edit
-        shows none of them, because what it says is that the decision is no
-        longer answerable from this surface and not how that came about.
+        **One fact closes them, and the edit does not distinguish which.**
+        Answered from Telegram, a permission handed back, the Session ended or
+        gone from the roster — each reaches here, and the edit shows none of
+        them, because what it says is that the decision is no longer answerable
+        from this surface and not how that came about.
+
+        **`close_questions=False` leaves a question's notice as sent** (#323): the one
+        caller that passes it is the Reply Window closing, where an open question
+        notice means the user answered at the terminal — a stop they resolved
+        themselves, whose record needs no edit. The reasoning for why that caller
+        may read the cause off the notice is on the call site. Every other caller
+        knows a fact that closes a question too, and takes the default.
 
         Every open notice of the Session, not just the newest: two questions can
         be on screen at once and a fact that closes one closes both. A row whose
@@ -1975,6 +1995,10 @@ class BridgeCore:
         for sent in self.anchors.open_notices(target):
             notice = sent.anchor.notice
             if not isinstance(notice, SessionNotice) or not notice.question:
+                continue
+            # A question's notice and a permission's both carry a question line,
+            # so the brief's own state is what tells them apart (#323).
+            if not close_questions and notice.state is BriefState.DECISION:
                 continue
             # Said before the attempt, not after: an edit is never retried, so a
             # row that has been attempted is done whichever way it went.

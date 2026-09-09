@@ -81,6 +81,16 @@ PEER_PROTOCOL = 1
 #: what its baseline was.
 PROVEN_AGAINST_VERSION = "2.1.251"
 
+#: The registry's word for a Session whose turn has ended with a `local_bash`
+#: background task still running — `idle` under another name (#154). **Spelled
+#: here and nowhere else** (#325): this module owns the vocabulary of the record
+#: it reads, and the two readers that act on the word — `window.py`'s open-status
+#: set and the roster overlay in `adapter.py` — cite this name rather than
+#: repeating the string. A third literal in a third module is how one reader
+#: comes to disagree with another about the same Session. What it was measured
+#: to mean is directly below.
+STATUS_IDLE_WITH_BACKGROUND: Final = "shell"
+
 # **What `shell` was measured to mean** (#154), on 2.1.251, on Simon's machine
 # on 2026-08-31. The word is not documented anywhere, so it is written down
 # here rather than inferred, and `window.py` reads its Reply Window off this.

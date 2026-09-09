@@ -5194,3 +5194,80 @@ class TestADelegatedTurnDoesNotHoldTheDispatchLoop:
 
         assert hub.channel.sent == [NO_DELEGATE_HANDLER]
         assert hub.core.turns.in_flight() == 0
+
+
+class TestARosterRowProjectedIdleFromTheRegistry:
+    """What a `shell` Session's flipped row does — and does not do — here (#325).
+
+    The Claude lane now projects a Session whose registry record reads `shell` as
+    `IDLE` waiting on its own Child Process, instead of the `RUNNING` the roster
+    command answers for it. That row reaches Bridge Core on the ordinary
+    discovery cadence, so these are the two things the flip must not have
+    changed: it announces nothing of its own, and it stops fighting the Reply
+    Window report that was already saying the same thing.
+    """
+
+    IDLE_WITH_A_BACKGROUND_COMMAND = SessionInspection(
+        target=CLAUDE,
+        workspace=Path("/tmp/workspace"),
+        state=SessionState.IDLE,
+        waiting_for=WaitingFor(kind=WaitingKind.CHILD),
+    )
+    STILL_RUNNING = SessionInspection(
+        target=CLAUDE, workspace=Path("/tmp/workspace"), state=SessionState.RUNNING
+    )
+
+    def hub_over(self, row: SessionInspection) -> Hub:
+        """A hub holding this Session as `RUNNING`, and a lane answering `row`.
+
+        `RUNNING` is where every case here starts, because it is where the
+        roster's own word put the Session before anything overlaid it.
+        """
+        hub = Hub(voice=False, sessions=((CLAUDE, "run the suite"),), window=ReplyWindow.CLOSED)
+        hub.agent.discovery = LaneDiscovery(rows=(row,))
+        return hub
+
+    def test_the_flipped_row_announces_nothing(self) -> None:
+        """A Stop Notice is the sweep's to send, never a discovery pass's.
+
+        The registry sweep already announced this Session's stop when its record
+        reached `shell`; the roster agreeing a tick later is not a second stop,
+        and a discovery pass has never been an announcing path.
+        """
+        hub = self.hub_over(self.IDLE_WITH_A_BACKGROUND_COMMAND)
+
+        asyncio.run(hub.core.discover())
+
+        assert hub.state.sessions.all()[0].state is SessionState.IDLE
+        assert hub.channel.sent == []
+        assert hub.call.calls_started == 0
+
+    def test_a_tick_after_a_reply_window_report_no_longer_flips_the_row_back(self) -> None:
+        """The oscillation the ticket is about, closed at its source.
+
+        A Reply Window report of OPEN already turned the held row `IDLE`; the
+        next discovery tick used to write the roster's `RUNNING` back over it,
+        every five seconds, for as long as the background command ran.
+        """
+        hub = self.hub_over(self.IDLE_WITH_A_BACKGROUND_COMMAND)
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.OPEN))
+        assert hub.state.sessions.all()[0].state is SessionState.IDLE
+
+        asyncio.run(hub.core.discover())
+
+        assert hub.state.sessions.all()[0].state is SessionState.IDLE
+
+    def test_a_row_the_lane_still_calls_running_is_the_one_that_overwrites_it(self) -> None:
+        """The mechanism, pinned: the projection is what changed, not this rule.
+
+        Bridge Core still trusts a fresh reading over the shortcut it took from a
+        window report — which is right, and is why the fix had to happen where
+        the row is read rather than here.
+        """
+        hub = self.hub_over(self.STILL_RUNNING)
+        hub.emit(ReplyWindowChanged(target=CLAUDE, window=ReplyWindow.OPEN))
+        assert hub.state.sessions.all()[0].state is SessionState.IDLE
+
+        asyncio.run(hub.core.discover())
+
+        assert hub.state.sessions.all()[0].state is SessionState.RUNNING

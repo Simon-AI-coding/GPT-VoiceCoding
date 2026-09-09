@@ -28,6 +28,10 @@ from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
 )
 from gpt_voicecoding.seams.agent import WaitingKind
 
+# The real delivery record lives in one place (#305), and the boundary cases
+# below need the whole of it rather than the subset `RELAY` keeps.
+from test_claude_transcript_tail import relayed
+
 # --- the shapes Claude Code writes -------------------------------------------
 
 
@@ -384,24 +388,51 @@ class TestWhereTheTailBegins:
         assert waiting.kind is WaitingKind.PERMISSION
 
     def test_our_own_relay_does_not_move_the_tail(self) -> None:
-        """#222 surfaces our Relay in History and leaves this boundary alone.
+        """A Relay is the user's words, and no evidence the Session moved on (#306).
 
-        Making the relayed words a History entry was the whole of that ticket;
-        whether a delivery counts as "the user spoke" for the Stop is a separate
-        reader's question and was explicitly left undecided. So `analyse` still
-        asks `is_visible` alone, and a Relay arriving while a call is held leaves
-        the Session held on that call rather than reading as a finished turn.
+        #222 surfaced the relayed words in History and #305 gave the Session
+        Name the same read; both ask whether these are the user's words, and
+        they are. This boundary asks something else — whether the Session has
+        got past the stop it is held on — and a delivery answers that for no
+        kind of stop. Upstream refuses a peer message as approval for a pending
+        permission dialog (ADR 0013 §3), so the dialog is still open and still
+        the user's to settle; a held question is answered on the hook route
+        (ADR 0015) and reaches `analyse` as the `tool_result` that closes it.
+        Moving the boundary here would report a Session waiting on the user as
+        waiting on nothing, which is the one state this reader exists to find.
+
+        So `analyse` asks `is_visible` alone — by decision, not by omission.
         """
-        relay = said("Another Claude session sent a message:\n可以继续", role="user")
-        relay["promptSource"] = "system"
-        relay["isMeta"] = True
-        relay["origin"] = {
-            "kind": "peer",
-            "from": "uds:/tmp/cc-socks/vc-relay-60460.sock",
-            "msg_id": "6877a163-f973-4342-8011-54c75b543f1d",
-        }
-        waiting = analyse([*turn(), called("Bash", "b1", {"description": "push"}), relay])
+        waiting = analyse(
+            [*turn(), called("Bash", "b1", {"description": "push"}), relayed("可以继续")]
+        )
         assert waiting.kind is WaitingKind.PERMISSION
+
+    def test_our_own_relay_does_not_close_a_held_question(self) -> None:
+        """The other kind the boundary decides, and the same answer (#306).
+
+        A question the Session is parked on is answered over the Approval hook
+        (ADR 0015), never over the inbox — and a mid-turn Relay takes the inbox
+        even while that question is held (ADR 0013, amended 2026-09-05). So the
+        question is still outstanding and still what the user is being asked.
+        """
+        waiting = analyse([*turn(), asked("q1", ("Ship it?", ["yes", "no"])), relayed("可以继续")])
+        assert waiting.kind is WaitingKind.QUESTION
+
+    @pytest.mark.parametrize(
+        "call", [called("Bash", "b1", {"description": "push"}), asked("q1", ("Ship it?", ["yes"]))]
+    )
+    def test_a_typed_turn_in_the_same_place_does_move_the_tail(self, call: dict[str, Any]) -> None:
+        """What the rule above excludes is a route, not the boundary itself.
+
+        The user typing into the Session is the evidence a Relay is not: an
+        outstanding call the user dealt with at the keyboard writes no
+        `tool_result` — a question answered there least of all — so their next
+        turn is the only thing that says the Session has moved past it
+        (`legacy@1d32845:bridge/transcript.py:1683-1712`). Without this case the
+        rule beside it would also pass a reader that never moved the boundary.
+        """
+        assert analyse([*turn(), call, said("never mind", role="user")]).kind is WaitingKind.NONE
 
     def test_slash_command_plumbing_does_not_move_the_tail(self) -> None:
         """Three records the pipeline writes as `user`, none of them a turn.

@@ -10,7 +10,7 @@ Claude Code 2.1.248 does not provide a usable `prompt_id` on the `AskUserQuestio
 
 The question hold uses the configured `CorePolicy.approval_budget_seconds` as a shared resource ceiling without importing policy into the adapter. `BridgeCore.tick` passes that value to each Agent seam. The Claude listener timestamps parking on its injected clock, pops an expired question before writing `ask`, raises the existing `ReplyWindowChanged(CLOSED)`, and returns the release so Core can issue one terminal-only notice. A late Answer Relay is refused and never falls through to the inbox. Codex has no question hook and returns false and no releases.
 
-The option canonicalisation boundary stays inside the adapter: whitespace and case are normalised only to recognise an offered label, which is then sent with its canonical spelling; any other user text is preserved verbatim inside `The user answered from GPT-VoiceCoding: …`. The hook acknowledgement remains the only positive delivery proof.
+The option canonicalisation boundary stays inside the adapter: whitespace and case are normalised only to recognise an offered label, which is then sent with its canonical spelling; any other user text is preserved verbatim inside the frame (`Ruling: …` — see the 2026-09-10 amendment). The hook acknowledgement remains the only positive delivery proof.
 
 Legacy classification is per behaviour, as ruled by the Advisor for #128. Answering a Session's own question through a held hook, including the framed message, `approval_ack` receipt, and engine-minted correlator, is **new**: legacy had no approval transport and never answered a question remotely (`legacy@1d32845:bridge/daemon.py:1901-2052`). Refusing a Relay while its Reply Window is CLOSED is **ported** from `legacy@1d32845:bridge/coordinator.py:392,521-530`; opening that window only for an answerable question is **adapted** from the same boundary using #77's live measurement and the answerability qualification above. Stop Notice content keeps #75 and #77's existing port classification, with the terminal-versus-reply wording **adapted** from the same measurement. The parked-question ceiling reuses the Approval budget's existing classification rather than inventing another policy, while option-label canonicalisation is **new** because legacy has no such behaviour. Live Claude Code 2.1.248 measurements for #128 found that the on-screen question remains visible and keyboard-interactable while the hook is held, and that its question request supplies no usable `prompt_id`; no Claude version pin is introduced.
 
@@ -40,3 +40,48 @@ Core issued on an engine-timed release goes with the timer: the next Session Bri
 without its handle and carries `answerable_here=false`, which is what the user is told when they ask.
 The never-deny rule survives as a wire fact — a hook that ends without a verdict is silence, and
 silence is the on-screen dialog's — not as engine policy.
+
+## Amendment 2026-09-10: the frame is worded for a reader who is told it failed
+
+Source: [#328](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/328).
+
+This ADR settled that an answer rides the held hook as a framed denial, because Claude
+consumes a denial's message as the `AskUserQuestion` tool result. What it did not record is
+what that costs on the surfaces a person and a model actually read: Claude Code renders a hook
+denial as an error, so **this route's success is displayed as its failure**. The terminal prints
+the delivered answer in red error styling under `Denied by PermissionRequest hook`, and the
+Session's model receives the same bytes wrapped as a failed tool result. A refusal
+(`DENIED_BY_VOICE`) and a delivered answer reach that renderer identically and come out
+indistinguishable.
+
+**There is no other shape to reach for, and that is now measured rather than assumed.** Read out
+of the shipped 2.1.267 binary's own rejection text: `PermissionRequest decision must be
+{"behavior": "allow"} or {"behavior": "deny", "message": "..."}`. `permissionDecision` remains
+documented `(PreToolUse only)`, so #77's finding on 2.1.246 holds; its new fourth value `defer`
+never reaches an interactive Session, the build logging `defer in interactive mode; ignoring
+(defer is print-mode only)`. The strings `answer:` and `answer question` that sit beside these in
+the binary are a pending dialog's display label, not a channel. The framing is Claude Code's and
+this repo cannot take it back; the root fix is an upstream output that answers a question without
+denying it, and asking for one is the only thing that retires this amendment.
+
+**So the frame's wording is the whole of the remedy that reaches the model**, and it is chosen for
+that reader rather than for clarity in the abstract. The prefix is `Ruling: `. It is positive: a
+phrasing like *this is not an error* steers by prohibition, which makes the forbidden reading more
+available rather than less. It is already this repo's word, carried by these ADRs and by #128's own
+ruling, so the model meets it in the code, the docs and the tracker alike. And it is narrow — it
+settles the question that was asked and claims nothing about the exchange, where *final* would
+suppress the follow-up a Session is sometimes right to ask. It names neither the user nor this
+product, because the `AskUserQuestion` call it answers and the channel the words arrived on carry
+both already.
+
+**The human is not left with the red line as their only signal**, and the reason is a decision
+already taken elsewhere: ADR 0021's receipt is a reaction, and a delivered Answer Relay wears
+`RelayReason.DELIVERED`'s 👌 on the user's own message (#321). Someone answering from the
+Companion Channel is told it landed on the channel they are looking at. The terminal's red line is
+seen by someone sitting at the terminal — who would have answered there. This is recorded because
+its absence is what makes the red line look like an unsolved defect; the remaining reader it
+misleads is the next person to open this repository, which is who this amendment is written for.
+
+Unchanged: the framed denial itself (#128 — an answer is not a fourth `ApprovalVerdict` kind), the
+canonicalisation boundary above, and `approval_ack` as the only positive delivery proof. Nothing
+here may be re-graded on what a terminal renders.

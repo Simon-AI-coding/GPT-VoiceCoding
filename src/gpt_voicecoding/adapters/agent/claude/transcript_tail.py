@@ -37,13 +37,33 @@ ran two scans of one file for these two questions and they could describe two
 different moments of a file the Session is still appending to
 (`legacy@1d32845:bridge/transcript.py:1184-1208`).
 
+**One record the visibility rule excludes is kept anyway: our own Answer Relay**
+(#222). Claude Code records an inbox delivery as a `system` prompt source, so the
+words the user said through the phone left with the plumbing and History showed
+two assistant turns back to back. `is_own_relay` recognises the delivery as ours
+and `relay_payload` unwraps the receiver's announcement, both from
+`stop_analysis` for the reason above. `is_visible` itself is untouched — it gains
+no exception, and `stop_analysis.analyse` goes on asking it alone, so the Stop
+tail boundary this walk shares with it does not move. The sidechain and
+`external` halves of the rule still hold — `_is_our_own_relay` asks
+`is_this_sessions_own_turn` for them rather than restating them — because only
+the `system` half is what a Relay trips.
+
 **Against legacy** (ADR 0010, `CLAUDE.md`). The read is **ported** from
 `legacy@1d32845:bridge/transcript.py:1184-1246` (walk the records, keep what the
 user can see, bound the tail) with its text extraction at `:1568-1607` and its
 bounding walk at `:2828-2860`. **Adapted**: legacy's sidechain exclusion
 (`_top_level_records`, `:1125-1142`) is a **visibility** rule — what to show, and
 what counts as a stop — and it is ported whole into `recent`'s entries and into
-`stop_analysis.analyse`. `last_activity` is not a visibility fact, and legacy is
+`stop_analysis.analyse`. **Adapted**: legacy's `system` exclusion
+(`bridge/transcript.py:1477-1500`) is kept verbatim as a rule but is no longer
+the whole answer for entries — an own Answer Relay is admitted past it (#222).
+Legacy had no such exception and needed none: it delivered a relay through its
+channel server (`legacy@1d32845:bridge/claude.py:472-476`), which Claude Code
+recorded as an ordinary typed turn, so the record shape this admits is one gen 1
+never met. The exclusion itself is unwidened and unnarrowed for every other
+record, and `stop_analysis.analyse` still applies it alone.
+`last_activity` is not a visibility fact, and legacy is
 not a citation for it either way: gen 1 had no such field at all. **Adapted**:
 legacy's entry was
 `TranscriptMessage(role, text)` and this is the seam's `ProgressEntry`, which
@@ -62,9 +82,12 @@ from typing import Any, Final
 
 from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
     QUESTION_TOOL,
+    is_own_relay,
     is_pipeline_noise,
+    is_this_sessions_own_turn,
     is_visible,
     question_in,
+    relay_payload,
     visible_text,
 )
 from gpt_voicecoding.seams.agent import (
@@ -186,10 +209,34 @@ def _entry(record: Mapping[str, Any], *, ordinal: int) -> ProgressEntry | None:
     if not isinstance(message, Mapping) or message.get("role") != str(record.get("type")):
         return None
     content = message.get("content")
-    if not is_visible(record) or is_pipeline_noise(record, content):
+    if is_pipeline_noise(record, content):
         return None
-    text = visible_text(content)
+    if is_visible(record):
+        text = visible_text(content)
+    elif _is_our_own_relay(record):
+        # The one record the visibility rule excludes that is nonetheless the
+        # user speaking: our own Answer Relay, which Claude Code writes as a
+        # `system` prompt source because it arrived down the inbox socket rather
+        # than off a keyboard (#222). The exclusion itself is untouched — every
+        # other `system`, sidechain or non-`external` record is dropped exactly
+        # as before, and `stop_analysis.analyse` still asks `is_visible` alone,
+        # so the tail boundary this walk shares does not move.
+        text = relay_payload(visible_text(content))
+    else:
+        return None
     return ProgressEntry(ordinal=ordinal, role=role, text=text) if text.strip() else None
+
+
+def _is_our_own_relay(record: Mapping[str, Any]) -> bool:
+    """Our own Relay, and still subject to every rule that is not the `system` one.
+
+    `is_own_relay` answers who delivered the record; it is not a way past the
+    other two exclusions. A sidechain record is a child's work and a record that
+    is not `external` is not the Session's own turn whoever sent it, so both are
+    re-asserted here rather than assumed — recognition adds a way in for one
+    rule, not for three.
+    """
+    return is_this_sessions_own_turn(record) and is_own_relay(record)
 
 
 def _moment(stamp: Any) -> datetime | None:

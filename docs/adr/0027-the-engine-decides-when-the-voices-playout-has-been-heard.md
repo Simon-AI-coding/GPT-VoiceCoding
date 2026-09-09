@@ -1,4 +1,4 @@
-# 26. The engine decides when the Voice's Playout has been heard, from the audio it already holds
+# 27. The engine decides when the Voice's Playout has been heard, from the audio it already holds
 
 Date: 2026-09-09 · Status: Accepted · Source: #301, replacing #235's unrecorded rule
 

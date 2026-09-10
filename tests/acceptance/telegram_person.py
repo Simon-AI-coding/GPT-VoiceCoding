@@ -2,9 +2,9 @@
 """The Telegram **user**-account client (#351).
 
 **Responsibilities held here** (§9's `telegram_person.py`): one Telethon client
-for both lanes, reading a message **by the id the product issued**, replying to
-an id, the cross-process session lock of §5, and the one-time `login` a person
-runs.
+for both lanes, taking a **mark** on a chat, reading what **arrived** since one,
+replying to an id, the cross-process session lock of §5, and the one-time `login`
+a person runs.
 
 The account is played because a **bot cannot message a bot**: the inbound half of
 the Companion Channel can only be produced by a user account, so the harness
@@ -13,22 +13,28 @@ bot sent is read back out of the chat by a real client rather than trusted from
 the Bot API's own `sendMessage` reply, which proves the API accepted the call and
 not that the message reached the far side.
 
-Two rules this module exists to hold:
+Three rules this module exists to hold:
 
 * **`telethon` is imported here and nowhere else.** It is the `acceptance` extra,
   it is a forbidden import for Bridge Core and the seams
   (`tests/test_architecture.py`), and it must not reach the bundle. Imported
   *inside* the functions that need it, so this module — and the suite that
   collects it — loads on a machine that never installed the extra.
-* **Every chat read is by product-issued message id** (§9). The harness never
+* **Every chat read is after a mark this harness took** (§9). The harness never
   searches the chat and never matches a message by the Session's name: one engine
-  bridges every Session on the machine, so a search would grade a stranger.
-  Reading by id removes the search rather than filtering it.
+  bridges every Session on the machine, so a search would grade a stranger. A
+  mark plus the count of ids the engine logged removes the search rather than
+  filtering it.
+* **Nothing is read by the id the product issued**, and that is not a preference:
+  in a Telegram **private chat** each account has its own message-id sequence, so
+  the Bot API's `message_id` is the id in the *bot's* dialog and this account
+  cannot address a message by it (#354, run `20260910T191643Z`: ids 1806 and 306
+  sent, the same two messages are 5939 and 5940 here).
 
-**Two chat operations and no more** (this ticket's fifth criterion): `read` and
-`reply`. There is no search, no "latest", no matching by name — `peer` resolves a
-username to the entity the two take, which touches the account's contacts and not
-the chat.
+**Three chat operations and no more** (§9): `mark`, `arrived` and `reply`. There
+is no read-by-id, no send, no search and no waiting — `peer` resolves a username
+to the entity the three take, which touches the account's contacts and not the
+chat.
 
 Run the one-time authorisation with:
 
@@ -427,13 +433,34 @@ def as_person_message(message: Any) -> PersonMessage:
     )
 
 
+def newest_id(messages: Iterable[Any]) -> int:
+    """A chat's mark: the newest id it holds, and **0 for a chat holding nothing**.
+
+    0 is a real answer rather than a missing one — everything in an empty chat
+    arrived after the mark, and a run's first turn against a fresh bot is exactly
+    that. Ordinary code, so `tests/test_harness_person.py` pins it without an
+    account (§9).
+    """
+    return max((int(one.id) for one in messages), default=0)
+
+
+def in_arrival_order(messages: Iterable[Any]) -> tuple[PersonMessage, ...]:
+    """What arrived, **oldest first** — the order a split send was sent in (#189).
+
+    Telethon hands back newest-first, and the order matters twice: the count is
+    graded against the ids the engine issued, and the *first* of these is the id
+    item 5 anchors its reply to (§2 item 5).
+    """
+    return tuple(sorted((as_person_message(one) for one in messages), key=lambda one: one.id))
+
+
 def _no_journal(event: str, **fields: object) -> str:  # noqa: ARG001
     """The default sink: a client driven outside a run journals nowhere."""
     return ""
 
 
 class PersonConnection:
-    """One SQLite session, one client, two peers (§8) — and two chat operations.
+    """One SQLite session, one client, two peers (§8) — and three chat operations.
 
     **One session file backs one client.** That is Telethon's own rule and it is
     not advisory: the session is an SQLite file holding a bearer auth key, and two
@@ -447,10 +474,12 @@ class PersonConnection:
     call goes through `run`, under a lock, because `run_until_complete` is not
     re-entrant and the two lanes call it from two threads.
 
-    The chat surface is **`read` and `reply`, and nothing else**. No search, no
-    "latest", no matching by name: every id this takes was issued by the product
-    and read out of the engine's own log, which is what makes a green row a row
-    about this run's own Session rather than about a stranger's (§9, #109).
+    The chat surface is **`mark`, `arrived` and `reply`, and nothing else**. No
+    read-by-id, no send, no search, no matching by name and no polling loop: a
+    mark is taken before the turn that should produce a message, and what the
+    turn produced is everything that arrived after it — bounded by the count of
+    ids the engine logged, which is what makes a green row a row about this run's
+    own turn rather than about a stranger's (§9, #109, #354).
     """
 
     def __init__(
@@ -518,27 +547,54 @@ class PersonConnection:
 
         The username is handed down from the Bot API's own `getMe`, so no bot is
         named anywhere in this suite. Resolving it touches the account's contacts
-        and never the chat — which is why "two chat operations" is `read` and
-        `reply` and this is not one of them.
+        and never the chat — which is why "three chat operations" is `mark`,
+        `arrived` and `reply` and this is not one of them.
         """
         return self.run(self._client.get_entity(username))
 
-    # -- the two chat operations ---------------------------------------------
+    # -- the three chat operations -------------------------------------------
 
-    def read(self, peer: Any, message_id: int) -> PersonMessage | None:
-        """One message, **by the id the product issued** (§2 item 2, §9).
+    def mark(self, peer: Any) -> int:
+        """Where this chat has got to, as **this account** sees it (§2 item 2, §9).
 
-        A single `get_messages(peer, ids=…)`. `None` is a real answer: an id the
-        chat does not hold is a message that never arrived, which is the fact the
-        row rests on — not an error to raise past it.
+        The newest message's id, and **0 for a chat holding nothing** — which is a
+        real answer rather than a missing one: everything in an empty chat arrived
+        after the mark, and the first run against a fresh bot is exactly that.
+
+        Taken before the turn whose message is about to be read, so what arrived
+        after it belongs to that turn. The ids are the account's own sequence and
+        have nothing to do with the ids the product issued (#354).
         """
-        found = self.run(self._client.get_messages(peer, ids=int(message_id)))
-        if found is None:
-            self._journal("telegram.person.absent", message_id=int(message_id))
-            return None
-        message = as_person_message(found)
-        self._journal("telegram.person.read", **message.as_journal_fields())
-        return message
+        found = newest_id(self.run(self._collect(peer, limit=1)))
+        self._journal("telegram.person.mark", mark=found)
+        return found
+
+    def arrived(self, peer: Any, since: int) -> tuple[PersonMessage, ...]:
+        """Everything newer than a mark, **oldest first, read once** (§2 item 2, §9).
+
+        One call and no polling: the caller reads this only once the engine has
+        logged the send, and the engine logs it after the Bot API returned — so
+        the message is already on the server and a window watched for it would be
+        the waiting ADR 0021 §10 forbids.
+
+        **`limit` is stated, and that is load-bearing.** Telethon's
+        `get_messages` quietly defaults it to 1 unless *both* `min_id` and
+        `max_id` are named (`telethon/client/messages.py`), so the bare
+        `get_messages(peer, min_id=…)` §9 describes would read one message however
+        many arrived — and the count a split send is graded against (#189) would
+        false-fail on a read this function capped itself.
+        """
+        messages = in_arrival_order(self.run(self._collect(peer, limit=None, min_id=int(since))))
+        self._journal(
+            "telegram.person.arrived",
+            since=int(since),
+            messages=[message.as_journal_fields() for message in messages],
+        )
+        return messages
+
+    def _collect(self, peer: Any, **query: Any) -> Any:
+        """The one place the chat is read at all, so there is one query to audit."""
+        return self._client.get_messages(peer, **query)
 
     def reply(self, peer: Any, reply_to_message_id: int, text: str) -> PersonMessage:
         """A reply **anchored to an id** (§2 item 5, ADR 0021 §2–§3).

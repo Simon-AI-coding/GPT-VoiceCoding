@@ -6,8 +6,8 @@ by (`docs/acceptance-design.md` §2, §3):
 
 * `TestTheTurns` — §3's three sentences, their files and their words, distinct
   so no effect can be mistaken for another;
-* `TestTheEngineLogLine` — the `message_ids=` line to the id every chat read
-  starts from (§2 item 2, §9);
+* `TestTheEngineLogLine` — the `target=` / `message_ids=` line to whose send it
+  was (§2 item 2, §9, #355) and how many messages to expect (#354);
 * `TestTheReceipts` — `relay` and `approve` graded on the `grade` **field**,
   literally `delivered`, never on a substring that a `retained` receipt would
   false-pass (§2 item 3, #71);
@@ -123,8 +123,11 @@ class TestTheTurns:
 
 
 class TestTheEngineLogLine:
-    """§2 item 2 and §9 — every chat read starts from an id the product issued,
-    and only from a line addressed to this lane's own Session (#355)."""
+    """§2 item 2 and §9 — whose send it was, and how many messages to expect.
+
+    The line decides both: only one addressed to this lane's own Session is this
+    turn's Stop (#355), and the count of its ids is what the chat read is graded
+    against (#354)."""
 
     SENT = (
         f"2026-09-10 10:00:00 INFO sent Companion Channel message request=r-1 "
@@ -160,30 +163,31 @@ class TestTheEngineLogLine:
         assert journey.send_target("sent Companion Channel message target= message_ids=1") == ""
         assert journey.send_target("Session stopped: 工位") == ""
 
-    def test_the_stop_notice_id_is_the_first_id_of_the_first_send(self) -> None:
-        """A notice can span several messages; the anchor the product registers
-        covers every id of the receipt, so the first is the one this harness reads
-        and the one it replies to (bridge.py's `anchors.register`)."""
+    def test_this_turns_stop_is_the_first_send_addressed_to_this_session(self) -> None:
+        """The **first** own-addressed send after the mark, and the ids it carries —
+        a notice can span several messages (#189), and what the chat read is graded
+        against is how many there were (§2 item 2 as amended, #354)."""
         later = (
             f"sent Companion Channel message request=r-2 outcome=delivered "
             f"target={OWN_ADDRESS} message_ids=4200"
         )
-        assert journey.stop_notice_id([self.SENT, later], OWN_ADDRESS) == "4110"
+        own = journey.sent_for([self.SENT, later], OWN_ADDRESS)
+        assert own[0] == self.SENT
+        assert journey.message_ids(own[0]) == ("4110", "4111")
 
     def test_a_send_about_another_session_is_not_this_turns_stop(self) -> None:
         """#355: the newest send is not this lane's by virtue of being newest."""
-        assert journey.stop_notice_id([self.THEIRS], OWN_ADDRESS) is None
-        assert journey.stop_notice_id([self.THEIRS, self.SENT], OWN_ADDRESS) == "4110"
+        assert journey.sent_for([self.THEIRS], OWN_ADDRESS) == []
         assert journey.sent_for([self.THEIRS, self.SENT], OWN_ADDRESS) == [self.SENT]
 
     def test_a_send_about_nobody_is_not_this_turns_stop_either(self) -> None:
         nobody = (
             "sent Companion Channel message request=r-3 outcome=delivered target= message_ids=1"
         )
-        assert journey.stop_notice_id([nobody], OWN_ADDRESS) is None
+        assert journey.sent_for([nobody], OWN_ADDRESS) == []
 
-    def test_no_send_at_all_is_no_id(self) -> None:
-        assert journey.stop_notice_id([], OWN_ADDRESS) is None
+    def test_no_send_at_all_is_no_stop(self) -> None:
+        assert journey.sent_for([], OWN_ADDRESS) == []
 
     def test_no_address_matches_nothing_rather_than_everything(self) -> None:
         """The empty field is what a send about nobody carries, so an equality test
@@ -192,7 +196,6 @@ class TestTheEngineLogLine:
             "sent Companion Channel message request=r-3 outcome=delivered target= message_ids=7"
         )
         assert journey.sent_for([nobody, self.SENT, self.THEIRS], "") == []
-        assert journey.stop_notice_id([nobody], "") is None
 
     def test_a_failure_names_who_the_engine_did_send_about(self) -> None:
         """The one failure whose cause is invisible from everything else the row
@@ -280,13 +283,13 @@ class TestTheApprovalId:
 class TestTheReplyAnchor:
     """§2 item 5 — the primary inbound form, and no way to send any other."""
 
-    def test_the_chat_has_two_operations_and_neither_is_a_search(self) -> None:
+    def test_the_chat_has_three_operations_and_none_is_a_search(self) -> None:
         public = {
             name
             for name, _ in inspect.getmembers(journey.Chat, inspect.isfunction)
             if not name.startswith("_")
         }
-        assert public == {"read", "reply"}
+        assert public == {"mark", "arrived", "reply"}
 
     def test_a_reply_cannot_be_sent_without_the_id_it_is_anchored_to(self) -> None:
         """Impossible by construction: there is no `send`, and `reply` takes an anchor."""
@@ -298,16 +301,21 @@ class TestTheReplyAnchor:
             if name != "self"
         )
 
-    def test_reading_is_by_one_id_through_the_lanes_own_peer(self) -> None:
+    def test_a_mark_is_taken_on_the_lanes_own_peer(self) -> None:
         connection = _Connection()
+        assert journey.Chat(peer="@lane-bot", connection=connection).mark() == CHAT_MARK
+        assert connection.marks == ["@lane-bot"]
+
+    def test_what_arrived_is_read_once_after_that_mark(self) -> None:
+        connection = _Connection(_Message())
         chat = journey.Chat(peer="@lane-bot", connection=connection)
-        chat.read(4110)
-        assert connection.reads == [("@lane-bot", 4110)]
+        assert chat.arrived(CHAT_MARK) == (connection.message,)
+        assert connection.arrivals == [("@lane-bot", CHAT_MARK)]
 
     def test_replying_carries_the_anchor_to_the_client(self) -> None:
         connection = _Connection()
-        journey.Chat(peer="@lane-bot", connection=connection).reply("4110", "write it")
-        assert connection.replies == [("@lane-bot", 4110, "write it")]
+        journey.Chat(peer="@lane-bot", connection=connection).reply(CHAT_MARK + 1, "write it")
+        assert connection.replies == [("@lane-bot", CHAT_MARK + 1, "write it")]
 
 
 class TestTheCredentialScan:
@@ -393,17 +401,31 @@ class TestTheCredentialScan:
 # --- walking the four items --------------------------------------------------
 
 
-class _Connection:
-    """The user-account client, as the two operations `Chat` asks it for."""
+#: What the account's side of a lane's chat holds before a turn is typed. A
+#: **different** number from any id the product issues, because a private chat
+#: gives each account its own sequence (#354).
+CHAT_MARK = 5938
 
-    def __init__(self, message: Any = None) -> None:
-        self.reads: list[tuple[Any, int]] = []
+
+class _Connection:
+    """The user-account client, as the three operations `Chat` asks it for."""
+
+    def __init__(self, message: Any = None, *, arrived: tuple[Any, ...] | None = None) -> None:
+        self.marks: list[Any] = []
+        self.arrivals: list[tuple[Any, int]] = []
         self.replies: list[tuple[Any, int, str]] = []
         self.message = message
+        #: What the chat answers after the mark. Defaults to the one message a
+        #: one-id send expects, so a test says nothing when that is what it wants.
+        self.arrived_with = arrived if arrived is not None else ((message,) if message else ())
 
-    def read(self, peer: Any, message_id: int) -> Any:
-        self.reads.append((peer, message_id))
-        return self.message
+    def mark(self, peer: Any) -> int:
+        self.marks.append(peer)
+        return CHAT_MARK
+
+    def arrived(self, peer: Any, since: int) -> tuple[Any, ...]:
+        self.arrivals.append((peer, since))
+        return self.arrived_with
 
     def reply(self, peer: Any, reply_to_message_id: int, text: str) -> Any:
         self.replies.append((peer, reply_to_message_id, text))
@@ -411,14 +433,25 @@ class _Connection:
 
 
 class _Message:
-    """One message in the chat, as the client hands it over."""
+    """One message in the chat, as the client hands it over — with the account's id."""
 
-    def __init__(self, identifier: int = 4110, text: str = "Session stopped: 工位") -> None:
+    def __init__(
+        self,
+        identifier: int = CHAT_MARK + 1,
+        text: str = "Session stopped: 工位",
+        *,
+        outgoing: bool = False,
+    ) -> None:
         self.id = identifier
         self.text = text
+        self.outgoing = outgoing
 
     def as_journal_fields(self) -> dict[str, object]:
-        return {"message_id": self.id, "direction": "received", "text": self.text}
+        return {
+            "message_id": self.id,
+            "direction": "sent" if self.outgoing else "received",
+            "text": self.text,
+        }
 
 
 class _Clock:
@@ -502,7 +535,15 @@ DELIVERED_RECEIPT = receipt_line(
 RETAINED_RECEIPT = receipt_line(
     state=str(Lifecycle.RETAINED), grade=str(Delivery.HELD), reason="held_far_side"
 )
+#: One send, about this lane's own Session, under **one** id — so the chat read
+#: that grades it is graded against one message (§2 item 2 as amended, #354).
 SENT_LINE = (
+    f"sent Companion Channel message request=r-1 outcome=delivered "
+    f"target={OWN_ADDRESS} message_ids=4110"
+)
+#: The same send split in two, as a long Session Brief lands (#189): two ids, so
+#: two messages are what the chat has to hold.
+SPLIT_LINE = (
     f"sent Companion Channel message request=r-1 outcome=delivered "
     f"target={OWN_ADDRESS} message_ids=4110,4111"
 )
@@ -566,26 +607,40 @@ def _rows(walk: journey.Walk) -> dict[str, dict[str, Any]]:
 class TestWalkingTheFourItems:
     """§2 items 2–5, each on its own binary check."""
 
-    def test_the_chat_mark_is_taken_before_the_acknowledge_turn_is_typed(
+    def test_both_marks_are_taken_before_the_acknowledge_turn_is_typed(
         self, tmp_path: Path
     ) -> None:
-        """§3: the mark is `stop notice`'s own, and it precedes the turn — a notice
-        already in the log belongs to something else."""
-        engine = _Engine(["sent Companion Channel message request=r-0 message_ids=4000"])
+        """§3: both marks are `stop notice`'s own and both precede the turn — an
+        engine-log line or a chat message already there belongs to something else."""
+        engine = _Engine(
+            [f"sent Companion Channel message request=r-0 target={OWN_ADDRESS} message_ids=4000"]
+        )
+        connection = _Connection(_Message())
         walk = _walk(
             tmp_path,
             engine=engine,
             session=_Session(engine, sends=SENT_LINE),
+            chat=journey.Chat(peer="@lane-bot", connection=connection),
             selection=items.select(["stop notice"]),
         )
         walk.walk()
         row = _rows(walk)[str(items.Item.STOP_NOTICE)]
         assert row["verdict"] == "PASS"
-        assert support.resolve(tmp_path, row["evidence"])["message_id"] == "4110"
+        # The chat mark was taken before the turn typed its send line, and the
+        # read started from it.
+        assert connection.arrivals == [("@lane-bot", CHAT_MARK)]
+        evidence = support.resolve(tmp_path, row["evidence"])
+        # The ids the engine issued are carried as evidence; what was read is the
+        # account's own sequence (#354).
+        assert evidence["message_ids"] == ["4110"]
+        assert evidence["chat_message_ids"] == [CHAT_MARK + 1]
+        assert evidence["target"] == OWN_ADDRESS
 
-    def test_the_stop_notice_is_re_read_once_by_the_id_the_product_issued(
+    def test_the_chat_is_read_once_after_the_mark_and_never_by_the_issued_id(
         self, tmp_path: Path
     ) -> None:
+        """#354: a private chat gives each account its own id sequence, so the read
+        asks for everything after the mark and never for id 4110."""
         engine = _Engine()
         connection = _Connection(_Message())
         walk = _walk(
@@ -596,8 +651,32 @@ class TestWalkingTheFourItems:
             selection=items.select(["stop notice"]),
         )
         walk.walk()
-        assert connection.reads == [("@lane-bot", 4110)]
+        assert connection.arrivals == [("@lane-bot", CHAT_MARK)]
+        assert not hasattr(connection, "reads")
         assert _rows(walk)[str(items.Item.STOP_NOTICE)]["verdict"] == "PASS"
+
+    def test_a_split_send_expects_as_many_messages_as_it_issued_ids_for(
+        self, tmp_path: Path
+    ) -> None:
+        """#189: a long Session Brief lands as two messages, and two is then what
+        the chat has to hold."""
+        engine = _Engine()
+        connection = _Connection(
+            _Message(), arrived=(_Message(CHAT_MARK + 1), _Message(CHAT_MARK + 2))
+        )
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=SPLIT_LINE),
+            chat=journey.Chat(peer="@lane-bot", connection=connection),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "PASS"
+        evidence = support.resolve(tmp_path, row["evidence"])
+        assert evidence["message_ids"] == ["4110", "4111"]
+        assert evidence["chat_message_ids"] == [CHAT_MARK + 1, CHAT_MARK + 2]
 
     def test_a_stop_notice_about_another_session_is_not_this_turns(self, tmp_path: Path) -> None:
         """#355: a send after the mark addressed to somebody else is not this turn's
@@ -617,7 +696,9 @@ class TestWalkingTheFourItems:
         assert ANOTHER_ADDRESS in line["what"]
         assert OWN_ADDRESS in line["what"]
 
-    def test_a_message_the_chat_does_not_hold_is_a_failure(self, tmp_path: Path) -> None:
+    def test_nothing_arriving_in_the_chat_is_a_failure_naming_both_sides(
+        self, tmp_path: Path
+    ) -> None:
         engine = _Engine()
         walk = _walk(
             tmp_path,
@@ -629,7 +710,64 @@ class TestWalkingTheFourItems:
         walk.walk()
         row = _rows(walk)[str(items.Item.STOP_NOTICE)]
         assert row["verdict"] == "FAIL"
-        assert "4110" in support.resolve(tmp_path, row["evidence"])["why"]
+        why = support.resolve(tmp_path, row["evidence"])["why"]
+        assert "0 message(s)" in why and "4110" in why
+
+    def test_more_messages_than_ids_is_a_failure_naming_every_arrival(self, tmp_path: Path) -> None:
+        """One id and two messages: something other than this Stop reached the chat
+        after the mark, and a row that passed on it would be grading a stranger."""
+        engine = _Engine()
+        connection = _Connection(
+            _Message(), arrived=(_Message(CHAT_MARK + 1), _Message(CHAT_MARK + 2, "something else"))
+        )
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=SENT_LINE),
+            chat=journey.Chat(peer="@lane-bot", connection=connection),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "FAIL"
+        why = support.resolve(tmp_path, row["evidence"])["why"]
+        assert str(CHAT_MARK + 1) in why and str(CHAT_MARK + 2) in why
+
+    def test_a_send_that_reached_nobody_is_a_failure_that_says_so(self, tmp_path: Path) -> None:
+        """The engine's own record of a Stop that landed nowhere: taken rather than
+        skipped, so the row reads as a failure with a reason and not as a silence."""
+        engine = _Engine()
+        landed_nowhere = (
+            f"sent Companion Channel message request=r-1 outcome=failed "
+            f"target={OWN_ADDRESS} message_ids="
+        )
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=landed_nowhere),
+            chat=journey.Chat(peer="@lane-bot", connection=_Connection(None)),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "FAIL"
+        assert "no id at all" in support.resolve(tmp_path, row["evidence"])["why"]
+
+    def test_the_accounts_own_message_among_the_arrivals_is_a_failure(self, tmp_path: Path) -> None:
+        """The harness reading its own words back is not the bot reaching the chat."""
+        engine = _Engine()
+        mine = _Message(CHAT_MARK + 1, "write /tmp/x containing CHARLIE", outgoing=True)
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=SENT_LINE),
+            chat=journey.Chat(peer="@lane-bot", connection=_Connection(mine, arrived=(mine,))),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "FAIL"
+        assert "own message" in support.resolve(tmp_path, row["evidence"])["why"]
 
     def test_a_session_that_says_nothing_about_what_it_stopped_on_is_a_failure(
         self, tmp_path: Path
@@ -712,7 +850,12 @@ class TestWalkingTheFourItems:
         assert row["verdict"] == "FAIL"
         assert support.resolve(tmp_path, row["evidence"])["event"] == "deadline.expired"
 
-    def test_the_inbound_turn_is_a_reply_anchored_to_the_stop_notice(self, tmp_path: Path) -> None:
+    def test_the_inbound_turn_is_a_reply_anchored_to_the_account_side_id(
+        self, tmp_path: Path
+    ) -> None:
+        """#354: Telethon's `reply_to` wants the id in *this account's* dialog, so the
+        anchor is the first message `stop notice` read and never the id the product
+        issued — which in a private chat belongs to the bot's own sequence."""
         engine = _Engine()
         connection = _Connection(_Message())
         workspace = tmp_path / f"workspace-{CODEX_LANE}"
@@ -728,7 +871,8 @@ class TestWalkingTheFourItems:
         (workspace / journey.INBOUND_FILE).write_text(f"{journey.INBOUND_WORD}\n")
         walk.walk()
         (peer, anchor, words) = connection.replies[0]
-        assert anchor == 4110
+        assert anchor == CHAT_MARK + 1
+        assert anchor != 4110  # the id the engine issued, which this chat cannot address
         assert journey.INBOUND_WORD in words
         assert _rows(walk)[str(items.Item.COMPANION_INBOUND)]["verdict"] == "PASS"
 

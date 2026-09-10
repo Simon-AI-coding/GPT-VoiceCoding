@@ -61,10 +61,12 @@ BOOT_WORDS = "reply with the single word READY, and use no tools"
 
 #: The engine's line for a Companion Channel message it sent: who it was about,
 #: and the ids it landed under (`core/bridge.py`). Every chat read in this
-#: harness starts from one of those ids — the chat is never searched and a
-#: message is never matched by the Session's name (§9, #109) — and two things
+#: harness is **bounded** by one of these lines — the chat is never searched and
+#: a message is never matched by the Session's name (§9, #109) — and two things
 #: decide which line is this turn's: a **mark**, a position in the lane's engine
 #: log taken before the turn, and the **address** on the line itself (#355).
+#: Nothing is read *by* the ids: a private chat has two id spaces and this
+#: harness reads the account's, so what the ids give is a count (#354).
 #: The words the line opens with, spelled **once** for the two fields read off
 #: it below: a send line matched by one spelling and parsed by another is two
 #: readings of one contract, and only one of them gets fixed.
@@ -189,26 +191,46 @@ def sent_for(lines: Sequence[str], address: str) -> list[str]:
     return [line for line in lines if send_target(line) == address]
 
 
-def stop_notice_id(lines: Sequence[str], address: str) -> str | None:
-    """The id this item reads the chat by today, and §2 item 5's reply anchor.
+def not_the_stop_notice(
+    issued: Sequence[str], arrived: Sequence[Any], *, sent: Sequence[str]
+) -> str | None:
+    """Why what reached the chat is not this turn's Stop Notice, or `None` when it is.
 
-    **Both of those readings are #354's to replace, not this function's.** §2
-    item 2 as amended says the chat is read after a *mark* and never by the
-    product-issued id — a private chat has two id spaces — and item 5 anchors on
-    the account-side id. The product-issued ids stay as evidence. What this
-    function settles is the question #355 asks, which is independent of that and
-    holds either way: **which send line is this lane's own**.
+    §2 item 2's binary check as amended (#354), in one place so every way of
+    failing it reads the same: the engine said it sent messages under some ids,
+    and **exactly that many** arrived in the chat after the mark, none of them
+    this account's own.
 
-    **The first id of the first send after the mark that is addressed to this
-    Session.** A Stop Notice can span several messages (#189), and the product
-    registers the Anchor against every id of the receipt (`core/bridge.py`'s
-    `anchors.register`), so a reply to the first resolves exactly as a reply to
-    any other would — and one id is one read.
+    * no ids at all — the engine's own record of a send that reached nobody;
+    * a different number — nothing arrived, or something else did too; a split
+      send (#189) expects as many messages as it has ids;
+    * an `outgoing` message among them — the account's own words, which is the
+      harness reading itself rather than the bot.
+
+    Counted rather than keyed, because the ids cannot be read back: a private
+    chat gives each account its own sequence, so the Bot API's ids are the bot's
+    and this account cannot address them. The failure names **both sides**, since
+    a human reading a red row needs the lines the engine wrote and the messages
+    the chat actually holds.
     """
-    for line in sent_for(lines, address):
-        found = message_ids(line)
-        if found:
-            return found[0]
+    chat = [(message.id, message.text) for message in arrived]
+    if not issued:
+        return (
+            f"the engine recorded sending a Companion Channel message under no id at all, so "
+            f"nothing reached the chat for this turn's Stop: {list(sent)!r}"
+        )
+    if len(arrived) != len(issued):
+        return (
+            f"the engine issued {len(issued)} id(s) for this turn's Stop ({list(issued)!r}) and "
+            f"{len(arrived)} message(s) arrived in the chat after the mark: {chat!r}. The "
+            f"engine's own send lines were {list(sent)!r}"
+        )
+    own = [(message.id, message.text) for message in arrived if message.outgoing]
+    if own:
+        return (
+            f"what arrived after the mark includes this account's own message(s) {own!r} rather "
+            f"than the bot's alone: {chat!r}"
+        )
     return None
 
 
@@ -315,13 +337,16 @@ def wrote(path: Path, word: str) -> bool:
 
 @dataclass(frozen=True)
 class Chat:
-    """One lane's private chat with its bot — and the only two things done to it.
+    """One lane's private chat with its bot — and the only three things done to it.
 
-    `read` and `reply`, and no third. There is **no send**: §2 item 5 uses the
-    product's primary inbound form (ADR 0021 §2–§3), a reply anchored to the
-    Stop Notice's own id, so an inbound with no anchor is impossible by
-    construction rather than by care. There is no search either: every id here
-    was issued by the product and read off the engine's own log (§9, #109).
+    `mark`, `arrived` and `reply`, and no fourth. There is **no send**: §2 item 5
+    uses the product's primary inbound form (ADR 0021 §2–§3), a reply anchored to
+    the Stop Notice's own id, so an inbound with no anchor is impossible by
+    construction rather than by care. There is **no read-by-id** either: a private
+    chat gives each account its own id sequence, so the ids the product issued are
+    the bot's and are not addressable from here (#354). And there is no search: a
+    mark taken before the turn is what separates this turn's messages from the
+    chat's history (§9, #109).
     """
 
     #: The entity the lane's bot username stands for, resolved once per lane.
@@ -331,9 +356,13 @@ class Chat:
     #: differ by peer rather than by account.
     connection: Any
 
-    def read(self, message_id: str | int) -> Any:
-        """One message, once, by the id the product issued."""
-        return self.connection.read(self.peer, int(message_id))
+    def mark(self) -> int:
+        """Where this chat has got to, as the account sees it. 0 for an empty chat."""
+        return self.connection.mark(self.peer)
+
+    def arrived(self, since: int) -> tuple[Any, ...]:
+        """Everything newer than a mark, oldest first, read once and never waited on."""
+        return tuple(self.connection.arrived(self.peer, int(since)))
 
     def reply(self, anchor: str | int, words: str) -> Any:
         """Plain words, into the chat, anchored to a message the Session's own."""
@@ -651,9 +680,12 @@ class Walk:
     membership: Callable[[], support.DaemonMembership | None] = lambda: None
     #: Filled as the walk goes, so a failure message can say where it got to.
     boot_seconds: float | None = None
-    #: The id of the Stop Notice `stop notice` read, kept because `companion
-    #: inbound` replies to it (§6: `stop notice` is that item's reply anchor).
-    notice_id: str | None = None
+    #: The **account-side** id of the first message `stop notice` read, kept
+    #: because `companion inbound` replies to it (§6: `stop notice` is that
+    #: item's reply anchor). Never a product-issued id: Telethon's `reply_to`
+    #: wants the id in *this account's* dialog, and a private chat's two id
+    #: spaces are why the product's own is unusable here (#354).
+    notice_anchor: int | None = None
     #: Every permission this walk has already answered as **arrangement**, so a
     #: dialog that lingers for a poll or two is answered once rather than once
     #: per reading.
@@ -914,11 +946,11 @@ class Walk:
     def mark(self) -> int:
         """Where this lane's engine log has got to (§2, §9).
 
-        A mark is a position in the engine's own log, never a clock and never a
-        message id read off the chat: every chat read in this harness starts
-        from the id the product issued in the line it wrote when it sent the
-        message, so what a mark has to say is "everything after here belongs to
-        the turn I am about to drive".
+        A mark is a position in the engine's own log, never a clock: what it has
+        to say is "everything after here belongs to the turn I am about to
+        drive". The chat has a mark of its own — `Chat.mark`, the newest message
+        id as the user account sees it — and the two are taken together, before
+        the turn is typed (§2 item 2 as amended, #354).
         """
         return len(self.engine.log_lines())
 
@@ -1047,19 +1079,26 @@ class Walk:
         1. the engine **says** it sent a Companion Channel message for the Stop
            the turn ended with — addressed to *this* Session — and says under
            which ids;
-        2. that message is **there**, read once through the user account — never
-           searched for, never matched by name (§9, #109). By the first of those
-           ids today, which #354 replaces with a read after a chat mark: a
+        2. **as many messages as it issued ids for** arrived in the chat after a
+           mark taken before the turn, and none of them is this account's own:
+           read once through the user account, never searched for, never matched
+           by name and never waited on (§9, #109). Not read *by* those ids — a
            private chat has two id spaces and the account cannot address the
-           bot's (§2 item 2 as amended);
+           bot's (§2 item 2 as amended, #354);
         3. `status` says what the Session stopped on.
 
-        **Two things bound claim 1, and neither is recency.** The chat mark is
-        taken before the turn is typed (§3), so nothing older than the turn can
-        answer for it; the address keeps out what is newer but somebody else's.
-        One engine bridges every Session on the machine, and the newest send
-        line was another lane's boot-turn Stop — written 0.16 s before this
-        lane's own turn was typed (#355, run `20260910T191643Z`).
+        **Two marks, both taken before the turn is typed** (§3): a position in
+        this lane's engine log, and the chat's newest message id as the account
+        sees it. Everything after either belongs to this turn, which is what
+        makes this a deadline on the notice landing rather than a window a
+        message is watched in.
+
+        **Two things bound claim 1, and neither is recency.** The engine-log mark
+        keeps out what is older than the turn; the address keeps out what is
+        newer but somebody else's. One engine bridges every Session on the
+        machine, and the newest send line was another lane's boot-turn Stop —
+        written 0.16 s before this lane's own turn was typed (#355, run
+        `20260910T191643Z`).
 
         The address is read **once**, before the turn, and it is the engine's own
         row that gives it — the same renderer the engine writes the send line
@@ -1083,10 +1122,11 @@ class Walk:
                 f"send line can be matched to it"
             )
         mark = self.mark()
+        chat_mark = chat.mark()
         with self.journal.turn(ACKNOWLEDGE_TURN, lane=self.lane.name):
             self.session.submit(ACKNOWLEDGE_WORDS)
             try:
-                sent = self.waiting(
+                own = self.waiting(
                     "TURN_SECONDS",
                     lambda: self.sent_since_for(mark, address),
                     what=(
@@ -1103,19 +1143,24 @@ class Walk:
                     deadline=unsent.deadline,
                     seconds=unsent.seconds,
                 ) from None
-        identifier = stop_notice_id(sent, address)
-        if identifier is None:
-            raise ItemFailed(
-                f"the engine recorded sending a Companion Channel message under no id at all, "
-                f"so there is nothing to re-read: {sent[-1]!r}"
-            )
-        self.notice_id = identifier
-        message = chat.read(identifier)
-        if message is None:
-            raise ItemFailed(
-                f"the chat does not hold message {identifier}, which the engine recorded having "
-                f"sent for this turn's Stop"
-            )
+        # The **first** own-addressed send after the mark, ids and all — taken
+        # even when it carries none, because a send that reached nobody is the
+        # engine's own record of a failure with a reason, where skipping it would
+        # spend the whole deadline and report a silence.
+        issued = message_ids(own[0])
+        # Read **once**, with no deadline of its own: the engine writes that line
+        # *after* the Bot API returned, so the message is already on the server
+        # and a window watched for it would be the waiting ADR 0021 §10 forbids.
+        arrived = chat.arrived(chat_mark)
+        unsound = not_the_stop_notice(issued, arrived, sent=self.sent_since(mark))
+        if unsound is not None:
+            raise ItemFailed(unsound)
+        # The **first** message, which is the oldest: the client hands the
+        # arrivals over in the order they were sent (`in_arrival_order`), and the
+        # product registers the Anchor against every id of a split send
+        # (`core/bridge.py`'s `anchors.register`), so the first resolves as any
+        # other would.
+        self.notice_anchor = arrived[0].id
         kind = self.waiting(
             "ROSTER_SECONDS",
             lambda: stopped_on(self.row()),
@@ -1128,9 +1173,12 @@ class Walk:
             # Stop at all (#355) — evidence, so a green row says whose notice it
             # read and not only which message.
             target=address,
-            message_id=identifier,
+            # The ids the engine issued, carried because they are what the chat
+            # read was bounded by — and never read back by (#354).
+            message_ids=list(issued),
+            chat_message_ids=[message.id for message in arrived],
             waiting_for=kind,
-            chat=message.as_journal_fields(),
+            chat=[message.as_journal_fields() for message in arrived],
         )
 
     def relay(self) -> str:
@@ -1255,7 +1303,11 @@ class Walk:
 
         Sent as a **reply** anchored to this Session's own Stop Notice (ADR 0021
         §2–§3), which is why `stop notice` is this item's ground: the anchor is
-        that item's reading. `@<name>:` addressing is retired (ADR 0024) and this
+        that item's reading — the **account-side** id of the first message it
+        read, because that is the id Telethon's `reply_to` takes (#354). The
+        product registers the Anchor against every id of a split send
+        (`core/bridge.py`'s `anchors.register`), so the first resolves exactly as
+        any other would. `@<name>:` addressing is retired (ADR 0024) and this
         harness has no way to send it — `Chat` has no `send`.
 
         Graded by the file alone. No engine-log line is read: the file is the one
@@ -1263,10 +1315,10 @@ class Walk:
         superfluous (#48).
         """
         chat = self.the_chat()
-        if self.notice_id is None:
+        if self.notice_anchor is None:
             raise LaneBlocked(
-                "this lane has no Stop Notice id to anchor an inbound reply to, and the reply "
-                "anchor is what `stop notice` arranges for this item (§6)"
+                "this lane has no Stop Notice message to anchor an inbound reply to, and the "
+                "reply anchor is what `stop notice` arranges for this item (§6)"
             )
         written = inbound_target_file(self.workspace)
 
@@ -1278,7 +1330,7 @@ class Walk:
             return wrote(written, INBOUND_WORD)
 
         with self.journal.turn(INBOUND_TURN, lane=self.lane.name, path=str(written)):
-            sent = chat.reply(self.notice_id, write_words(written, INBOUND_WORD))
+            sent = chat.reply(self.notice_anchor, write_words(written, INBOUND_WORD))
             self.waiting(
                 "REPLY_SECONDS",
                 settled,
@@ -1287,7 +1339,7 @@ class Walk:
         return self.journal(
             "companion.inbound",
             lane=self.lane.name,
-            anchor=self.notice_id,
+            anchor=self.notice_anchor,
             path=str(written),
             chat=sent.as_journal_fields(),
         )

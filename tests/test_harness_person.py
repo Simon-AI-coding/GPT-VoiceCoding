@@ -1,6 +1,6 @@
 """The user-account client's lock and its credentials, at CI speed (#351).
 
-Two rules of `tests/acceptance/telegram_person.py` are ordinary code and are
+Three rules of `tests/acceptance/telegram_person.py` are ordinary code and are
 pinned here; the client itself is not, because it needs a real Telegram account.
 
 * **The session lock** (`docs/acceptance-design.md` §5). Two acceptance runs
@@ -11,6 +11,9 @@ pinned here; the client itself is not, because it needs a real Telegram account.
   certainly reclaimed.
 * **The credential precedence** (§8): the environment wins, the 0600 file is the
   fallback, and neither is ever hard-coded.
+* **The chat mark and the order the arrivals come back in** (§2 item 2, #354):
+  an empty chat's mark is 0, and what arrived is oldest-first, because the first
+  message is the id item 5 anchors its reply to.
 
 Nothing here imports `telethon`: it is imported inside the functions that need
 it, which is what lets this module load — and this suite collect — on a machine
@@ -128,6 +131,46 @@ class TestTheSessionLock:
             telegram_person.session_lock_path(telegram_person.person_directory(moved))
             == tmp_path / "elsewhere" / telegram_person.LOCK_FILE
         )
+
+
+class TestTheMarkAndWhatArrivedAfterIt:
+    """§2 item 2 and §9 — the two halves of the chat read that are ordinary code.
+
+    The read itself needs an account; how a mark is computed and what order the
+    arrivals come back in do not, and both decide whether a row is green.
+    """
+
+    def test_an_empty_chat_gives_a_mark_of_zero(self) -> None:
+        """0 is an answer, not a missing one: everything in an empty chat arrived
+        after the mark, and a run's first turn against a fresh bot is exactly that."""
+        assert telegram_person.newest_id([]) == 0
+
+    def test_the_mark_is_the_newest_id_the_chat_holds(self) -> None:
+        assert telegram_person.newest_id([_Raw(5939), _Raw(5938)]) == 5939
+
+    def test_what_arrived_comes_back_oldest_first(self) -> None:
+        """Telethon answers newest-first; the order matters because the **first**
+        message is the id item 5 anchors its reply to (§2 item 5, #189)."""
+        arrived = telegram_person.in_arrival_order([_Raw(5940), _Raw(5939)])
+        assert [message.id for message in arrived] == [5939, 5940]
+
+    def test_each_arrival_says_whether_it_is_the_accounts_own(self) -> None:
+        """The binary check refuses the account's own words among the arrivals, so
+        the direction has to survive the read (§2 item 2)."""
+        mine, theirs = telegram_person.in_arrival_order([_Raw(5939, out=True), _Raw(5940)])
+        assert mine.outgoing is True
+        assert theirs.outgoing is False
+        assert mine.as_journal_fields()["direction"] == "sent"
+        assert theirs.as_journal_fields()["direction"] == "received"
+
+
+class _Raw:
+    """One message as Telethon hands it over — `message`, `id`, `out`."""
+
+    def __init__(self, identifier: int, text: str = "Session stopped: 工位", *, out: bool = False):
+        self.id = identifier
+        self.message = text
+        self.out = out
 
 
 class TestTheCredentials:

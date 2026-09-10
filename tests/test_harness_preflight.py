@@ -734,20 +734,27 @@ class TestTheRealReadings:
         assert machine.token_variable(items.LANES[1]) == f"{TOKEN_VARIABLE}_2"
 
 
-def test_the_two_chat_operations_and_no_more() -> None:
-    """The interface ticket 4 couples to: `read` by id and `reply` to an id (§2, §9).
+def test_the_three_chat_operations_and_no_more() -> None:
+    """The interface ticket 4 couples to: `mark`, `arrived` since one, `reply` (§2, §9).
 
     Counted off the class rather than asserted about in prose: a `search`, a
     `latest` or a `messages_after` growing back here is the thing this rule
     exists to prevent, and the old harness had all three.
+
+    **`read` is gone and must not come back** (#354): it read by the id the
+    product issued, and in a Telegram private chat that id is the one in the
+    *bot's* dialog — not addressable from this account. So is `await_message`,
+    whose polling and wording match ADR 0021 §10 forbids.
     """
     # Every public name, not only the functions: a `client` property handing out
     # the raw Telethon client is a search, a "latest" and everything else this
     # rule forbids, and `inspect.isfunction` cannot see one.
     public = {name for name in vars(telegram_person.PersonConnection) if not name.startswith("_")}
-    assert {"read", "reply"} <= public
-    assert public - {"read", "reply", "peer", "open", "close", "run"} == set()
-    read = inspect.signature(telegram_person.PersonConnection.read)
-    assert list(read.parameters) == ["self", "peer", "message_id"]
+    assert {"mark", "arrived", "reply"} <= public
+    assert public - {"mark", "arrived", "reply", "peer", "open", "close", "run"} == set()
+    mark = inspect.signature(telegram_person.PersonConnection.mark)
+    assert list(mark.parameters) == ["self", "peer"]
+    arrived = inspect.signature(telegram_person.PersonConnection.arrived)
+    assert list(arrived.parameters) == ["self", "peer", "since"]
     reply = inspect.signature(telegram_person.PersonConnection.reply)
     assert list(reply.parameters) == ["self", "peer", "reply_to_message_id", "text"]

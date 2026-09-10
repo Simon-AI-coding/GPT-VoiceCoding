@@ -14,6 +14,10 @@ _Avoid_: Live thread, voice chat, call (unqualified)
 The single action that starts a Live Call when none is up, or ends the current one.
 _Avoid_: toggle phrase
 
+**Call Phase**:
+Where the Live Call is, in the five words a surface shows the user: **Ready** (no call), **Calling…** (dialled, not yet up), **On a call**, **Ending…** (hung up, not yet down), **Couldn't connect** (a dial that did not come up). One set of words on every surface; no phase for the Voice speaking, and no word for why a call ended (#342).
+_Avoid_: call state (the wire's word), connecting, dialling, up/down, failed
+
 **Call Keeper**:
 The part of Bridge Core that keeps the Live Call's time: when a call is dialled, when it ends, and when the system may ring or speak into it. It knows nothing of what is said — it asks for a fresh reading at the moment it decides to sound.
 _Avoid_: interlock (the mechanism it grew from), call manager, scheduler
@@ -85,7 +89,7 @@ The one decision-maker: it owns every policy and holds the system's single sourc
 _Avoid_: Bridge Control Center, supervisor, orchestrator, engine (the process, not the role)
 
 **Duty Switch**:
-The master on/off switch: off means the system does not speak, does not ring, does not push, and does not touch the Live Call; events are still recorded. The Silence Ceiling still applies — it is the call's own limit, not an act toward the user. The Voice and Message Switches and every Feature Switch are effective only while it is on; the Auto Hang-up Switch stands beside it, not under it.
+The master on/off switch: off means the system does not speak, does not ring, does not push, and does not touch the Live Call; events are still recorded. The Silence Ceiling still applies — it is the call's own limit, not an act toward the user. The Voice and Message Switches and every Feature Switch are effective only while it is on; the Auto Hang-up Switch stands beside it, not under it. On the desktop it is also what shows and withdraws the Duty Card (ADR 0028).
 _Avoid_: duty mode, pause mode, do-not-disturb
 
 **Voice Switch**:
@@ -109,8 +113,12 @@ Status queries and switch flips, accepted from every surface and never gated by 
 _Avoid_: admin commands, management interface
 
 **Control Panel**:
-The at-computer surface for seeing the system's current state — the Session roster included — and flipping switches, plus the shell-owned Companion Channel credential. Runtime state and that one write-only credential, not installation settings.
-_Avoid_: settings app, preferences window, config tool
+The at-computer window for seeing the system's current state — the Session roster included — and flipping switches, plus the shell-owned Companion Channel credential. Runtime state and that one write-only credential, not installation settings. One window with a home and a settings section; what is technical lives under settings, never on the home (ADR 0028). Opened from the Duty Card or the menu bar; the app shows in the Dock only while it is open.
+_Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, retired)
+
+**Duty Card**:
+The small always-on-top card that sits on the desktop while the Duty Switch is on and is gone while it is off — the one surface the user sees without clicking. It carries the Live Call's state, how many main Sessions wait on the user and how many have finished, and the newest such Session's one-line brief; a click on it offers the Live Toggle and the doors into the Control Panel. It shows and does not reply (ADR 0028).
+_Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Installation**:
 Everything the system places in files the **user** owns so the coding agents can reach it, and takes back byte for byte when asked. Done at first launch and reconciled at every launch after (ADR 0012), never by hand and never by the Control Panel.

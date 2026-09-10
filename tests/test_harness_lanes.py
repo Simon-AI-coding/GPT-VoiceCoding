@@ -1099,6 +1099,22 @@ class _Surface:
         return self.payload
 
 
+class _UnreadableSurface(_Surface):
+    """A `bridgectl` nobody is behind yet: `status` raises rather than answers.
+
+    The state the boot drain can genuinely meet — it reads the roster before
+    `roster` has waited for anything (#356).
+    """
+
+    def status_payload(self, *, why: str) -> dict[str, Any]:
+        raise OSError("the engine's control socket is not there yet")
+
+
+def _unreadable_truth() -> Any:
+    """An agent record that could not be read — the other way to have no row yet."""
+    raise OSError("the agent's own record could not be read")
+
+
 class _Engine:
     def __init__(self, lines: list[str] | None = None) -> None:
         self.lines = lines or []
@@ -1287,6 +1303,40 @@ class TestTheMarkEveryChatReadStartsFrom:
         "message_ids=41"
     )
 
+    #: The address of the Session `_truth` and `_held` below agree on, spelled
+    #: from the roster row's three fields — the join the harness makes.
+    OWN_ADDRESS = f"{CODEX_LANE}:thread-1:7"
+
+    #: The same send line about this lane's own Session and about one that is not
+    #: — the pair the boot drain has to tell apart (#356). One engine bridges
+    #: every Session on the machine, so both are ordinary in that window.
+    OWN = (
+        "2026-09-10 sent Companion Channel message request=own outcome=Delivery.DELIVERED "
+        f"target={OWN_ADDRESS} message_ids=42"
+    )
+    STRANGER = (
+        "2026-09-10 sent Companion Channel message request=other outcome=Delivery.DELIVERED "
+        f"target={CODEX_LANE}:01a08cc0-f956-7c63-ae40-95e80334cb9b:68569 message_ids=1806"
+    )
+
+    def _held(self, root: Path, **overrides: Any) -> journey.Walk:
+        """A walk whose engine already holds a row for the Session it started."""
+        workspace = root / f"workspace-{CODEX_LANE}"
+        payload = {
+            "sessions": [
+                {
+                    "target": {"agent": CODEX_LANE, "session_id": "thread-1", "pid": 7},
+                    "workspace": str(workspace),
+                    "state": "idle",
+                }
+            ]
+        }
+        return _walk(root, bridgectl=_Surface(payload), truth=_truth(workspace), **overrides)
+
+    def _boot_notice(self, walk: journey.Walk) -> dict[str, Any]:
+        (line,) = [one for one in walk.journal.read() if one["event"] == "boot.notice"]
+        return line
+
     def test_a_mark_is_where_the_engine_log_had_got_to(self, tmp_path: Path) -> None:
         engine = _Engine(["one", "two"])
         walk = _walk(tmp_path, engine=engine)
@@ -1296,22 +1346,94 @@ class TestTheMarkEveryChatReadStartsFrom:
         assert walk.sent_since(mark) == [self.SENT]
         assert walk.sent_since(mark + 1) == []
 
+    def test_a_bound_drain_reads_this_lanes_own_send_and_never_the_newest(
+        self, tmp_path: Path
+    ) -> None:
+        """#356: with a row to bind to, the drain selects as `stop notice` selects.
+
+        The stranger's line is the **newer** of the two on purpose: an unbound
+        drain answers with it, and that is the reading this issue replaced.
+        """
+        walk = self._held(tmp_path, engine=_Engine([self.OWN, self.STRANGER]))
+        walk.drain_boot_notice(0)
+        line = self._boot_notice(walk)
+        assert line["drained"] == self.OWN
+        assert line["bound"] is True
+        assert line["address"] == self.OWN_ADDRESS
+
+    def test_a_strangers_send_does_not_settle_a_bound_drain(self, tmp_path: Path) -> None:
+        """The hole #356 was filed for, from the other side.
+
+        A send about somebody else settled the drain early, `stop notice` took
+        its mark, and this lane's own boot notice landed *behind* it — where the
+        address filter (#355) admits it and the count binding (#354) matches. A
+        bound drain waits it out instead, and the wait running out is still not a
+        failure: no notice at all remains a legitimate answer.
+        """
+        walk = self._held(tmp_path, engine=_Engine([self.STRANGER]))
+        walk.drain_boot_notice(0)
+        line = self._boot_notice(walk)
+        assert line["drained"] is None
+        assert line["bound"] is True
+        assert line["address"] == self.OWN_ADDRESS
+
     def test_the_boot_notice_is_drained_on_a_mark_taken_behind_the_boot_turn(
         self, tmp_path: Path
     ) -> None:
-        """§3: so it can never read as a later `stop notice` green (#109's shape)."""
+        """§3: so it can never read as a later `stop notice` green (#109's shape).
+
+        With no row there is no address to bind to and the first send after the
+        mark is the answer — which is also the only sound reading: an engine
+        holding no row by the time the boot turn is over never saw this Session
+        active and will raise no Stop for it (#356). The line it drains here
+        carries no `target=` field at all, which is what a caller with no address
+        has to be able to read.
+        """
         engine = _Engine(["Session stopped: 工位", self.SENT])
         walk = _walk(tmp_path, engine=engine)
         walk.drain_boot_notice(0)
-        (line,) = [one for one in walk.journal.read() if one["event"] == "boot.notice"]
+        line = self._boot_notice(walk)
         assert line["drained"] == self.SENT
+        assert line["bound"] is False
+        assert line["address"] is None
 
     def test_no_notice_at_all_is_a_legitimate_answer(self, tmp_path: Path) -> None:
         """A Stop is raised on a transition out of `active`; an already-idle thread raises none."""
         walk = _walk(tmp_path)
         walk.drain_boot_notice(0)
-        (line,) = [one for one in walk.journal.read() if one["event"] == "boot.notice"]
+        line = self._boot_notice(walk)
         assert line["drained"] is None
+        assert line["bound"] is False
+
+    def test_the_address_the_drain_reads_is_never_a_raise(self, tmp_path: Path) -> None:
+        """It reads the roster before `roster` does, where every absence is an answer.
+
+        `row()` is the raising read and is the wrong one here: no agent record
+        yet, no row yet, a `status` payload of a shape nobody can read, an engine
+        whose socket cannot be dialled at all, and a row that matches but carries
+        too little to render an address from are all "no address to bind to". A
+        drain that raised would fail a lane on ground `roster` has not graded yet
+        (#356).
+        """
+        matched_but_unrenderable = {"sessions": [{"target": {"session_id": "thread-1"}}]}
+        unreadable: list[tuple[Any, Any]] = [
+            (_Surface({}), _truth(tmp_path)),
+            (_Surface({"sessions": 7}), _truth(tmp_path)),
+            (_Surface({"sessions": [{"target": None}]}), _truth(tmp_path)),
+            (_Surface(matched_but_unrenderable), _truth(tmp_path)),
+            (_Surface(), lambda: None),
+            (_UnreadableSurface(), _truth(tmp_path)),
+            (_Surface(), _unreadable_truth),
+        ]
+        for case_index, (surface, truth) in enumerate(unreadable):
+            root = tmp_path / f"read-{case_index}"
+            root.mkdir()
+            walk = _walk(root, bridgectl=surface, truth=truth, engine=_Engine([self.SENT]))
+            assert walk.address_if_held() == ""
+            walk.drain_boot_notice(0)
+            line = self._boot_notice(walk)
+            assert line["bound"] is False
+            assert line["drained"] == self.SENT
 
     def test_a_lane_with_no_boot_prompt_takes_no_boot_mark(self, tmp_path: Path) -> None:
         assert _walk(tmp_path, lane=CLAUDE_LANE).settle_boot_turn() is None

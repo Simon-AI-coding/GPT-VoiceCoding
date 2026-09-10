@@ -928,22 +928,55 @@ class Walk:
         state, so the notice can arrive either side of `arm_switches`; the mark
         is taken **before** that, which is what makes this a deadline on the
         notice landing rather than a window it is watched in.
+
+        **Bound to this lane's own address wherever there is one to bind to**
+        (#356). One engine bridges every Session on the machine, so a send about
+        somebody else's landing in this window settled the unfiltered wait early
+        — and then this lane's own boot notice landed *behind* the acknowledge
+        mark, where #355's address filter admits it and #354's count binding
+        matches: `stop notice` green on a turn nobody drove, which is the very
+        false green this drain exists to prevent. The selection is `sent_for`,
+        the one `stop notice` reads its own Stop with, rather than a second way
+        of asking the same question.
+
+        The fallback is not a weaker reading of the same case but a different
+        case: an engine holding **no row** by the time the boot turn is over
+        never saw this Session active and will raise no Stop for the boot turn,
+        so there is nothing for a later mark to admit. The row is read without
+        raising for the same reason the drain does not assert — `roster` has not
+        run yet, and an absence here is an answer.
         """
         if mark is None:
             return
+        address = self.address_if_held()
+        what = "the boot turn's Stop Notice reaching the chat"
+
+        def notice() -> list[str]:
+            return self.sent_since_for(mark, address) if address else self.sent_since(mark)
+
         try:
             sent = self.waiting(
                 "TELEGRAM_ROUND_TRIP_SECONDS",
-                lambda: self.sent_since(mark),
-                what="the boot turn's Stop Notice reaching the chat",
+                notice,
+                what=f"{what}, about {address}" if address else what,
             )
         except deadlines.DeadlineExpired:
             # Not a failure: an engine that first saw this thread already idle
             # raised nothing to drain, and there is no way to tell that apart
             # from a notice that never came — nor any need to.
-            self.journal("boot.notice", lane=self.lane.name, drained=None, mark=mark)
-            return
-        self.journal("boot.notice", lane=self.lane.name, drained=sent[-1], mark=mark)
+            drained = None
+        else:
+            drained = sent[-1]
+        self.journal(
+            "boot.notice",
+            lane=self.lane.name,
+            drained=drained,
+            mark=mark,
+            # Which of the two readings above this run got, so a journal says
+            # whether its drain could exclude a stranger's send or not.
+            bound=bool(address),
+            address=address or None,
+        )
 
     # -- the engine log, and the marks every chat read starts from -----------
 
@@ -1042,6 +1075,25 @@ class Walk:
                 f"{self.lane.name} engine's roster"
             )
         return row
+
+    def address_if_held(self) -> str:
+        """This lane's own address where the engine already holds a row, and **never a raise**.
+
+        `row()`'s question and `row()`'s own matching, asked where an absence is
+        an answer rather than a failure: before `roster` there may be no agent
+        record yet, no row yet, no engine answering `status` at all, or a row too
+        malformed to render an address from — and none of those is a claim about
+        the product. Every one of them answers the empty string, which is the
+        answer `sent_for` already gives a caller with no address: nothing matches
+        it (#356).
+
+        **The address rather than the row**, so the one thing that can raise
+        between a row and an address is inside the guard rather than after it.
+        """
+        try:
+            return address_of(self.row())
+        except Exception:  # noqa: BLE001 - every way of having no address yet is one answer
+            return ""
 
     def the_chat(self) -> Chat:
         """This lane's chat, or a lane blocked for want of one."""

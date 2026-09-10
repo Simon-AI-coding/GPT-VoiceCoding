@@ -1,10 +1,13 @@
 """The run directory, the journal and the verdict (#350).
 
 **Responsibilities held here** (§9's `support.py`): the run directory of §7, the
-journal every row rests on, the `bridgectl` runner, the derived config, the trust
-grant, and `verdict.json`. The first, the second and the last are built here; the
-middle three are the seams #351 and #352 fill, and are named below so those
-tickets have somewhere to land rather than a shape to invent.
+places a run reads from — the bundle, its interpreter, the operator's real
+config — the provenance of §5, the credential scan of §8, the journal every row rests on,
+the `bridgectl` runner, the derived config, the trust grant, and `verdict.json`.
+The locations, the provenance, the journal, the run directory and the verdict are
+built here; the `bridgectl` runner, `derive_config` and `TrustGate` are the seams
+#352 and #353 fill, and are named below so those tickets have somewhere to land
+rather than a shape to invent.
 
 Two rules hold this module together:
 
@@ -22,9 +25,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,10 +58,21 @@ VERDICT_NAME = "verdict.json"
 RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
-def acceptance_root(environ: dict[str, str] | None = None) -> Path:
+def located(variable: str, default: Path, environ: Mapping[str, str] | None = None) -> Path:
+    """One place a location is resolved: the variable if it is set, else the default.
+
+    Every location in this harness has the same shape — a default, an override,
+    and no call site deciding where anything lives — and it was written out five
+    times before this existed. Written once so a location that forgot to
+    `expanduser` cannot be one of them.
+    """
     values = os.environ if environ is None else environ
-    override = values.get(ACCEPTANCE_ROOT_VARIABLE)
-    return Path(override).expanduser() if override else DEFAULT_ACCEPTANCE_ROOT
+    override = values.get(variable)
+    return Path(override).expanduser() if override else default
+
+
+def acceptance_root(environ: Mapping[str, str] | None = None) -> Path:
+    return located(ACCEPTANCE_ROOT_VARIABLE, DEFAULT_ACCEPTANCE_ROOT, environ)
 
 
 def run_id(now: datetime | None = None) -> str:
@@ -76,6 +91,144 @@ def new_run_directory(identifier: str | None = None) -> Path:
         (directory / f"engine-{lane}").mkdir(parents=True, exist_ok=True)
         (directory / f"workspace-{lane}").mkdir(parents=True, exist_ok=True)
     return directory
+
+
+# --- where a run reads from -------------------------------------------------
+
+#: The bundle under test. A location, overridable, because a run against a
+#: side-by-side install is a legitimate thing to want and hard-coding
+#: `/Applications` would make it impossible.
+BUNDLE_VARIABLE = "GPTVOICECODING_ACCEPTANCE_BUNDLE"
+DEFAULT_BUNDLE = Path("/Applications/GPT-VoiceCoding.app")
+
+#: The engine's real configuration, the one a lane derives its own from (§4.2).
+SOURCE_CONFIG_VARIABLE = "GPTVOICECODING_ACCEPTANCE_SOURCE_CONFIG"
+
+#: Where inside the bundle the engine's own interpreter and CLI sit.
+ENGINE_PARTS = ("Contents", "Resources", "engine")
+
+
+def bundle_path(environ: Mapping[str, str] | None = None) -> Path:
+    return located(BUNDLE_VARIABLE, DEFAULT_BUNDLE, environ)
+
+
+def bundled_python(bundle: Path | None = None) -> Path:
+    """The interpreter §2 item 0b runs the probe on — `aiortc` and `av` are here."""
+    return (bundle or bundle_path()).joinpath(*ENGINE_PARTS, "bin", "python3")
+
+
+def bundled_package(bundle: Path | None = None) -> Path | None:
+    """The `gpt_voicecoding` the bundle actually installed, or nothing at all."""
+    library = (bundle or bundle_path()).joinpath(*ENGINE_PARTS, "lib")
+    return next(library.glob("python*/site-packages/gpt_voicecoding"), None)
+
+
+def source_config_path(environ: Mapping[str, str] | None = None, home: Path | None = None) -> Path:
+    engine = (
+        (home or Path.home()) / "Library" / "Application Support" / "GPT-VoiceCoding" / "engine"
+    )
+    return located(SOURCE_CONFIG_VARIABLE, engine / "config.toml", environ)
+
+
+# --- provenance --------------------------------------------------------------
+
+
+#: How many differences a refusal quotes before it stops listing them. Enough to
+#: recognise what moved, short enough that a bundle built from another branch
+#: does not put a thousand file names on the terminal.
+QUOTED_DIFFERENCES = 5
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """Whether the installed bundle is the tree this run is being asked to accept.
+
+    §5 refuses on this, and the reason is that nothing else in a run says which
+    build it graded: a verdict names a commit, and a bundle that is not that
+    commit makes the naming a lie rather than a mistake.
+    """
+
+    bundle: Path
+    commit: str
+    matches: bool
+    differences: tuple[str, ...]
+
+    @property
+    def reason(self) -> str:
+        """What this bundle is, said either way — the green branch is journalled.
+
+        A run's `preflight.passed` line carries it, so `verdict.json`'s commit is
+        readable beside the sentence that checked it rather than beside nothing.
+        """
+        if self.matches:
+            return f"the bundle's engine is byte-identical to {self.commit}"
+        listed = ", ".join(self.differences[:QUOTED_DIFFERENCES])
+        return (
+            f"the bundle's engine differs from the working tree at {self.commit}: {listed}"
+            f"{' …' if len(self.differences) > QUOTED_DIFFERENCES else ''}"
+        )
+
+
+def compare_engine_to_tree(bundle: Path, repository: Path) -> Provenance:
+    """`diff -r` the bundle's installed package against `src/`, as `docs/app-bundle.md` does.
+
+    Only the project's own package is compared. The interpreter and the locked
+    wheels beneath it are what the signature and the lock cover; what a run has to
+    know is that the *product* inside the `.app` is the product in this checkout.
+    """
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    installed = bundled_package(bundle)
+    if installed is None:
+        return Provenance(bundle, commit, False, ("no gpt_voicecoding package inside the bundle",))
+    differences = tuple(_differing(repository / "src" / "gpt_voicecoding", installed))
+    return Provenance(bundle, commit, not differences, differences)
+
+
+def _differing(tree: Path, installed: Path) -> Iterator[str]:
+    """Every `.py` the two trees do not agree on, named relative to the package.
+
+    Compared by content rather than by `filecmp.cmp`'s default shallow reading:
+    an installed copy has its own mtime and size can collide, and "the bundle is
+    this checkout" is a claim about bytes.
+    """
+    ours = {path.relative_to(tree) for path in tree.rglob("*.py")}
+    theirs = {path.relative_to(installed) for path in installed.rglob("*.py")}
+    for missing in sorted(ours - theirs):
+        yield f"{missing} is not in the bundle"
+    for extra in sorted(theirs - ours):
+        yield f"{extra} is in the bundle and not in this checkout"
+    for shared in sorted(ours & theirs):
+        if (tree / shared).read_bytes() != (installed / shared).read_bytes():
+            yield f"{shared} differs"
+
+
+def scan_for_credentials(directory: Path, secrets: Sequence[str]) -> tuple[str, ...]:
+    """Every file under `directory` carrying one of these secrets (§8).
+
+    The rule is that a bot token, an `api_id` or an `api_hash` reaches no
+    artifact — not a derived config, not the journal, not the verdict, nothing
+    under the run directory. A rule about what is **absent** is only as good as
+    the reading that looks for it, so this is that reading, and
+    `tests/test_harness_preflight.py` runs it over a fake run's whole tree.
+
+    Here rather than in `preflight`, because its subject is the run directory —
+    which is this module's — and not the machine, which is preflight's.
+    """
+    wanted = [one for one in secrets if one]
+    found: list[str] = []
+    for path in sorted(one for one in directory.rglob("*") if one.is_file()):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if any(secret in text for secret in wanted):
+            found.append(f"{path.relative_to(directory)} carries a credential")
+    return tuple(found)
 
 
 # --- the journal -------------------------------------------------------------
@@ -523,11 +676,14 @@ class Bridgectl:
 
     §2: "Every product action goes through `bridgectl` against that engine." The
     runner — the call, its reply parsed as fields, and the journal line each one
-    writes — is **#351's**, which is the ticket that first needs one.
+    writes — is **#352's**. #350 placed it on #351 as "the ticket that first
+    needs one"; #351 turned out not to need one at all, because every check it
+    holds is a read of the machine and the probe never starts an engine. The
+    first item that calls it is `roster` (`bridgectl status`), and that is #352's.
     """
 
     def __init__(self, *_: Any, **__: Any) -> None:
-        raise NotImplementedError("the bridgectl runner is #351's")
+        raise NotImplementedError("the bridgectl runner is #352's")
 
 
 def derive_config(*_: Any, **__: Any) -> Any:
@@ -537,6 +693,25 @@ def derive_config(*_: Any, **__: Any) -> Any:
     drops.
     """
     raise NotImplementedError("the derived config is #352's")
+
+
+def reconcile_codex_trust(acceptance_root: Path) -> tuple[str, ...]:
+    """Remove any Codex trust row left behind for an acceptance workspace (§4.1).
+
+    §5's one row that is **not** a refusal: a killed run can leave a
+    `[projects."<workspace>"]` row in the operator's own `config.toml` for a
+    workspace under the acceptance root, and a leftover is arranged away before
+    the lane starts rather than graded. Answers the workspaces it removed, so
+    preflight journals `trust.reconciled` with them.
+
+    **The read-modify-write of the real file is #352's**, together with the
+    backup beside it and the block shape `TrustGate` writes and removes. What
+    lands here is the seam preflight calls and journals. Until #352 fills it this
+    answers *nothing removed*, which is an **assumption** and not a reading — it
+    is right about every machine no killed run left a row on, and #352 is what
+    turns it into an answer.
+    """
+    return ()
 
 
 class TrustGate:

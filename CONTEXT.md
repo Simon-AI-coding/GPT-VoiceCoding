@@ -31,7 +31,7 @@ What the system knows about one Session, structured for telling the user: its na
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
-The count of Sessions in each state, with one header row per live Session. Spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions.
+The count of Sessions in each state, with one header row per live Session, the rows in order of most recent activity, newest first — one order on every surface. Each surface shows as much of it as it holds: spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions; on the desktop the Duty Card shows its two counts that matter to the user and its first row (#343).
 _Avoid_: 多项目简报, overview, summary
 
 **Focus Session**:
@@ -117,7 +117,7 @@ The at-computer window for seeing the system's current state — the Session ros
 _Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, retired)
 
 **Duty Card**:
-The small always-on-top card that sits on the desktop while the Duty Switch is on and is gone while it is off — the one surface the user sees without clicking. It carries the Live Call's state, how many main Sessions wait on the user and how many have finished, and the newest such Session's one-line brief; a click on it offers the Live Toggle and the doors into the Control Panel. It shows and does not reply (ADR 0028).
+The small always-on-top card that sits on the desktop while the Duty Switch is on and is gone while it is off — the one surface the user sees without clicking. It carries the Call Phase and the Roster Brief cut to its size: how many main Sessions wait on the user and how many have finished, and the first such Session's row — its agent, Session Name, state word and the start of its newest message. A click on it offers the Live Toggle and the doors into the Control Panel; a secondary click, Quit. It shows and does not reply (ADR 0028). It is not a third thing beside the Roster Brief and the Session Brief; it is where they show on the desktop.
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Installation**:

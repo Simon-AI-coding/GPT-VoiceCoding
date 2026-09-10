@@ -101,6 +101,16 @@ PATH_TIMEOUT_SECONDS = 10.0
 #: smallest gap measured to submit on both.
 SUBMIT_SETTLE_SECONDS = 1.5
 
+#: The user-account session lock's identity record appearing after the lock is
+#: taken (§5). The two are a few syscalls apart — `flock`, then a truncate and a
+#: write — so a second run that loses that race reads an empty file and would
+#: report "unknown" for a holder that is about to name itself. This is the width
+#: of that window, waited out rather than quoted around; a second is orders of
+#: magnitude more than a local `open`, `write` and `flush`, deliberately, since
+#: being generous costs a run that is refusing anyway and being tight costs the
+#: refusal its whole reason.
+HOLDER_RECORD_SECONDS = 1.0
+
 #: How often a wait asks its question again. One cadence for every wait, because
 #: per-item polling is per-item tuning by another name.
 POLL_SECONDS = 0.5

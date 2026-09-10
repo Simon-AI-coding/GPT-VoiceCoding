@@ -24,8 +24,10 @@ from typing import Any
 
 import items
 import journey
+import preflight as preflight_module
 import pytest
 import support
+from items import Item
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
@@ -200,18 +202,43 @@ def verdict(
 
 
 @pytest.fixture(scope="session")
-def preflight(verdict: support.Verdict) -> object:
-    """§5's refusals, every one a read and never a turn.
-
-    **#351's.** Any failure is REFUSED: the run exits non-zero, writes a valid
-    `verdict.json` naming the refusal (`support.Verdict.refuse`), and never
-    starts an engine.
-    """
-    raise NotImplementedError("preflight is #351's")
+def machine(run_directory: Path, selected_lanes: tuple[str, ...]) -> preflight_module.Machine:
+    """This machine, as §5 reads it — the one place the real readings are wired."""
+    return preflight_module.Machine.real(
+        run_directory=run_directory, repository=REPOSITORY, lanes=selected_lanes
+    )
 
 
 @pytest.fixture(scope="session")
-def lane_runs(preflight: object, probe_run: object) -> object:
+def preflight(
+    machine: preflight_module.Machine,
+    journal: support.Journal,
+    verdict: support.Verdict,
+    run_directory: Path,
+) -> Iterator[str]:
+    """§5's refusals, every one a read and never a turn.
+
+    Any failure is REFUSED: the run exits non-zero, writes a valid `verdict.json`
+    naming the refusal, and **never starts an engine** — which holds by
+    construction rather than by care, because every fixture that starts one lists
+    this one first and a fixture that raised has no dependants.
+
+    The checks are in `preflight.py`, not here: a conftest is loaded by path and
+    is not importable, and every refusal below is driven by a fast test
+    (`tests/test_harness_preflight.py`).
+    """
+    try:
+        with preflight_module.Preflight(machine, journal) as passed:
+            verdict.record(Item.PREFLIGHT, support.PASS, passed)
+            print(f"\nacceptance run directory: {run_directory}")
+            yield passed
+    except preflight_module.Refused as refused:
+        verdict.refuse(f"{refused.check}: {refused.reason}")
+        pytest.fail(f"preflight refused — {refused.check}: {refused.reason}", pytrace=False)
+
+
+@pytest.fixture(scope="session")
+def lane_runs(preflight: str, probe_run: object) -> object:
     """Both lanes, walking in parallel on one thread each (§4).
 
     Depends on `probe_run` because §2 puts both run-level checks **before any
@@ -231,7 +258,11 @@ def lane_runs(preflight: object, probe_run: object) -> object:
 
 @pytest.fixture(scope="session")
 def probe_run(
-    preflight: object, run_directory: Path, journal: support.Journal, verdict: support.Verdict
+    preflight: str,
+    machine: preflight_module.Machine,
+    selection: items.Selection,
+    journal: support.Journal,
+    verdict: support.Verdict,
 ) -> object:
     """The engine-free realtime probe, run once and recorded (§2 item 0b).
 
@@ -244,4 +275,23 @@ def probe_run(
     them. When `probe` is not selected it does nothing and answers, so a lane
     run that depends on it for ordering does not drag the probe along.
     """
-    raise NotImplementedError("the realtime probe run is #351's")
+    if Item.PROBE not in selection.items:
+        return None
+    started = time.monotonic()
+    try:
+        reading, evidence = preflight_module.run_realtime_probe(
+            machine, journal, path=machine.path_of_login_shell() or ""
+        )
+    except Exception as unrun:  # noqa: BLE001 - every way it can fail is one row
+        # A probe that could not be *started* is still a probe that returned no
+        # frames, and this fixture may not raise: the lanes do not depend on the
+        # realtime backend and a raise here would stop them (§7). So the failure
+        # becomes the row's own evidence rather than the run's traceback.
+        reading, evidence = None, journal("probe.unrun", error=repr(unrun))
+    verdict.record(
+        Item.PROBE,
+        support.PASS if reading is not None and reading.passed else support.FAIL,
+        evidence,
+        seconds=time.monotonic() - started,
+    )
+    return reading

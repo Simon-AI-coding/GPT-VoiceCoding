@@ -101,8 +101,10 @@ CLAUDE_CONFIG_DIRECTORY_NAME = "claude-config"
 #: Where `claude` records the account it is logged in as. The same file #217
 #: measured the trust grant into, read here for a different key: a config
 #: directory with no `oauthAccount` is one nobody has logged in to, which is the
-#: state §4.1 says a *fresh* directory is always in.
-CLAUDE_STATE_NAME = ".claude.json"
+#: state §4.1 says a *fresh* directory is always in. Its name is
+#: `support.CLAUDE_STATE_NAME` — one spelling, because it is one file, and two
+#: spellings of it is what #217 cost a whole lane.
+CLAUDE_STATE_NAME = support.CLAUDE_STATE_NAME
 CLAUDE_ACCOUNT_KEY = "oauthAccount"
 
 #: Ground a Codex sandbox may write without asking. A run root inside any of
@@ -344,9 +346,13 @@ class Machine:
     server_live: Callable[[Path], bool] = field(default=answering)
     ask_bot: Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]] = field(default=ask_bot)
     take_session_lock: Callable[[], SessionLock] = field(default=lambda: _no_lock())
-    reconcile_trust: Callable[[Path], tuple[str, ...]] = field(
-        default=support.reconcile_codex_trust
-    )
+    #: §4.1's one read-modify-write of the operator's own `config.toml`. The
+    #: default is **inert**, and deliberately: the real reading rewrites a file
+    #: this suite's fast tests must never reach, so it is wired in `real()` where
+    #: the machine is being wired anyway, and a `Machine` built by a test that
+    #: named no reconciliation reconciles nothing (`tests/conftest.py`'s rule,
+    #: applied to the one file that is the operator's).
+    reconcile_trust: Callable[[Path], tuple[str, ...]] = field(default=lambda _: ())
 
     @classmethod
     def real(cls, *, run_directory: Path, repository: Path, lanes: Sequence[str]) -> Machine:
@@ -378,6 +384,9 @@ class Machine:
             provenance=cache(lambda: support.compare_engine_to_tree(bundle, repository)),
             path_of_login_shell=cache(lambda: login_shell_path(environ)),
             foreign_codex=cache(lambda: foreign_codex(root)),
+            reconcile_trust=lambda root: support.reconcile_codex_trust(
+                root, environment=environ, home=home, taken_by=run_directory.name
+            ),
             take_session_lock=lambda: telegram_person.PersonSessionLock(
                 run_directory=run_directory,
                 held_by=telegram_person.ACCEPTANCE_RUN_HOLDER,
@@ -492,14 +501,23 @@ class Preflight:
         workspace under the acceptance run directory. That is the one row this
         harness ever writes into the operator's own `~/.codex/config.toml`, and a
         leftover is arranged away rather than graded — so it is journalled as
-        `trust.reconciled` and the run goes on. Reading and rewriting the real
-        file is **#352's**; what happens here is the call and the journal line.
+        `trust.reconciled` and the run goes on. The read-modify-write of the
+        real file is `support.reconcile_codex_trust`; what happens here is the
+        call and the journal line.
         """
         root = support.acceptance_root(dict(self.machine.environ))
-        reconciled = self.machine.reconcile_trust(root)
+        try:
+            reconciled = self.machine.reconcile_trust(root)
+        except support.CouldNotReconcile as unremoved:
+            # §5 says a stale row is reconciled rather than refused — and a row
+            # this harness **cannot** remove is a different fact. The run would
+            # otherwise walk a lane whose workspace somebody else's row had
+            # already trusted, which is the one thing the grant exists to make
+            # this run's own.
+            raise Refused("stale codex trust row", str(unremoved)) from None
         # Journalled only when a row was actually removed. §4.1's line is about a
-        # **removal**, and while the hook is #352's stub a line for every run
-        # would record a reading that never happened.
+        # **removal**, and a line on every run would say a killed run had left
+        # something behind on every machine that has never had one.
         if reconciled:
             self.journal(
                 "trust.reconciled",

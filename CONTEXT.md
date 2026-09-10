@@ -31,7 +31,7 @@ What the system knows about one Session, structured for telling the user: its na
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
-The count of Sessions in each state, with one header row per live Session, the rows in order of most recent activity, newest first — one order on every surface. Each surface shows as much of it as it holds: spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions; on the desktop the Duty Card shows its two counts that matter to the user and its first row (#343).
+The count of Sessions in each state, with one header row per live Session — its agent, its Session Name, its state word and the start of its newest message — the rows in order of most recent activity, newest first — one row and one order on every surface. Each surface shows as much of it as it holds: spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions, its rows without the message; on the desktop the Duty Card shows its two counts that matter to the user and its first row (#343); in the Control Panel it is the Session list, every row, each opening into its Session Brief to read and not to answer (#341). Child Processes, Headless Runs and ended Sessions have no row anywhere.
 _Avoid_: 多项目简报, overview, summary
 
 **Focus Session**:
@@ -67,7 +67,7 @@ The Live Call's speaking half — the model the user hears and talks to. It has 
 _Avoid_: voice model, realtime model, assistant (unqualified), voice thread
 
 **Call Agent**:
-The Live Call's acting half — the coding model behind the Voice and the only one on the call with tools. It runs the control-plane verbs the Voice hands it. Not a Delegated Turn, which is work the system hands out on purpose.
+The Live Call's acting half — the coding model behind the Voice and the only one on the call with tools. It runs the control-plane verbs the Voice hands it. Not a Delegated Turn, which is work the system hands out on purpose — though its model and effort are the one setting the Delegated Turn also uses (#344).
 _Avoid_: backing Codex model, the agent behind the call, delegate
 
 **Stock Text**:
@@ -121,7 +121,7 @@ The small always-on-top card that sits on the desktop while the Duty Switch is o
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Installation**:
-Everything the system places in files the **user** owns so the coding agents can reach it, and takes back byte for byte when asked. Done at first launch and reconciled at every launch after (ADR 0012), never by hand and never by the Control Panel.
+Everything the system places in files the **user** owns so the coding agents can reach it, and takes back byte for byte when asked. Done at first launch and reconciled at every launch after (ADR 0012), never by hand and never by the Control Panel — which only triggers it and, on first launch, tells the user in plain words what was placed and that it can be taken back (#345).
 _Avoid_: setup, configuration (that is the user's own file, which the system only reads), provisioning
 
 ### Reach and sessions
@@ -165,7 +165,7 @@ says what the Session is doing, in words the user can understand. The task is re
 best source the agent has already written (a name the user gave it, the agent's own generated
 title, the user's first words to it, the agent's derived name as the floor), so every main
 Session the agent has identified has one, none is asked to supply one, and none is invented. It climbs to a better source as one appears
-and never falls back; a change is not announced. A Session Name is for recognising a Session,
+and never falls back; a change is not announced. Before any source exists the name is the project alone, so no surface ever shows an address in its place (#341). A Session Name is for recognising a Session,
 never for addressing it — that is the address's job (ADR 0024).
 _Avoid_: label, title, session label
 

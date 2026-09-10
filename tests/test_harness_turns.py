@@ -49,6 +49,17 @@ CLAUDE_LANE, CODEX_LANE = items.LANES
 #: rollout on `GroundTruth.record` and `claude agents --json` names none.
 ROLLOUT = Path("/runs/rollouts/rollout-thread-1.jsonl")
 
+#: The address of the Session every fake here stands for — `_payload`'s row, the
+#: `relay` target, and the `target=` field on a send line that is this lane's own
+#: (#355). Spelled from the roster row's three fields, because that is the join
+#: the harness makes: a send is this turn's Stop when its address is the one on
+#: the row.
+OWN_ADDRESS = f"{CODEX_LANE}:thread-1:7"
+
+#: A Session on the same machine that is **not** this lane's — the other lane's,
+#: or the operator's own. Run `20260910T191643Z`'s real one, abbreviated.
+ANOTHER_ADDRESS = f"{CODEX_LANE}:01a08cc0-f956-7c63-ae40-95e80334cb9b:68569"
+
 
 def _journal(tmp_path: Path) -> support.Journal:
     return support.Journal(tmp_path / support.JOURNAL_NAME)
@@ -112,11 +123,19 @@ class TestTheTurns:
 
 
 class TestTheEngineLogLine:
-    """§2 item 2 and §9 — every chat read starts from an id the product issued."""
+    """§2 item 2 and §9 — every chat read starts from an id the product issued,
+    and only from a line addressed to this lane's own Session (#355)."""
 
     SENT = (
-        "2026-09-10 10:00:00 INFO sent Companion Channel message request=r-1 "
-        "outcome=delivered message_ids=4110,4111"
+        f"2026-09-10 10:00:00 INFO sent Companion Channel message request=r-1 "
+        f"outcome=delivered target={OWN_ADDRESS} message_ids=4110,4111"
+    )
+    #: The same line, for the Session the *other* lane started. This is the line
+    #: that was graded as this lane's Stop on run `20260910T191643Z`, 0.16 s
+    #: before this lane's own turn was typed.
+    THEIRS = (
+        f"2026-09-10 10:00:01 INFO sent Companion Channel message request=r-9 "
+        f"outcome=delivered target={ANOTHER_ADDRESS} message_ids=1806"
     )
 
     def test_the_ids_come_off_the_line_the_engine_wrote(self) -> None:
@@ -124,21 +143,66 @@ class TestTheEngineLogLine:
 
     def test_a_line_with_no_ids_yields_none(self) -> None:
         """A send that reached nobody carries an empty field, and that is an answer."""
-        nobody = "sent Companion Channel message outcome=failed message_ids="
+        nobody = "sent Companion Channel message outcome=failed target= message_ids="
         assert journey.message_ids(nobody) == ()
 
     def test_a_line_that_is_not_a_send_carries_no_ids(self) -> None:
         assert journey.message_ids("Session stopped: 工位") == ()
 
+    def test_the_address_comes_off_the_same_line(self) -> None:
+        assert journey.send_target(self.SENT) == OWN_ADDRESS
+        assert journey.send_target(self.THEIRS) == ANOTHER_ADDRESS
+
+    def test_a_send_about_nobody_and_a_line_that_is_no_send_both_name_nobody(self) -> None:
+        """An empty field is a send that named no Session — a `/status` answer, a
+        refusal — and is never this turn's Stop, because an address is what makes
+        a send this lane's own."""
+        assert journey.send_target("sent Companion Channel message target= message_ids=1") == ""
+        assert journey.send_target("Session stopped: 工位") == ""
+
     def test_the_stop_notice_id_is_the_first_id_of_the_first_send(self) -> None:
         """A notice can span several messages; the anchor the product registers
         covers every id of the receipt, so the first is the one this harness reads
         and the one it replies to (bridge.py's `anchors.register`)."""
-        later = "sent Companion Channel message request=r-2 outcome=delivered message_ids=4200"
-        assert journey.stop_notice_id([self.SENT, later]) == "4110"
+        later = (
+            f"sent Companion Channel message request=r-2 outcome=delivered "
+            f"target={OWN_ADDRESS} message_ids=4200"
+        )
+        assert journey.stop_notice_id([self.SENT, later], OWN_ADDRESS) == "4110"
+
+    def test_a_send_about_another_session_is_not_this_turns_stop(self) -> None:
+        """#355: the newest send is not this lane's by virtue of being newest."""
+        assert journey.stop_notice_id([self.THEIRS], OWN_ADDRESS) is None
+        assert journey.stop_notice_id([self.THEIRS, self.SENT], OWN_ADDRESS) == "4110"
+        assert journey.sent_for([self.THEIRS, self.SENT], OWN_ADDRESS) == [self.SENT]
+
+    def test_a_send_about_nobody_is_not_this_turns_stop_either(self) -> None:
+        nobody = (
+            "sent Companion Channel message request=r-3 outcome=delivered target= message_ids=1"
+        )
+        assert journey.stop_notice_id([nobody], OWN_ADDRESS) is None
 
     def test_no_send_at_all_is_no_id(self) -> None:
-        assert journey.stop_notice_id([]) is None
+        assert journey.stop_notice_id([], OWN_ADDRESS) is None
+
+    def test_no_address_matches_nothing_rather_than_everything(self) -> None:
+        """The empty field is what a send about nobody carries, so an equality test
+        against an empty address would take every one of them (#355)."""
+        nobody = (
+            "sent Companion Channel message request=r-3 outcome=delivered target= message_ids=7"
+        )
+        assert journey.sent_for([nobody, self.SENT, self.THEIRS], "") == []
+        assert journey.stop_notice_id([nobody], "") is None
+
+    def test_a_failure_names_who_the_engine_did_send_about(self) -> None:
+        """The one failure whose cause is invisible from everything else the row
+        carries: a notice that came, addressed elsewhere."""
+        said = journey.addressed_elsewhere([self.THEIRS], OWN_ADDRESS)
+        assert ANOTHER_ADDRESS in said and OWN_ADDRESS in said
+
+    def test_nothing_is_said_when_every_send_was_this_lanes_own(self) -> None:
+        assert journey.addressed_elsewhere([self.SENT], OWN_ADDRESS) == ""
+        assert journey.addressed_elsewhere([], OWN_ADDRESS) == ""
 
 
 class TestTheReceipts:
@@ -438,7 +502,15 @@ DELIVERED_RECEIPT = receipt_line(
 RETAINED_RECEIPT = receipt_line(
     state=str(Lifecycle.RETAINED), grade=str(Delivery.HELD), reason="held_far_side"
 )
-SENT_LINE = "sent Companion Channel message request=r-1 outcome=delivered message_ids=4110,4111"
+SENT_LINE = (
+    f"sent Companion Channel message request=r-1 outcome=delivered "
+    f"target={OWN_ADDRESS} message_ids=4110,4111"
+)
+#: The same send, about a Session this lane did not start (#355).
+THEIRS_LINE = (
+    f"sent Companion Channel message request=r-9 outcome=delivered "
+    f"target={ANOTHER_ADDRESS} message_ids=1806"
+)
 
 
 def _payload(workspace: Path, **waiting: Any) -> dict[str, Any]:
@@ -526,6 +598,24 @@ class TestWalkingTheFourItems:
         walk.walk()
         assert connection.reads == [("@lane-bot", 4110)]
         assert _rows(walk)[str(items.Item.STOP_NOTICE)]["verdict"] == "PASS"
+
+    def test_a_stop_notice_about_another_session_is_not_this_turns(self, tmp_path: Path) -> None:
+        """#355: a send after the mark addressed to somebody else is not this turn's
+        Stop, however new it is — and the row that never came says what did."""
+        engine = _Engine()
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=THEIRS_LINE),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "FAIL"
+        line = support.resolve(tmp_path, row["evidence"])
+        assert line["event"] == "deadline.expired"
+        assert ANOTHER_ADDRESS in line["what"]
+        assert OWN_ADDRESS in line["what"]
 
     def test_a_message_the_chat_does_not_hold_is_a_failure(self, tmp_path: Path) -> None:
         engine = _Engine()

@@ -59,16 +59,33 @@ ENGINE_STOP_LINE = r"(?i)Session stopped:"
 BOOT_WORDS = "reply with the single word READY, and use no tools"
 
 
-#: The engine's line for a Companion Channel message it sent, and the ids it
-#: sent it under (`core/bridge.py:2175`). Every chat read in this harness is by
-#: one of those ids — the chat is never searched and a message is never matched
-#: by the Session's name (§9, #109) — so this line is where a read starts, and
-#: a **mark** is a position in the lane's engine log taken before the turn whose
-#: message the run is about to read.
-ENGINE_SENT_LINE = r"sent Companion Channel message .*message_ids="
+#: The engine's line for a Companion Channel message it sent: who it was about,
+#: and the ids it landed under (`core/bridge.py`). Every chat read in this
+#: harness starts from one of those ids — the chat is never searched and a
+#: message is never matched by the Session's name (§9, #109) — and two things
+#: decide which line is this turn's: a **mark**, a position in the lane's engine
+#: log taken before the turn, and the **address** on the line itself (#355).
+#: The words the line opens with, spelled **once** for the two fields read off
+#: it below: a send line matched by one spelling and parsed by another is two
+#: readings of one contract, and only one of them gets fixed.
+_SENT = r"sent Companion Channel message "
 
-#: The ids on that line, as the engine joined them (`core/bridge.py:2178`).
+ENGINE_SENT_LINE = _SENT + r".*message_ids="
+
+#: The ids on that line, as the engine joined them (`core/bridge.py`).
 _MESSAGE_IDS = re.compile(ENGINE_SENT_LINE + r"(?P<ids>\S*)")
+
+#: Who that send was **about**, as the engine wrote it on the same line: the
+#: address of the Anchor's target, spelled the way the roster row spells it, and
+#: empty for a send that named nobody (`core/bridge.py`, #355). One engine
+#: bridges every Session on the machine, so this field is the only thing that
+#: tells a lane's own send from a send about somebody else's Session.
+#:
+#: Its own pattern rather than one expression with both groups: `message_ids=`
+#: is read off lines this harness does not require a `target=` on at all — the
+#: boot notice's drain among them — and one pattern demanding both fields would
+#: make an id unreadable for want of an address.
+_SEND_TARGET = re.compile(_SENT + r".*target=(?P<target>\S*)")
 
 #: §3's three turns, by name. The name is what the journal's `turn` line carries
 #: and what a reader looks for when a run drifts past five minutes (§7).
@@ -124,16 +141,71 @@ def message_ids(line: str) -> tuple[str, ...]:
     return tuple(one for one in found["ids"].split(",") if one)
 
 
-def stop_notice_id(lines: Sequence[str]) -> str | None:
-    """The id §2 item 2 re-reads by, and §2 item 5 anchors its reply to.
+def send_target(line: str) -> str:
+    """The Session a send line says it was about, or an empty string for nobody.
 
-    **The first id of the first send after the mark.** A Stop Notice can span
-    several messages (#189), and the product registers the Anchor against every
-    id of the receipt (`core/bridge.py`'s `anchors.register`), so a reply to the
-    first resolves exactly as a reply to any other would — and one id is one
-    read.
+    A line that is not a send, and a send that named no target, both answer the
+    same way — and neither is this lane's Stop: an address is what makes a send
+    one's own, so "no address" is never a match.
     """
-    for line in lines:
+    found = _SEND_TARGET.search(line)
+    return "" if found is None else found["target"]
+
+
+def addressed_elsewhere(lines: Sequence[str], address: str) -> str:
+    """What the engine sent in that time about somebody else, as a clause or nothing.
+
+    Read only on the way out of a failure (§7: a deadline hit names what never
+    ended). A run whose notice never came has one question worth answering
+    first — did the engine send nothing at all, or something about a Session
+    that is not this lane's? — and the answer is on the lines it already has.
+    """
+    strangers = sorted({send_target(line) for line in lines} - {address})
+    if not strangers:
+        return ""
+    named = ", ".join(one or "nobody" for one in strangers)
+    return f"; the engine did send in that time, about {named} and not {address}"
+
+
+def sent_for(lines: Sequence[str], address: str) -> list[str]:
+    """Of those send lines, the ones addressed to this Session (§2 item 2, #355).
+
+    **Never by recency.** The newest send in the engine's log is not this turn's
+    Stop: one engine bridges every Session on the machine, and taking the newest
+    line took a Stop Notice for the *other* lane's boot turn — sent 0.16 s before
+    this lane's own turn was even typed (run `20260910T191643Z`). A mark keeps
+    out what is older than the turn; only the address keeps out what belongs to
+    somebody else.
+
+    **An empty address matches nothing**, and that is the rule rather than an
+    edge case: `send_target` answers the empty string for a send that named
+    nobody — a `/status` answer, a refusal — and for any line that carries no
+    such field at all, so an equality test against an empty address would take
+    every one of them. A caller with no address for its own Session has nothing
+    to match on, and saying so here keeps that true of every caller.
+    """
+    if not address:
+        return []
+    return [line for line in lines if send_target(line) == address]
+
+
+def stop_notice_id(lines: Sequence[str], address: str) -> str | None:
+    """The id this item reads the chat by today, and §2 item 5's reply anchor.
+
+    **Both of those readings are #354's to replace, not this function's.** §2
+    item 2 as amended says the chat is read after a *mark* and never by the
+    product-issued id — a private chat has two id spaces — and item 5 anchors on
+    the account-side id. The product-issued ids stay as evidence. What this
+    function settles is the question #355 asks, which is independent of that and
+    holds either way: **which send line is this lane's own**.
+
+    **The first id of the first send after the mark that is addressed to this
+    Session.** A Stop Notice can span several messages (#189), and the product
+    registers the Anchor against every id of the receipt (`core/bridge.py`'s
+    `anchors.register`), so a reply to the first resolves exactly as a reply to
+    any other would — and one id is one read.
+    """
+    for line in sent_for(lines, address):
         found = message_ids(line)
         if found:
             return found[0]
@@ -274,8 +346,9 @@ class Lane:
 
     Everything that differs between the lanes lives here, so no other module
     asks which lane it is holding: the launch argv, the boot turn, the config
-    directory each lane may or may not have (§4.1), and the agent kind the
-    *other* lane's engine drops (§4.3).
+    directory each lane may or may not have (§4.1), and the two ways §4.3 keeps
+    one lane's engine out of the other's view — the agent kind it drops, and
+    whether its engine runs on an empty `CODEX_HOME` of its own.
 
     The model pins are the lane's, not a step's (§3). The Codex lane carries
     **no** other launch argument: any `-c` override makes codex-tui run its own
@@ -340,10 +413,37 @@ class Lane:
         Only the Claude kind is ever dropped, and only on the lane that will
         never walk a Claude route: the machine's one Claude approval address has
         no environment to read (ADR 0019), so exclusion is what leaves exactly
-        one claimant (#202). The Codex kind is never dropped — the Codex daemon
-        is machine-wide and both engines see it anyway.
+        one claimant (#202).
+
+        **The Codex kind is never dropped, and cannot be**: `call` is a required
+        seam, the only Call adapter rides the app-server the Codex agent adapter
+        owns, and engine assembly refuses without it. What keeps that kind from
+        seeing the *other* lane's Session is `empty_codex_home` below, not a
+        drop.
         """
         return () if self.agent == items.LANES[0] else (items.LANES[0],)
+
+    @property
+    def empty_codex_home(self) -> bool:
+        """Whether this lane's **engine** runs on a `CODEX_HOME` of its own (§4.3).
+
+        The Claude lane's does, and the directory is empty: the shared-daemon
+        lookup derives its control socket from `CODEX_HOME` when it is *called*
+        (`adapters/agent/codex/shared_daemon.py`), so an empty one has nobody
+        behind it — that engine's Codex lane reports itself `degraded` and empty
+        and it sees no Codex thread on the machine, the other lane's or the
+        operator's. Without it that engine joined the operator's shared
+        app-server and announced the Codex lane's boot turn to the Claude lane's
+        chat (#355, run `20260910T191643Z`).
+
+        The Codex lane's engine never gets one: ADR 0022 derives the socket and
+        the TUI's launch environment from one `CODEX_HOME`, so a lane with its
+        own finds no server and its Session vanishes from `roster` (§4.1, #232).
+        A property beside `dropped_agents` because it answers the same question
+        that one does — what this lane's engine must not see — for the kind a
+        drop cannot reach.
+        """
+        return self.agent == items.LANES[0]
 
 
 LANES: tuple[Lane, ...] = (
@@ -827,6 +927,10 @@ class Walk:
         pattern = re.compile(ENGINE_SENT_LINE)
         return [line for line in self.engine.log_lines()[mark:] if pattern.search(line)]
 
+    def sent_since_for(self, mark: int, address: str) -> list[str]:
+        """Those of them this lane's own Session is the subject of (§2 item 2, #355)."""
+        return sent_for(self.sent_since(mark), address)
+
     # -- the items -----------------------------------------------------------
 
     def roster(self) -> str:
@@ -941,26 +1045,65 @@ class Walk:
         Three claims, in the order the run can make them:
 
         1. the engine **says** it sent a Companion Channel message for the Stop
-           the turn ended with, and says under which ids;
-        2. that message is **there**, re-read once by the first of those ids
-           through the user account — never searched for, never matched by name
-           (§9, #109);
+           the turn ended with — addressed to *this* Session — and says under
+           which ids;
+        2. that message is **there**, read once through the user account — never
+           searched for, never matched by name (§9, #109). By the first of those
+           ids today, which #354 replaces with a read after a chat mark: a
+           private chat has two id spaces and the account cannot address the
+           bot's (§2 item 2 as amended);
         3. `status` says what the Session stopped on.
 
-        The chat mark is taken **before** the turn is typed (§3), which is what
-        makes this a deadline on the notice landing rather than a window a
-        message is watched in: everything after the mark belongs to this turn.
+        **Two things bound claim 1, and neither is recency.** The chat mark is
+        taken before the turn is typed (§3), so nothing older than the turn can
+        answer for it; the address keeps out what is newer but somebody else's.
+        One engine bridges every Session on the machine, and the newest send
+        line was another lane's boot-turn Stop — written 0.16 s before this
+        lane's own turn was typed (#355, run `20260910T191643Z`).
+
+        The address is read **once**, before the turn, and it is the engine's own
+        row that gives it — the same renderer the engine writes the send line
+        with (`identity.address_of`), so the two cannot disagree about the
+        *format*. They can still disagree about the value in one case: a Codex
+        row matched by pid alone (§2 item 1) gains its `session_id` later, and a
+        row read before that names the Session with the id half empty. Re-reading
+        the row every half-second would be a `bridgectl` call per poll, so this
+        reads once and the failure clause below names every address the engine
+        did send about — the newly named one among them.
         """
         chat = self.the_chat()
+        address = address_of(self.row())
+        if not address:
+            # Unreachable through `roster`, which fails the lane for a row that
+            # is no target at all (§2 item 1) — and refused here anyway, because
+            # an empty address is the one value that would match every send the
+            # engine made about nobody.
+            raise ItemFailed(
+                f"the {self.lane.name} engine's row for this Session carries no address, so no "
+                f"send line can be matched to it"
+            )
         mark = self.mark()
         with self.journal.turn(ACKNOWLEDGE_TURN, lane=self.lane.name):
             self.session.submit(ACKNOWLEDGE_WORDS)
-            sent = self.waiting(
-                "TURN_SECONDS",
-                lambda: self.sent_since(mark),
-                what=f"the acknowledge turn's Stop Notice reaching the {self.lane.name} chat",
-            )
-        identifier = stop_notice_id(sent)
+            try:
+                sent = self.waiting(
+                    "TURN_SECONDS",
+                    lambda: self.sent_since_for(mark, address),
+                    what=(
+                        f"the acknowledge turn's Stop Notice for {address} reaching the "
+                        f"{self.lane.name} chat"
+                    ),
+                )
+            except deadlines.DeadlineExpired as unsent:
+                # The sends that *did* happen in that time, named on the way out:
+                # a notice addressed elsewhere is the one failure whose cause is
+                # invisible from everything else the row carries.
+                raise deadlines.DeadlineExpired(
+                    f"{unsent.what}{addressed_elsewhere(self.sent_since(mark), address)}",
+                    deadline=unsent.deadline,
+                    seconds=unsent.seconds,
+                ) from None
+        identifier = stop_notice_id(sent, address)
         if identifier is None:
             raise ItemFailed(
                 f"the engine recorded sending a Companion Channel message under no id at all, "
@@ -981,6 +1124,10 @@ class Walk:
         return self.journal(
             "stop.notice",
             lane=self.lane.name,
+            # The address the send line had to carry for this to be this turn's
+            # Stop at all (#355) — evidence, so a green row says whose notice it
+            # read and not only which message.
+            target=address,
             message_id=identifier,
             waiting_for=kind,
             chat=message.as_journal_fields(),

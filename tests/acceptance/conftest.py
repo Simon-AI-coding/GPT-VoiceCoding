@@ -490,9 +490,10 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
     """The engine, the trust, the Session and the walk, on ground already arranged."""
     lane, machine = run.lane, arrangement.machine
     directory = arrangement.run_directory
+    engine_directory = directory / f"engine-{lane.name}"
     config = support.derive_config(
         source=machine.source_config,
-        engine_directory=directory / f"engine-{lane.name}",
+        engine_directory=engine_directory,
         workspace=workspace,
         socket_path=sockets / "control.sock",
         token_variable=machine.token_variable(lane.name),
@@ -511,6 +512,14 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
         else {}
     )
     environment = hand_started.terminal_environment(arrangement.path_value, extra=lane_variables)
+    # §4.3: and one variable the **engine alone** carries — the Claude lane
+    # engine's own empty `CODEX_HOME`, so it joins no shared app-server and sees
+    # no Codex thread on the machine (#355). The Session's environment above is
+    # deliberately untouched: the Codex lane's TUI must join the operator's real
+    # daemon or the product is right not to list it (#232).
+    engine_variables = support.derive_engine_variables(
+        lane_variables, engine_directory=engine_directory, own_codex_home=lane.empty_codex_home
+    )
     engine = support.Engine(
         config=config,
         bundle=machine.bundle,
@@ -523,7 +532,7 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
         # harness is run from inside a Claude Code session, which is the one
         # place they come from (§4.4, #73).
         base=environment,
-        extra=lane_variables,
+        extra=engine_variables,
     )
     surface = support.Bridgectl(
         bundle=machine.bundle, socket_path=config.socket_path, journal=arrangement.journal

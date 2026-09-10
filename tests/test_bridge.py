@@ -102,8 +102,13 @@ from hub import CLAUDE, CODEX, TEN_MINUTES, Hub
 
 #: The one record every Companion Channel send writes (#261, ADR 0021 §10). A
 #: contract line the acceptance harness reads, so it is spelled once here and
-#: asserted whole.
-SEND_RECORD = "sent Companion Channel message request={request} outcome={outcome} message_ids={ids}"
+#: asserted whole. `target` is who the message is about, rendered as the roster
+#: and the `Session stopped:` line render it, and empty when it is about nobody
+#: (#355) — the field that tells an observer this lane's send from another's.
+SEND_RECORD = (
+    "sent Companion Channel message request={request} outcome={outcome} "
+    "target={target} message_ids={ids}"
+)
 
 
 def _only_request(hub: Hub) -> str:
@@ -1678,7 +1683,7 @@ class TestTheInboundRouterEndToEnd:
         hub.emit(InboundText(text="/status"))
 
         assert [record.getMessage() for record in caplog.records] == [
-            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", target="", ids="1"),
             "handled inbound Companion Channel message kind=control",
         ]
 
@@ -1690,7 +1695,9 @@ class TestTheInboundRouterEndToEnd:
         hub.emit(InboundText(text="ship it"))
 
         assert [record.getMessage() for record in caplog.records] == [
-            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            SEND_RECORD.format(
+                request=_only_request(hub), outcome="delivered", target=CODEX, ids="1"
+            ),
             f"handled inbound Companion Channel message kind=answer_relay target={CODEX}",
         ]
 
@@ -1715,7 +1722,13 @@ class TestTheInboundRouterEndToEnd:
 class TestEverySendWritesOneRecord:
     """ADR 0021 §10: a Stop Notice is unbidden, so the ids it landed under reach the
     world through one named engine-log record per send. The acceptance harness
-    reads this line; the format is a contract like the #48 inbound line."""
+    reads this line; the format is a contract like the #48 inbound line.
+
+    The line also names **who the message is about** (#355), because one engine
+    bridges every Session on the machine: without that field an observer reading
+    this log cannot tell a send about its own Session from a send about someone
+    else's, and reading the newest line as one's own graded another lane's Stop
+    Notice as this lane's turn (run `20260910T191643Z`)."""
 
     def test_a_stop_notice_records_the_ids_it_landed_under(self, caplog) -> None:
         caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
@@ -1733,7 +1746,9 @@ class TestEverySendWritesOneRecord:
 
         records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
         assert records == [
-            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="40,41")
+            SEND_RECORD.format(
+                request=_only_request(hub), outcome="delivered", target=CODEX, ids="40,41"
+            )
         ]
         assert hub.channel.origins == [""]
 
@@ -1745,7 +1760,9 @@ class TestEverySendWritesOneRecord:
         hub.emit(InboundText(text="/status"))
 
         records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
-        assert records == [SEND_RECORD.format(request=_only_request(hub), outcome="failed", ids="")]
+        assert records == [
+            SEND_RECORD.format(request=_only_request(hub), outcome="failed", target="", ids="")
+        ]
 
     def test_a_split_send_that_half_landed_still_names_what_did(self, caplog) -> None:
         caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
@@ -1756,8 +1773,55 @@ class TestEverySendWritesOneRecord:
 
         records = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
         assert records == [
-            SEND_RECORD.format(request=_only_request(hub), outcome="unknown", ids="9")
+            SEND_RECORD.format(request=_only_request(hub), outcome="unknown", target="", ids="9")
         ]
+
+    def test_the_session_a_send_is_about_is_named_the_way_the_roster_names_it(self, caplog) -> None:
+        """#355: `target` is the Anchor's own target, rendered as an address.
+
+        The same spelling `status` puts on the roster row and `Session stopped:`
+        puts on its line, because an observer joining the two has to be able to
+        compare them without parsing either differently.
+        """
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub(sessions=((CLAUDE, "build the shell"),))
+
+        hub.emit(
+            SessionStopped(
+                target=CLAUDE,
+                progress=ProgressObservation.readable(
+                    has_history=False, recent=(), read_at=datetime(2026, 9, 6, tzinfo=UTC)
+                ),
+            )
+        )
+
+        (record,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert f"target={CLAUDE} " in record
+        assert f"target={AgentKind.CLAUDE}:def:100 " in record
+
+    def test_a_send_that_names_nobody_writes_the_field_empty(self, caplog) -> None:
+        """A `/status` answer registers no Anchor, so it is about no Session."""
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        hub = Hub()
+
+        hub.emit(InboundText(text="/status"))
+
+        (record,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert "target= " in record
+        assert hub.core.anchors.lookup("1") is None
+
+    def test_a_menu_screen_is_named_by_the_screen_it_is(self, caplog) -> None:
+        """A screen is nobody's (#264), and the field says which screen rather than
+        pretending the send was about a Session."""
+        caplog.set_level("INFO", logger="gpt_voicecoding.core.bridge")
+        # `/sessions` is in the grammar because the composition root builds it
+        # from the whole action set; this hub is told the one command it needs.
+        hub = Hub(sessions=((CODEX, "port the log"),), commands=frozenset({"sessions"}))
+
+        hub.emit(InboundText(text="/sessions"))
+
+        (record,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("sent ")]
+        assert f"target={Screen.ROSTER} " in record
 
     def test_a_command_reaches_the_wired_control_surface(self) -> None:
         seen: list[Classification] = []
@@ -2926,7 +2990,7 @@ class TestWhatBecomesOfACompanionReplyThatDidNotLand:
         hub.emit(InboundText(text="/status"))
 
         assert [one.getMessage() for one in caplog.records] == [
-            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", ids="1"),
+            SEND_RECORD.format(request=_only_request(hub), outcome="delivered", target="", ids="1"),
             "handled inbound Companion Channel message kind=control",
         ]
 

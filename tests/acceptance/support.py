@@ -767,6 +767,22 @@ CONFIG_NAME = "config.toml"
 STATE_NAME = "state.json"
 LOG_NAME = "engine.log"
 
+#: Beside `config-dropped.json`, naming the variables **this lane adds** to its
+#: engine's environment: the agent config directory of §4.1 and, on the Claude
+#: lane, the empty `CODEX_HOME` of §4.3. Not the engine's whole environment —
+#: `PATH` is the operator's own shell's (§4.4) and the bot token must reach no
+#: artifact at all (§8, and the run's own credential scan would fail on one). The
+#: `CODEX_HOME` is a change of kind in the same way a drop is — it takes a whole
+#: agent kind out of the engine's view — and a run that changed that without
+#: saying so would leave a reader diffing two `ps` outputs for it.
+VARIABLES_NAME = "engine-variables.json"
+
+#: The Claude lane engine's own `CODEX_HOME` (§4.3, #355), under its engine
+#: directory. What makes it work is that it stays **empty**: the control socket
+#: derived from it has nobody behind it, so that engine joins no shared
+#: app-server and sees no Codex thread on the machine.
+CODEX_HOME_NAME = "codex-home"
+
 
 #: The two lanes by role rather than by index, and the lane name **is** the
 #: agent kind the engine's own tables are keyed by (`tests/test_harness_lanes.py`
@@ -968,6 +984,48 @@ def derive_config(
     )
 
 
+def derive_engine_variables(
+    session_variables: Mapping[str, str], *, engine_directory: Path, own_codex_home: bool
+) -> dict[str, str]:
+    """What this lane adds to its **engine's** environment, written down as it goes.
+
+    Named and shaped like `derive_config` above, and for its reason: it answers
+    with the values the lane was arranged on and records what it did beside the
+    file that one records.
+
+    Two variables, and they travel differently on purpose:
+
+    * `CLAUDE_CONFIG_DIR` (§4.1) is the Session's *and* the engine's — the
+      engine's own `claude agents --json` inherits this process's environment,
+      so an engine without it lists another registry. It arrives here already
+      composed, as `session_variables`.
+    * `CODEX_HOME` (§4.3, #355) is the **engine's alone**, on the Claude lane
+      only, and pointing at an empty directory of its own. The hand-started
+      Sessions must never see it: the Codex lane's TUI has to join the
+      operator's shared daemon or it is not a Session the product can list
+      (#232), and the operator's own `~/.codex` is where both of those live.
+
+    The directory is made here, because a variable naming a path that does not
+    exist is a variable whose meaning depends on what the engine does with it.
+    It stays empty: that — and not the name — is what leaves the derived control
+    socket with nobody behind it.
+
+    What was added is written beside `config-dropped.json`, so a run says out
+    loud that it changed an engine's environment rather than leaving a reader to
+    infer it from an engine log that is missing a line.
+    """
+    engine_directory.mkdir(parents=True, exist_ok=True)
+    variables = dict(session_variables)
+    if own_codex_home:
+        codex_home = engine_directory / CODEX_HOME_NAME
+        codex_home.mkdir(exist_ok=True)
+        variables[codex_runtime.CODEX_HOME_VARIABLE] = str(codex_home)
+    (engine_directory / VARIABLES_NAME).write_text(
+        json.dumps(dict(sorted(variables.items())), indent=2) + "\n"
+    )
+    return variables
+
+
 def fresh_workspace(workspace: Path, path_value: str) -> Path:
     """§4.2 item 7: a disposable `git init` directory, one per lane.
 
@@ -1086,9 +1144,11 @@ class Engine:
         #: a caller states one — which only a test does, so the rules below can
         #: be read without writing into the environment of whoever runs pytest.
         self._base = dict(os.environ if base is None else base)
-        #: What this lane adds: `CLAUDE_CONFIG_DIR` on the Claude lane (§4.1) —
-        #: the engine's `claude agents --json` inherits the engine process's
-        #: environment, so the engine has to carry the variable too.
+        #: What this lane adds, composed by `engine_variables`: `CLAUDE_CONFIG_DIR`
+        #: on the Claude lane (§4.1) — the engine's `claude agents --json` inherits
+        #: the engine process's environment, so the engine has to carry the
+        #: variable too — and, on that lane alone, the empty `CODEX_HOME` that
+        #: keeps this engine out of the operator's shared app-server (§4.3, #355).
         self._extra = dict(extra or {})
         self._process: subprocess.Popen[bytes] | None = None
 

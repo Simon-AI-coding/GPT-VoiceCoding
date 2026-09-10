@@ -2132,12 +2132,22 @@ class BridgeCore:
         for every channel there is, the null one included. ADR 0021 §10 makes
         it part of the acceptance contract, beside the #48 inbound line: a
         Stop Notice is unbidden, so this line is the only way an outside
-        observer learns which provider ids it landed under, and the harness
-        reads the message by that id rather than waiting for a window. The
-        format is therefore fixed: `key=value`, ids comma-joined in sending
-        order, empty when nothing landed. An UNKNOWN receipt from a split send
-        still names the parts that did land — those are messages the user can
-        reply to.
+        observer learns which provider ids it landed under, and which Session
+        it was about. The format is therefore fixed: `key=value`, ids
+        comma-joined in sending order, empty when nothing landed. An UNKNOWN
+        receipt from a split send still names the parts that did land — those
+        are messages the user can reply to.
+
+        **`target=` is whoever this message is about**, rendered exactly as the
+        roster row and the `Session stopped:` line render it — `str` on the
+        Anchor's target, which is `agent:session_id[:pid]` for a Session, the
+        screen's own name for a menu screen that is nobody's, and the thread id
+        for an Assistant Conversation. A send with no Anchor names nobody and
+        writes the field empty. One engine bridges every Session on the machine,
+        so an observer reading this log has no other way to tell a message about
+        *its* Session from a message about someone else's — and reading the
+        newest send line as one's own is exactly how a Stop Notice for another
+        lane's Session came to be graded as this lane's turn (#355).
 
         `origin` is echoed from the inbound event when this is a reply, and
         empty for an unbidden push. `notice` is the structured brief the text
@@ -2172,9 +2182,10 @@ class BridgeCore:
             reply_to=reply_to,
         )
         _log.info(
-            "sent Companion Channel message request=%s outcome=%s message_ids=%s",
+            "sent Companion Channel message request=%s outcome=%s target=%s message_ids=%s",
             request_id,
             receipt.outcome,
+            "" if anchor is None else anchor.target,
             ",".join(receipt.message_ids),
         )
         if anchor is not None and not revises:

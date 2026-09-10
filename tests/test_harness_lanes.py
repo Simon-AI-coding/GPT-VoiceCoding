@@ -41,6 +41,7 @@ import pytest
 import support
 
 from gpt_voicecoding import config as engine_config
+from gpt_voicecoding.adapters.agent.codex import shared_daemon as codex_shared_daemon
 from gpt_voicecoding.installation import claude_hooks, codex_runtime
 from gpt_voicecoding.seams.identity import AgentKind
 
@@ -862,6 +863,103 @@ class TestTheLanesEngine:
             engine.start()
         assert str(engine.log_path) in str(refused.value)
         engine.stop()
+
+
+class TestTheEnginesOwnCodexHome:
+    """§4.3 — the Claude lane's engine sees no Codex thread on this machine (#355).
+
+    The Codex agent kind cannot be dropped on that lane: `call` is a required
+    seam, the only Call adapter rides the app-server that kind owns, and engine
+    assembly refuses without it. So the isolation is environmental — an empty
+    `CODEX_HOME` of the engine's own, in the engine's environment alone — and
+    what it has to produce is a derived control socket with nobody behind it.
+
+    Without it that engine joined the operator's shared app-server, saw the
+    *other* lane's thread, and sent a Stop Notice for the Codex lane's boot turn
+    to the Claude lane's chat 0.16 s before the Claude lane's own turn was typed
+    (run `20260910T191643Z`).
+    """
+
+    #: The Session's own variables, composed before the engine's (§4.1). Passed in
+    #: rather than invented here, because the engine carries them too.
+    SESSION = {claude_hooks.CONFIG_DIRECTORY_VARIABLE: "/the/lanes/claude-config"}
+
+    def _variables(self, tmp_path: Path, lane: str) -> dict[str, str]:
+        return support.derive_engine_variables(
+            self.SESSION,
+            engine_directory=tmp_path / f"engine-{lane}",
+            own_codex_home=journey.lane(lane).empty_codex_home,
+        )
+
+    def test_only_the_claude_lanes_engine_is_given_one(self) -> None:
+        """ADR 0022 derives the socket and the TUI's launch environment from one
+        `CODEX_HOME`, so the Codex lane cannot have its own (§4.1, #232)."""
+        assert journey.lane(CLAUDE_LANE).empty_codex_home
+        assert not journey.lane(CODEX_LANE).empty_codex_home
+
+    def test_the_claude_lanes_engine_carries_an_empty_one_under_the_run_directory(
+        self, tmp_path: Path
+    ) -> None:
+        variables = self._variables(tmp_path, CLAUDE_LANE)
+        home = Path(variables[codex_runtime.CODEX_HOME_VARIABLE])
+        assert home.is_relative_to(tmp_path)
+        assert home.is_dir()
+        assert list(home.iterdir()) == []
+
+    def test_the_codex_lanes_engine_carries_none_and_keeps_the_operators_own(
+        self, tmp_path: Path
+    ) -> None:
+        assert self._variables(tmp_path, CODEX_LANE) == self.SESSION
+
+    def test_the_socket_derived_from_it_has_nobody_behind_it(self, tmp_path: Path) -> None:
+        """The whole mechanism, read through the product's own lookup: the shared
+        daemon is found by a socket under `CODEX_HOME`, computed when it is
+        *called*, so an empty directory is an engine that joins nothing."""
+        home = Path(self._variables(tmp_path, CLAUDE_LANE)[codex_runtime.CODEX_HOME_VARIABLE])
+        found, why = codex_shared_daemon.locate(codex_runtime.control_socket(home))
+        assert found is None
+        assert str(home) in why
+
+    def test_the_hand_started_session_keeps_its_real_environment(self, tmp_path: Path) -> None:
+        """§4.3: the engine's alone. The Codex lane's TUI must join the operator's
+        real daemon or it is not a Session the product can list (#232), and the
+        Claude lane's Session has no business with a Codex home either."""
+        self._variables(tmp_path, CLAUDE_LANE)
+        session = hand_started.terminal_environment(
+            "/usr/bin",
+            base={"HOME": "/Users/simon", codex_runtime.CODEX_HOME_VARIABLE: "/Users/simon/.codex"},
+            extra=self.SESSION,
+        )
+        assert session[codex_runtime.CODEX_HOME_VARIABLE] == "/Users/simon/.codex"
+
+    def test_the_variable_reaches_the_engine_process(self, tmp_path: Path) -> None:
+        """The engine's own environment is what the shared-daemon lookup reads."""
+        variables = self._variables(tmp_path, CLAUDE_LANE)
+        engine = support.Engine(
+            config=_derived(tmp_path),
+            bundle=_fake_bundle(tmp_path),
+            journal=_journal(tmp_path),
+            token="111:a-real-looking-token",  # noqa: S106 - a fake, and it must not land
+            path_value="/opt/homebrew/bin:/usr/bin",
+            base={"HOME": "/Users/simon", codex_runtime.CODEX_HOME_VARIABLE: "/Users/simon/.codex"},
+            extra=variables,
+        )
+        assert (
+            engine.environment[codex_runtime.CODEX_HOME_VARIABLE]
+            == variables[codex_runtime.CODEX_HOME_VARIABLE]
+        )
+
+    def test_what_the_engine_was_given_is_written_down_beside_the_derived_config(
+        self, tmp_path: Path
+    ) -> None:
+        """§4.3: the variable is journalled. A run that changed an engine's
+        environment without saying so leaves a reader with nothing to read."""
+        variables = self._variables(tmp_path, CLAUDE_LANE)
+        written = json.loads(
+            (tmp_path / f"engine-{CLAUDE_LANE}" / support.VARIABLES_NAME).read_text()
+        )
+        assert written == variables
+        assert codex_runtime.CODEX_HOME_VARIABLE in written
 
 
 class TestTheSurface:

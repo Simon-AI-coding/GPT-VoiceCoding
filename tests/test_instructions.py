@@ -812,10 +812,12 @@ class TestTheVoiceHearsStockTextThenOverlay:
         """#299: the Voice speaks the engine's grade in the user's language.
 
         The old set spelled two Chinese receipt sentences, and the acceptance
-        walk graded delivery by them; now the walk reads the shape of the
-        statement (`tests/acceptance/live_call_step.py`), and the prompt carries
-        no sentence the Voice is to say verbatim in any language but its own
-        instructions'. No CJK in the set is the checkable form of that.
+        walk graded delivery by them. Grading what a model *said* is now an
+        anti-pattern the acceptance names and never rebuilds
+        (`docs/acceptance-design.md` §1), the Live Call is off the machine
+        entirely (§2), and the prompt carries no sentence the Voice is to say
+        verbatim in any language but its own instructions'. No CJK in the set is
+        the checkable form of that.
         """
         assert re.search(r"[\u3400-\u9fff]", instructions.voice.text) is None
 

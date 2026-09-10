@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
-"""The acceptance's one actor: a real person at a real Telegram keyboard.
+"""The Telegram **user**-account client (#351).
 
-`docs/acceptance-design.md` allows the run exactly one stand-in, and this is it.
-Everything else on the far side is real — the real bot, the real Bot API, the
-real `claude` and `codex`. The person is played because a **bot cannot message a
-bot**: the inbound half of the Companion Channel (`@<name>: words` arriving at
-`getUpdates`) can only be produced by a user account, so the harness drives one
-over MTProto with Telethon.
+**Responsibilities held here** (§9's `telegram_person.py`): one Telethon client
+for both lanes, reading a message **by the id the product issued**, replying to
+an id, the cross-process session lock of §5, and the one-time `login` a person
+runs.
 
-The same client is the run's **eyes on outbound**. What the bot sent is read back
-out of the chat by a real Telegram client rather than trusted from the Bot API's
-own `sendMessage` reply, because the reply proves the API accepted the call and
+The account is played because a **bot cannot message a bot**: the inbound half of
+the Companion Channel can only be produced by a user account, so the harness
+drives one over MTProto. The same client is the run's eyes on outbound — what the
+bot sent is read back out of the chat by a real client rather than trusted from
+the Bot API's own `sendMessage` reply, which proves the API accepted the call and
 not that the message reached the far side.
 
-Two boundaries this module keeps:
+Two rules this module exists to hold:
 
-* **Telethon lives here and nowhere else.** `tests/test_architecture.py` lists it
-  among the protocol libraries Bridge Core and the seams may not import, and the
-  `acceptance` extra installs it into the developer venv only, never the bundle.
-* **The peer is passed in, never guessed.** The harness resolves the bot from
-  `getMe` on the Bot API and hands the username down, so this file names no bot,
-  no chat and no account.
+* **`telethon` is imported here and nowhere else.** It is the `acceptance` extra,
+  it is a forbidden import for Bridge Core and the seams
+  (`tests/test_architecture.py`), and it must not reach the bundle. Imported
+  *inside* the functions that need it, so this module — and the suite that
+  collects it — loads on a machine that never installed the extra.
+* **Every chat read is by product-issued message id** (§9). The harness never
+  searches the chat and never matches a message by the Session's name: one engine
+  bridges every Session on the machine, so a search would grade a stranger.
+  Reading by id removes the search rather than filtering it.
 
-One account, and since #182 more than one peer: the two lanes run at the same
-time against **two bots**, and the same human account holds a chat with each.
-That is one `PersonConnection` — one session file backs one client — with a
-`TelegramPerson` per peer over it.
+**Two chat operations and no more** (this ticket's fifth criterion): `read` and
+`reply`. There is no search, no "latest", no matching by name — `peer` resolves a
+username to the entity the two take, which touches the account's contacts and not
+the chat.
 
 Run the one-time authorisation with:
 
@@ -37,30 +40,28 @@ and check it later with `… telegram_person.py status`.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import errno
 import fcntl
-import inspect
 import json
 import os
 import stat
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+import deadlines
 
-#: Where the account's credentials and its authorised session live. A *location*
-#: rather than a decision, so it has a default and an override — the same shape
-#: the engine's own `state_path` uses. It sits beside the run directories rather
-#: than among them: a run directory is named for a UTC timestamp, and this is not
-#: one of those.
+# --- where the account's credentials and its authorised session live ---------
+
+#: A *location* rather than a decision, so it has a default and an override — the
+#: same shape the engine's own `state_path` uses. Beside the run directories
+#: rather than among them: a run directory is named for a UTC timestamp, and this
+#: is not one of those.
 PERSON_DIRECTORY_VARIABLE = "GPTVOICECODING_ACCEPTANCE_PERSON_DIR"
 DEFAULT_PERSON_DIRECTORY = (
     Path.home() / "Library" / "Application Support" / "GPT-VoiceCoding" / "acceptance" / "person"
@@ -71,38 +72,15 @@ DEFAULT_PERSON_DIRECTORY = (
 SESSION_STEM = "person"
 CREDENTIALS_FILE = "credentials.json"
 
-#: The one-run-per-machine lock (#203), a sibling of the session rather than a
+#: The one-run-per-machine lock (§5), a sibling of the session rather than a
 #: suffix on it: SQLite keeps its own `-journal` and `-wal` beside the database,
 #: and a `person.session.lock` would read as one more of those.
 LOCK_FILE = f"{SESSION_STEM}.lock"
 
-#: What a refusal calls a holder whose record it could not read. Not "another
-#: acceptance run": an unreadable record is not evidence of what wrote it.
-UNKNOWN_HOLDER = "something on this machine"
-
-#: How the two holders name themselves in the lock file. A run and a one-shot
-#: `status` take the same lock, and only the writer knows which it is.
-ACCEPTANCE_RUN_HOLDER = "another acceptance run"
-STATUS_CHECK_HOLDER = "a `telegram_person.py status` check"
-
-#: The identity is written a few syscalls after the lock is taken, so a refuser
-#: that loses that race reads an empty file. It waits out that window rather than
-#: reporting "unknown" for a holder that is about to name itself. A second is
-#: orders of magnitude more than an `open`, a `write` and a `flush` on a local
-#: file — deliberately, since being generous here costs a run that is refusing
-#: anyway, and being tight costs the refusal its whole reason.
-HOLDER_RECORD_SECONDS = 1.0
-HOLDER_RECORD_POLL_SECONDS = 0.005
-
-#: `flock` says "somebody else has it" with `EWOULDBLOCK`, and `EACCES` is the
-#: same answer on the platforms that use it. Every other errno is a different
-#: problem and is raised as itself.
-CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
-
 #: `my.telegram.org` issues these to a Telegram account, once. They are needed at
 #: every connect and not only at login, so the login writes them down beside the
-#: session; the environment overrides the file, for a machine that would rather
-#: keep them somewhere else entirely.
+#: session; **the environment wins over the file** (§8), for a machine that would
+#: rather keep them somewhere else entirely.
 API_ID_VARIABLE = "GPTVOICECODING_ACCEPTANCE_TG_API_ID"
 API_HASH_VARIABLE = "GPTVOICECODING_ACCEPTANCE_TG_API_HASH"
 
@@ -111,65 +89,24 @@ API_HASH_VARIABLE = "GPTVOICECODING_ACCEPTANCE_TG_API_HASH"
 PRIVATE_DIRECTORY = stat.S_IRWXU
 PRIVATE_FILE = stat.S_IRUSR | stat.S_IWUSR
 
+#: What a refusal calls a holder whose record it could not read. Not "another
+#: acceptance run": an unreadable record is not evidence of what wrote it.
+UNKNOWN_HOLDER = "something on this machine"
 
-def _shut_down(client: TelegramClient, loop: asyncio.AbstractEventLoop) -> None:
-    """Disconnect a client whose loop this code owns, then close the loop.
+#: How the two holders name themselves in the lock file. A run and a one-shot
+#: `status` take the same lock, and only the writer knows which it is (§8).
+ACCEPTANCE_RUN_HOLDER = "another acceptance run"
+STATUS_CHECK_HOLDER = "a `telegram_person.py status` check"
 
-    `TelegramClient.disconnect` is a **dual-form** API: with the loop running it
-    returns an awaitable, and with the loop stopped it runs the loop itself and
-    returns `None`. Every call here is from outside the loop, so it takes the
-    second path — and wrapping `None` in `run_until_complete` is a `TypeError`
-    raised out of a `finally`, which is how a *successful* login came to end in a
-    traceback with its session file left at 0644.
-    """
-    closing = client.disconnect()
-    if inspect.isawaitable(closing):
-        loop.run_until_complete(closing)
-    if loop.is_closed():
-        return
-    # `disconnect` *requests* cancellation of Telethon's six background loops; a
-    # loop closed in the same breath never gives them the turn they need to
-    # finish, and asyncio prints "Task was destroyed but it is pending!" once per
-    # task. Harmless, and six lines of noise on every acceptance run — so the
-    # pending tasks are given that turn here.
-    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-    if pending:
-        for task in pending:
-            task.cancel()
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-    loop.run_until_complete(loop.shutdown_asyncgens())
-    loop.close()
+#: `flock` says "somebody else has it" with `EWOULDBLOCK`, and `EACCES` is the
+#: same answer on the platforms that use it. Every other errno is a different
+#: problem and is raised as itself.
+CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
 
-class PersonError(RuntimeError):
-    """The person cannot act — no credentials, no session, or no such peer."""
-
-
-@dataclass(frozen=True)
-class PersonMessage:
-    """One message in the chat, as a real Telegram client sees it."""
-
-    id: int
-    text: str
-    outgoing: bool
-    date: datetime
-
-    @property
-    def from_bot(self) -> bool:
-        """Sent by the bot rather than typed by the account the harness drives."""
-        return not self.outgoing
-
-    def as_journal_fields(self) -> dict[str, object]:
-        return {
-            "message_id": self.id,
-            "direction": "sent" if self.outgoing else "received",
-            "text": self.text,
-            "date": self.date.isoformat(),
-        }
-
-
-def person_directory() -> Path:
-    override = os.environ.get(PERSON_DIRECTORY_VARIABLE)
+def person_directory(environ: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if environ is None else environ
+    override = values.get(PERSON_DIRECTORY_VARIABLE)
     return Path(override).expanduser() if override else DEFAULT_PERSON_DIRECTORY
 
 
@@ -184,14 +121,20 @@ def credentials_path(directory: Path | None = None) -> Path:
 def session_lock_path(directory: Path | None = None) -> Path:
     """The one-run-per-machine lock, beside the session it guards.
 
-    Beside it rather than in a directory of its own so that
+    Beside it rather than in a directory of its own, so
     `GPTVOICECODING_ACCEPTANCE_PERSON_DIR` moves the lock and the session
     together — a lock that stayed behind would refuse a run that was not sharing
     anything, which is the false refusal mirroring the false verdict preflight
-    exists to prevent. Its own name rather than the session's with a suffix, so
-    it is never read as the SQLite file or as one of SQLite's own sidecars.
+    exists to prevent.
     """
     return (directory or person_directory()) / LOCK_FILE
+
+
+class PersonError(RuntimeError):
+    """The person cannot act — no credentials, no session, or no such peer."""
+
+
+# --- the cross-process session lock (§5) -------------------------------------
 
 
 @dataclass(frozen=True)
@@ -202,8 +145,8 @@ class LockHolder:
     record rather than letting the reader assume: `status` takes the same lock
     for the length of one question and has no run directory at all, so a refusal
     that called every holder "another acceptance run" would name a run that does
-    not exist. `docs/acceptance-design.md` § Preflight refuses rather than runs —
-    a refusal never assumes.
+    not exist. §5 requires the refusal to name the holder's **pid and run
+    directory**, and a refusal never assumes.
     """
 
     pid: int | None
@@ -226,32 +169,22 @@ class SessionInUse(PersonError):
         self.holder = holder
 
 
-def read_lock_holder(directory: Path | None = None) -> LockHolder:
-    """Who the lock file says is holding it — or `unknown`, never a guess.
+def _is_alive(pid: int) -> bool:
+    """Signal 0: asks the kernel about the process without touching it.
 
-    **The record is written after the lock is taken**, because the lock belongs to
-    the file and writing an identity before holding it would clobber the record of
-    whoever currently does. Two consequences, and this waits both of them out
-    rather than quoting something it cannot stand behind:
-
-    * a holder that has the lock but has not yet written leaves an empty file;
-    * a holder that has *just* taken the lock leaves the previous holder's record
-      in place for the syscall between `flock` and the truncate.
-
-    Both windows are ended by the same rule: a record naming a process that is no
-    longer alive is a ghost, not a holder, and is waited out like an empty one.
-    The residual is a run killed outright whose pid the kernel then handed to some
-    unrelated process — a pid record cannot tell that apart from the real holder,
-    and no reading of this file can.
+    `PermissionError` is *alive* — a process this user may not signal is still a
+    process — and **only `ProcessLookupError` means gone**, which is the whole of
+    "a dead holder is a ghost, not a holder" (§5).
     """
-    deadline = time.monotonic() + HOLDER_RECORD_SECONDS
-    while True:
-        holder = _recorded_holder(directory)
-        if holder is not None:
-            return holder
-        if time.monotonic() >= deadline:
-            return LockHolder(None, None, None)
-        time.sleep(HOLDER_RECORD_POLL_SECONDS)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _recorded_holder(directory: Path | None) -> LockHolder | None:
@@ -272,45 +205,51 @@ def _recorded_holder(directory: Path | None) -> LockHolder | None:
     )
 
 
-def _is_alive(pid: int) -> bool:
-    """Signal 0: asks the kernel about the process without touching it.
+def read_lock_holder(
+    directory: Path | None = None,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> LockHolder:
+    """Who the lock file says is holding it — or `unknown`, never a guess.
 
-    `PermissionError` is *alive* — a process this user may not signal is still a
-    process — and only `ProcessLookupError` is the answer that means gone.
+    **The record is written after the lock is taken**, because the lock belongs to
+    the file and writing an identity before holding it would clobber the record of
+    whoever currently does. Two consequences, both waited out rather than quoted:
+    a holder that has the lock but has not written yet leaves an empty file, and a
+    holder that has *just* taken it leaves the previous holder's record in place
+    for the syscall between `flock` and the truncate. Both windows end the same
+    way — a record naming a process that is no longer alive is a ghost.
     """
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+        return deadlines.wait(
+            "HOLDER_RECORD_SECONDS",
+            lambda: _recorded_holder(directory),
+            what="the holder's identity record",
+            now=now,
+            sleep=sleep,
+        )
+    except deadlines.DeadlineExpired:
+        # The one wait in this harness whose expiry is an **answer**: nobody
+        # named themselves, so nobody is named. A refusal never assumes.
+        return LockHolder(None, None, None)
 
 
 class PersonSessionLock:
     """One acceptance run per machine, enforced across processes rather than by a person.
 
     Two runs share what no `--lane` separates: this session file, which is SQLite
-    backing exactly one client, and `support.TrustGate`'s writes to the user's own
-    Claude state file and `~/.codex/config.toml`, guarded by a *thread* lock that
-    means nothing to a second pytest process. So the run takes this lock before it
-    opens the session, and holds it until the session-scoped fixtures tear down.
+    backing exactly one client, and the trust row a run writes into the operator's
+    own `config.toml`, guarded by a *thread* lock that means nothing to a second
+    pytest process. So the run takes this lock before it opens the session, and
+    holds it until the session-scoped fixtures tear down.
 
     **Advisory, non-blocking, and released by the kernel.** `flock` is held by the
-    open file description, so a run killed with `SIGKILL` leaves no stale lock to
-    clean up by hand — which is the whole reason the holder is a lock file rather
-    than a pid file somebody has to sweep. The holder writes its pid and run
-    directory into the file *after* acquiring, so the refusal can name what is in
-    the way instead of saying only that something is.
-
-    **Legacy (ADR 0010), adapted:** `legacy@1d32845:bridge/logfile.py:207-229`
-    (`_rotate`; the `fcntl.flock(lock.fileno(), fcntl.LOCK_EX)` at :222) is the
-    same pattern — an advisory lock on a sibling file beside the thing it guards.
-    Adapted rather than ported: blocking `LOCK_EX` serialising one rotation there,
-    non-blocking `LOCK_EX | LOCK_NB` held for a whole run here, with the holder's
-    identity written into the file so the second run's refusal can quote it.
+    **open file description**, so a run killed with `SIGKILL` leaves no stale lock
+    to clean up by hand — which is the whole reason the holder is a lock file
+    rather than a pid file somebody has to sweep. The holder writes its pid and
+    run directory into the file *after* acquiring, so the refusal can name what is
+    in the way instead of saying only that something is.
     """
 
     def __init__(
@@ -329,8 +268,7 @@ class PersonSessionLock:
         self._handle: IO[str] | None = None
 
     def __enter__(self) -> PersonSessionLock:
-        self.acquire()
-        return self
+        return self.acquire()
 
     def __exit__(self, *_: object) -> None:
         self.release()
@@ -339,7 +277,11 @@ class PersonSessionLock:
     def path(self) -> Path:
         return session_lock_path(self._directory)
 
-    def acquire(self) -> None:
+    @property
+    def held(self) -> bool:
+        return self._handle is not None
+
+    def acquire(self) -> PersonSessionLock:
         """Take the lock, or raise `SessionInUse` naming who has it. Never waits."""
         self._directory.mkdir(parents=True, exist_ok=True)
         # `a+` rather than `w`: opening for write truncates the holder's record
@@ -376,6 +318,7 @@ class PersonSessionLock:
             handle.close()
             raise
         self._handle = handle
+        return self
 
     def release(self) -> None:
         """Clear the record, then close the handle — closing is what releases it.
@@ -399,33 +342,39 @@ class PersonSessionLock:
         self._handle = None
 
 
+# --- the credentials (§8) ----------------------------------------------------
+
+
 @dataclass(frozen=True)
 class ApiCredentials:
+    """The pair `my.telegram.org` issues once, per account. Journalled nowhere."""
+
     api_id: int
     api_hash: str
 
 
-def load_credentials(directory: Path | None = None) -> ApiCredentials:
-    """The account's `api_id`/`api_hash`: environment first, then the login's file.
+def load_credentials(
+    directory: Path | None = None, environ: Mapping[str, str] | None = None
+) -> ApiCredentials:
+    """The account's `api_id`/`api_hash`: **environment first**, then the login's file.
 
-    **Nothing here is hard-coded, and the environment always wins.**
-    `GPTVOICECODING_ACCEPTANCE_TG_API_ID` and `…_TG_API_HASH` are consulted
-    before the disk is touched, and `GPTVOICECODING_ACCEPTANCE_PERSON_DIR` moves
-    the directory the fallback lives in.
+    Nothing here is hard-coded and the environment always wins (§8). The fallback
+    file exists because Telethon needs the pair on *every* client construction
+    while the pair is issued once, by a human — so the alternative is not "no
+    file" but "two variables exported before every run, forever". 0600, in the
+    user's own application-support directory, written only by `login`, and never
+    in the repository or the journal.
 
-    The fallback file exists because Telethon needs the pair on **every**
-    `TelegramClient` construction while the pair is issued once, by a human, at
-    `my.telegram.org` — so the alternative is not "no file" but "Simon exports
-    two variables before every run, forever". `docs/acceptance-design.md`
-    § Credentials chose the file for that reason: 0600, in the user's own
-    application-support directory, written only by the explicit `login`
-    subcommand, and never in the repository or the journal.
+    A partial environment is **not** half an answer: one variable set and the
+    other missing falls through to the file rather than pairing a stated `api_id`
+    with a stored `api_hash`, which is a combination nobody chose.
     """
     directory = directory or person_directory()
-    from_environment = os.environ.get(API_ID_VARIABLE), os.environ.get(API_HASH_VARIABLE)
-    if all(from_environment):
-        api_id, api_hash = from_environment
-        return ApiCredentials(int(api_id), str(api_hash))
+    values = os.environ if environ is None else environ
+    stated = (values.get(API_ID_VARIABLE), values.get(API_HASH_VARIABLE))
+    if all(stated):
+        api_id, api_hash = stated
+        return ApiCredentials(int(str(api_id)), str(api_hash))
 
     path = credentials_path(directory)
     if not path.exists():
@@ -448,33 +397,76 @@ def store_credentials(credentials: ApiCredentials, directory: Path | None = None
     return path
 
 
-Journal = Callable[..., None]
+# --- the client --------------------------------------------------------------
 
 
-def _no_journal(event: str, **fields: object) -> None:  # noqa: ARG001
-    """The default sink: a person driven outside a run journals nowhere."""
+@dataclass(frozen=True)
+class PersonMessage:
+    """One message in the chat, as a real Telegram client sees it."""
+
+    id: int
+    text: str
+    outgoing: bool
+    date: datetime | None = None
+
+    def as_journal_fields(self) -> dict[str, object]:
+        return {
+            "message_id": self.id,
+            "direction": "sent" if self.outgoing else "received",
+            "text": self.text,
+            "date": None if self.date is None else self.date.isoformat(),
+        }
+
+
+def as_person_message(message: Any) -> PersonMessage:
+    return PersonMessage(
+        id=int(message.id),
+        text=str(message.message or ""),
+        outgoing=bool(message.out),
+        date=getattr(message, "date", None),
+    )
+
+
+def _no_journal(event: str, **fields: object) -> str:  # noqa: ARG001
+    """The default sink: a client driven outside a run journals nowhere."""
+    return ""
 
 
 class PersonConnection:
-    """One authorised Telethon client, its event loop, and the lock they share.
+    """One SQLite session, one client, two peers (§8) — and two chat operations.
 
-    **One session file backs one client.** That is Telethon's own rule, and it is
+    **One session file backs one client.** That is Telethon's own rule and it is
     not advisory: the session is an SQLite file holding a bearer auth key, and two
     clients opened on it race each other's writes and present the same key on two
-    connections. Two lanes now walk at once (#182), each talking to its **own
-    bot** — so the harness needs two peers, not two accounts, and this is the
-    object that keeps that distinction: one connection, many `TelegramPerson`.
+    connections. The two lanes talk to **two bots**, so the harness needs two
+    peers and not two accounts — which is why the peer is an argument of every
+    operation rather than a property of the client.
 
     The harness is a pytest suite and pytest is synchronous, so the event loop is
-    owned here — created, handed to Telethon, and closed with the client — rather
-    than left to Telethon's implicit one. One object, one loop, one lifetime.
-    Every call goes through `run`, under a lock, because `run_until_complete` is
-    not re-entrant and the two lanes call it from two threads.
+    owned here — created, handed to Telethon, and closed with the client. Every
+    call goes through `run`, under a lock, because `run_until_complete` is not
+    re-entrant and the two lanes call it from two threads.
+
+    The chat surface is **`read` and `reply`, and nothing else**. No search, no
+    "latest", no matching by name: every id this takes was issued by the product
+    and read out of the engine's own log, which is what makes a green row a row
+    about this run's own Session rather than about a stranger's (§9, #109).
     """
 
-    def __init__(self, *, directory: Path | None = None) -> None:
-        self._directory = directory or person_directory()
-        self._credentials = load_credentials(self._directory)
+    def __init__(
+        self,
+        *,
+        directory: Path | None = None,
+        journal: Any = _no_journal,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        import asyncio
+
+        from telethon import TelegramClient
+
+        self._directory = directory or person_directory(environ)
+        self._credentials = load_credentials(self._directory, environ)
+        self._journal = journal
         self._loop = asyncio.new_event_loop()
         self._client = TelegramClient(
             str(session_path(self._directory).with_suffix("")),
@@ -483,7 +475,7 @@ class PersonConnection:
             loop=self._loop,
         )
         self._lock = threading.Lock()
-        self.account: object | None = None
+        self.account: Any | None = None
 
     def __enter__(self) -> PersonConnection:
         self.open()
@@ -492,7 +484,9 @@ class PersonConnection:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def open(self) -> None:
+    # -- lifetime ------------------------------------------------------------
+
+    def open(self) -> PersonConnection:
         """Connect, and refuse if this session is not an authorised account."""
         self.run(self._client.connect())
         if not self.run(self._client.is_user_authorized()):
@@ -501,148 +495,99 @@ class PersonConnection:
                 f"authorised. Run `python tests/acceptance/telegram_person.py login` once."
             )
         self.account = self.run(self._client.get_me())
+        # The account is who, not what it can prove: no `api_id`, no `api_hash`
+        # and no session path reaches this line (§8).
+        self._journal(
+            "telegram.person.opened",
+            account_id=getattr(self.account, "id", None),
+            account_username=getattr(self.account, "username", None),
+        )
+        return self
 
     def close(self) -> None:
-        _shut_down(self._client, self._loop)
+        shut_down(self._client, self._loop)
 
-    def run(self, coroutine):  # noqa: ANN001, ANN202 - Telethon's own return types
+    def run(self, coroutine: Any) -> Any:
         with self._lock:
             return self._loop.run_until_complete(coroutine)
 
-    @property
-    def client(self) -> TelegramClient:
-        return self._client
+    # -- the peers -----------------------------------------------------------
 
+    def peer(self, username: str) -> Any:
+        """The entity a bot's username stands for. Not a chat operation.
 
-class TelegramPerson:
-    """A synchronous facade over one Telethon client, scoped to one peer.
-
-    The connection is passed in when there is one to share — two lanes, two bots,
-    one account (`PersonConnection`). A person given none opens its own and closes
-    it again, which is what the single-peer callers and this module's own CLI want.
-    """
-
-    def __init__(
-        self,
-        peer: str,
-        *,
-        journal: Journal = _no_journal,
-        directory: Path | None = None,
-        connection: PersonConnection | None = None,
-    ) -> None:
-        self._peer_name = peer
-        self._journal = journal
-        self._directory = directory or person_directory()
-        self._owns_connection = connection is None
-        self._connection = connection or PersonConnection(directory=self._directory)
-        self._peer: object | None = None
-
-    # --- lifetime ---------------------------------------------------------
-
-    def __enter__(self) -> TelegramPerson:
-        self.open()
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self.close()
-
-    def open(self) -> None:
-        """Connect if this person owns the connection, then resolve the peer."""
-        if self._owns_connection:
-            self._connection.open()
-        self._peer = self._run(self._connection.client.get_entity(self._peer_name))
-        me = self._connection.account or self._run(self._connection.client.get_me())
-        self._journal(
-            "telegram.person.opened",
-            account_id=me.id,
-            account_username=me.username,
-            peer=self._peer_name,
-        )
-
-    def close(self) -> None:
-        if self._owns_connection:
-            self._connection.close()
-        self._journal("telegram.person.closed", peer=self._peer_name)
-
-    # --- reading and writing the chat -------------------------------------
-
-    def latest_message_id(self) -> int:
-        """The chat's high-water mark, or 0 for an empty chat.
-
-        Every read the harness performs is *after* a mark taken before the action
-        that should produce the message. Messages carry no run marker — the
-        inbound grammar has no room for one — so a mark plus the run's time window
-        is what separates this run's traffic from the chat's history.
+        The username is handed down from the Bot API's own `getMe`, so no bot is
+        named anywhere in this suite. Resolving it touches the account's contacts
+        and never the chat — which is why "two chat operations" is `read` and
+        `reply` and this is not one of them.
         """
-        latest = list(self._messages(limit=1))
-        mark = latest[0].id if latest else 0
-        self._journal("telegram.person.mark", message_id=mark)
-        return mark
+        return self.run(self._client.get_entity(username))
 
-    def messages_after(self, message_id: int) -> list[PersonMessage]:
-        """Every message in the chat newer than `message_id`, oldest first."""
-        return sorted(self._messages(min_id=message_id), key=lambda message: message.id)
+    # -- the two chat operations ---------------------------------------------
 
-    def await_message(
-        self,
-        after: int,
-        *,
-        deadline_seconds: float,
-        matching: Callable[[PersonMessage], bool] | None = None,
-        poll_seconds: float = 1.0,
-    ) -> PersonMessage | None:
-        """Wait for one message the bot sent after `after`; None if the deadline passes.
+    def read(self, peer: Any, message_id: int) -> PersonMessage | None:
+        """One message, **by the id the product issued** (§2 item 2, §9).
 
-        `None` is a legitimate answer, not an error: step 7 asserts the *absence*
-        of a push over a derived window, and a raise there would be a fail dressed
-        as a crash.
+        A single `get_messages(peer, ids=…)`. `None` is a real answer: an id the
+        chat does not hold is a message that never arrived, which is the fact the
+        row rests on — not an error to raise past it.
         """
-        accept = matching or (lambda message: message.from_bot)
-        expiry = time.monotonic() + deadline_seconds
-        while True:
-            for message in self.messages_after(after):
-                if accept(message):
-                    self._journal("telegram.person.read", **message.as_journal_fields())
-                    return message
-            if time.monotonic() >= expiry:
-                self._journal(
-                    "telegram.person.absent", after=after, waited_seconds=deadline_seconds
-                )
-                return None
-            time.sleep(min(poll_seconds, max(0.0, expiry - time.monotonic())))
-
-    def send(self, text: str) -> PersonMessage:
-        """Type one line into the chat, as the person would."""
-        sent = self._run(self._connection.client.send_message(self._peer, text))
-        message = _as_person_message(sent)
-        self._journal("telegram.person.sent", **message.as_journal_fields())
+        found = self.run(self._client.get_messages(peer, ids=int(message_id)))
+        if found is None:
+            self._journal("telegram.person.absent", message_id=int(message_id))
+            return None
+        message = as_person_message(found)
+        self._journal("telegram.person.read", **message.as_journal_fields())
         return message
 
-    # --- plumbing ---------------------------------------------------------
+    def reply(self, peer: Any, reply_to_message_id: int, text: str) -> PersonMessage:
+        """A reply **anchored to an id** (§2 item 5, ADR 0021 §2–§3).
 
-    def _messages(self, **query: object) -> Iterator[PersonMessage]:
-        raw = self._run(self._collect(**query))
-        return (_as_person_message(message) for message in raw)
-
-    async def _collect(self, **query: object) -> list[object]:
-        return [
-            message async for message in self._connection.client.iter_messages(self._peer, **query)
-        ]
-
-    def _run(self, coroutine):  # noqa: ANN001, ANN202 - Telethon's own return types
-        return self._connection.run(coroutine)
-
-
-def _as_person_message(message: object) -> PersonMessage:
-    return PersonMessage(
-        id=int(message.id),
-        text=str(message.message or ""),
-        outgoing=bool(message.out),
-        date=message.date,
-    )
+        The anchor is set explicitly rather than left to the product's "reply to
+        nothing → newest Anchor" fallback, because the fallback is a second path
+        and the item is about the primary one.
+        """
+        sent = self.run(self._client.send_message(peer, text, reply_to=int(reply_to_message_id)))
+        message = as_person_message(sent)
+        self._journal(
+            "telegram.person.replied",
+            reply_to_message_id=int(reply_to_message_id),
+            **message.as_journal_fields(),
+        )
+        return message
 
 
-# --- the one-time login ---------------------------------------------------
+def shut_down(client: Any, loop: Any) -> None:
+    """Disconnect a client whose loop this code owns, then close the loop.
+
+    `TelegramClient.disconnect` is a **dual-form** API: with the loop running it
+    returns an awaitable, and with the loop stopped it runs the loop itself and
+    returns `None`. Every call here is from outside the loop, so it takes the
+    second path — and wrapping `None` in `run_until_complete` is a `TypeError`
+    raised out of a `finally`, which is how a *successful* login came to end in a
+    traceback with its session file left at 0644.
+    """
+    import asyncio
+    import inspect
+
+    closing = client.disconnect()
+    if inspect.isawaitable(closing):
+        loop.run_until_complete(closing)
+    if loop.is_closed():
+        return
+    # `disconnect` *requests* cancellation of Telethon's background loops; a loop
+    # closed in the same breath never gives them the turn they need to finish,
+    # and asyncio prints "Task was destroyed but it is pending!" once per task.
+    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    if pending:
+        for task in pending:
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    loop.run_until_complete(loop.shutdown_asyncgens())
+    loop.close()
+
+
+# --- the one-time login (§8) -------------------------------------------------
 
 
 def _prompt(question: str) -> str:
@@ -652,8 +597,30 @@ def _prompt(question: str) -> str:
     return answer
 
 
+def _client_on(credentials: ApiCredentials, session: Path) -> tuple[Any, Any]:
+    """A client on a session **nobody has signed into yet** — `login`'s alone.
+
+    `PersonConnection` refuses an unauthorised session, which is right for a run
+    and for `status` and is exactly what `login` is there to change. So this is
+    the one place that builds a client outside it, and it has one caller.
+    """
+    import asyncio
+
+    from telethon import TelegramClient
+
+    loop = asyncio.new_event_loop()
+    return (
+        TelegramClient(
+            str(session.with_suffix("")), credentials.api_id, credentials.api_hash, loop=loop
+        ),
+        loop,
+    )
+
+
 def login(directory: Path | None = None) -> int:
-    """Authorise the account once, interactively. Ticket #57 is this function's run."""
+    """Authorise the account once, interactively — the one human step of §8."""
+    from telethon.errors import SessionPasswordNeededError
+
     directory = directory or person_directory()
     try:
         credentials = load_credentials(directory)
@@ -664,18 +631,11 @@ def login(directory: Path | None = None) -> int:
             "→ API development tools. They are issued once, per account."
         )
         credentials = ApiCredentials(int(_prompt("api_id: ")), _prompt("api_hash: "))
-        stored = store_credentials(credentials, directory)
-        print(f"Stored 0600 at {stored}.")
+        print(f"Stored 0600 at {store_credentials(credentials, directory)}.")
 
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(PRIVATE_DIRECTORY)
-    loop = asyncio.new_event_loop()
-    client = TelegramClient(
-        str(session_path(directory).with_suffix("")),
-        credentials.api_id,
-        credentials.api_hash,
-        loop=loop,
-    )
+    client, loop = _client_on(credentials, session_path(directory))
     try:
         loop.run_until_complete(client.connect())
         if loop.run_until_complete(client.is_user_authorized()):
@@ -688,8 +648,9 @@ def login(directory: Path | None = None) -> int:
         try:
             loop.run_until_complete(client.sign_in(phone, code))
         except SessionPasswordNeededError:
-            password = _prompt("two-step verification password: ")
-            loop.run_until_complete(client.sign_in(password=password))
+            loop.run_until_complete(
+                client.sign_in(password=_prompt("two-step verification password: "))
+            )
         me = loop.run_until_complete(client.get_me())
         print(f"Authorised as {me.first_name} (@{me.username}, id {me.id}).")
     finally:
@@ -700,7 +661,7 @@ def login(directory: Path | None = None) -> int:
         if written.exists():
             written.chmod(PRIVATE_FILE)
             print(f"Session written 0600 at {written}.")
-        _shut_down(client, loop)
+        shut_down(client, loop)
     return 0
 
 
@@ -712,7 +673,10 @@ def status(directory: Path | None = None) -> int:
         print(f"NOT AUTHORISED: no session file at {session}")
         return 1
     try:
-        credentials = load_credentials(directory)
+        # Asked before the lock is taken, and its answer thrown away: a machine
+        # with no credentials has nothing to hold the session for, and the
+        # refusal reads better than "IN USE" would.
+        load_credentials(directory)
     except PersonError as refusal:
         print(f"NOT AUTHORISED: {refusal}")
         return 1
@@ -723,28 +687,31 @@ def status(directory: Path | None = None) -> int:
     # records itself as a `status` check rather than as a run that never existed.
     try:
         with PersonSessionLock(directory=directory, held_by=STATUS_CHECK_HOLDER):
-            return _report_authorisation(session, credentials)
+            return _report_authorisation(directory, session)
     except SessionInUse as in_use:
         print(f"IN USE: {in_use}")
         return 1
 
 
-def _report_authorisation(session: Path, credentials: ApiCredentials) -> int:
-    """The account question itself, once the lock says this process may ask it."""
-    loop = asyncio.new_event_loop()
-    client = TelegramClient(
-        str(session.with_suffix("")), credentials.api_id, credentials.api_hash, loop=loop
-    )
+def _report_authorisation(directory: Path, session: Path) -> int:
+    """The account question itself, asked the way a **run** asks it.
+
+    Through `PersonConnection` rather than a second client of its own, so
+    `status` answering and a run starting cannot come to disagree: connect,
+    authorised, `get_me` is one sequence and it lives in one place.
+    """
+    connection = PersonConnection(directory=directory)
     try:
-        loop.run_until_complete(client.connect())
-        if not loop.run_until_complete(client.is_user_authorized()):
-            print(f"NOT AUTHORISED: the session at {session} has been revoked or never signed in")
-            return 1
-        me = loop.run_until_complete(client.get_me())
-        print(f"AUTHORISED as {me.first_name} (@{me.username}, id {me.id}); session {session}")
-        return 0
+        connection.open()
+    except PersonError as unauthorised:
+        print(f"NOT AUTHORISED: {unauthorised}")
+        return 1
     finally:
-        _shut_down(client, loop)
+        connection.close()
+    me = connection.account
+    assert me is not None  # `open` set it, or it raised
+    print(f"AUTHORISED as {me.first_name} (@{me.username}, id {me.id}); session {session}")
+    return 0
 
 
 def main(argv: Iterable[str] | None = None) -> int:

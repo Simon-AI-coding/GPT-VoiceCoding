@@ -66,16 +66,19 @@ testpaths = ["tests"]
 addopts = "-q -m \"not acceptance\""
 markers = [
   "acceptance: the real-environment run (docs/acceptance-design.md); needs credentials and costs money",
+  "covers: which acceptance items (docs/acceptance-design.md §2) a test grades, so `--step` can deselect it",
 ]
 # Test modules import the shared fakes bare (`from fakes import ...`); this pins that path.
 # The repository root is here for `app_bundle`, the build pipeline, which lives
 # outside `src/` on purpose: the product does not ship its own build system.
 # `tests/acceptance` is here so the *fast* suite can import the harness's own
-# pure logic. The acceptance run itself never reaches CI — it needs this machine,
-# these credentials and that bot — but a rule the harness applies to the chat is
+# pure logic — the item names, the selection, the deadlines and the verdict. The
+# acceptance run itself never reaches CI — it needs this machine, these
+# credentials and that bot — but a rule the harness applies to the chat is
 # ordinary code, and #109 is what a rule with no test at CI speed costs. The
-# import is safe from here: `journey` reaches only `support` and `hand_started`,
-# and telethon lives behind `telegram_person`, which neither imports.
+# import is safe from here: `items` and `deadlines` are leaves, `support` and
+# `journey` reach only those, and telethon is imported inside the functions of
+# `telegram_person`, which nothing else imports.
 pythonpath = ["tests", "tests/acceptance", "."]
 
 [tool.ruff]

@@ -67,7 +67,7 @@ The Live Call's speaking half — the model the user hears and talks to. It has 
 _Avoid_: voice model, realtime model, assistant (unqualified), voice thread
 
 **Call Agent**:
-The Live Call's acting half — the coding model behind the Voice and the only one on the call with tools. It runs the control-plane verbs the Voice hands it. Not a Delegated Turn, which is work the system hands out on purpose — though its model and effort are the one setting the Delegated Turn also uses (#344).
+The Live Call's acting half — the coding model behind the Voice and the only one on the call with tools. It runs the control-plane verbs the Voice hands it. Not a Delegated Turn, which is work the system hands out on purpose — though its model and effort are the one setting the Delegated Turn also uses (#344). One Call Agent serves a run of calls: the user's own dial always brings a new one, a call the system places continues the current one or brings one when none exists, a restart of the engine forgets it, and the user may ask for a new one at any time (#347).
 _Avoid_: backing Codex model, the agent behind the call, delegate
 
 **Stock Text**:

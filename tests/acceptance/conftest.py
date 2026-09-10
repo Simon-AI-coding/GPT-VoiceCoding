@@ -22,8 +22,8 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ import journey
 import preflight as preflight_module
 import pytest
 import support
+import telegram_person
 from items import Item
 
 from gpt_voicecoding.installation import claude_hooks
@@ -188,6 +189,7 @@ def verdict(
     selection: items.Selection,
     selected_lanes: tuple[str, ...],
     commit: str,
+    machine: preflight_module.Machine,
 ) -> Iterator[support.Verdict]:
     """The one artifact a reader needs — written however the run ends (§7).
 
@@ -206,7 +208,61 @@ def verdict(
         yield written
     finally:
         written.seconds["run"] = time.monotonic() - started
+        _scan_for_credentials(written, run_directory, journal, machine)
         written.write(run_directory / support.VERDICT_NAME)
+
+
+def _scan_for_credentials(
+    verdict: support.Verdict,
+    run_directory: Path,
+    journal: support.Journal,
+    machine: preflight_module.Machine,
+) -> None:
+    """§8's rule, read over the tree this run just wrote (the deferred item of #351).
+
+    A rule about what is **absent** is only as good as the reading that looks for
+    it, and until now nothing read the derived configs, the engine logs and the
+    journal a real run leaves behind. Here rather than in a test, because it is a
+    teardown of the run and not a claim about one item: the verdict carries the
+    result (`Verdict.scanned`), and a run that wrote a token into an artifact
+    does not report PASS.
+
+    A scan that could not be **assembled** — no token variable, no account
+    credentials — is journalled and leaves the verdict unscanned rather than
+    clean: a run refused before it had either is not evidence of anything, and
+    saying so is the honest answer.
+    """
+    try:
+        secrets = support.secrets_of(
+            machine.environ,
+            token_variables=[machine.token_variable(lane) for lane in machine.lanes],
+            api_hash=_api_hash(machine),
+        )
+    except Exception as unassembled:  # noqa: BLE001 - every way it fails is one line
+        journal("credentials.unscanned", why=repr(unassembled))
+        return
+    if not secrets:
+        # **Nothing to look for is not a clean tree.** A run refused at §5's
+        # `bot token variable` check has empty variables rather than missing
+        # ones, so the assembling above succeeds and returns nothing — and a
+        # scan for zero values would report a clean scan it never performed.
+        journal("credentials.unscanned", why="this run was handed no credential values to scan for")
+        return
+    found = support.scan_for_credentials(run_directory, secrets)
+    verdict.scanned(
+        found,
+        # The **artifacts**, never the values: a scan that printed what it found
+        # would be the one artifact carrying every credential at once.
+        journal("credentials.scanned", artifacts=list(found), secrets=len(secrets)),
+    )
+
+
+def _api_hash(machine: preflight_module.Machine) -> str | None:
+    """The user account's `api_hash`, when this machine has one to look for."""
+    try:
+        return telegram_person.load_credentials(environ=machine.environ).api_hash
+    except telegram_person.PersonError:
+        return None
 
 
 @pytest.fixture(scope="session")
@@ -223,7 +279,7 @@ def preflight(
     journal: support.Journal,
     verdict: support.Verdict,
     run_directory: Path,
-) -> Iterator[str]:
+) -> Iterator[preflight_module.Preflight]:
     """§5's refusals, every one a read and never a turn.
 
     Any failure is REFUSED: the run exits non-zero, writes a valid `verdict.json`
@@ -235,11 +291,16 @@ def preflight(
     is not importable, and every refusal below is driven by a fast test
     (`tests/test_harness_preflight.py`).
     """
+    checks = preflight_module.Preflight(machine, journal)
     try:
-        with preflight_module.Preflight(machine, journal) as passed:
+        with checks as passed:
             verdict.record(Item.PREFLIGHT, support.PASS, passed)
             print(f"\nacceptance run directory: {run_directory}")
-            yield passed
+            # The checks themselves rather than the line they passed on: each
+            # lane's bot was resolved here by `getMe` (§5), and the chat every
+            # item reads is that bot's. Resolving it a second time would be a
+            # second answer about who the lane is talking to.
+            yield checks
     except preflight_module.Refused as refused:
         verdict.refuse(f"{refused.check}: {refused.reason}")
         pytest.fail(f"preflight refused — {refused.check}: {refused.reason}", pytrace=False)
@@ -260,6 +321,10 @@ class Arrangement:
     selection: items.Selection
     machine: preflight_module.Machine
     path_value: str
+    #: Each lane's private chat with its own bot (§4.2 items 4–5), or nothing
+    #: for a lane the run could not open one for. One client backs both: one
+    #: SQLite session is one account, and the lanes differ by peer.
+    chats: Mapping[str, journey.Chat] = field(default_factory=dict)
 
 
 @dataclass
@@ -279,8 +344,9 @@ class LaneRun:
 
 @pytest.fixture(scope="session")
 def lane_runs(
-    preflight: str,  # noqa: ARG001 - the refusals happen before a thread is started
+    preflight: preflight_module.Preflight,
     probe_run: object,  # noqa: ARG001 - both run-level checks precede any lane (§2)
+    person: telegram_person.PersonConnection,
     selected_lanes: tuple[str, ...],
     selection: items.Selection,
     run_directory: Path,
@@ -312,6 +378,10 @@ def lane_runs(
         selection=selection,
         machine=machine,
         path_value=machine.path_of_login_shell() or "",
+        # Resolved here, before either thread starts: `get_entity` is a call on
+        # the account, and two lanes racing one client for it would be two
+        # answers to a question with one.
+        chats=_chats(person, preflight, journal),
     )
     runs = {name: LaneRun(lane=journey.lane(name)) for name in selected_lanes}
     for run in runs.values():
@@ -323,6 +393,48 @@ def lane_runs(
         if run.thread is not None:
             run.thread.join()
     return runs
+
+
+@pytest.fixture(scope="session")
+def person(
+    preflight: preflight_module.Preflight,  # noqa: ARG001 - the session lock is preflight's
+    journal: support.Journal,
+) -> Iterator[telegram_person.PersonConnection]:
+    """The Telegram **user account**, one client for the whole run (§8).
+
+    One SQLite session backs one client — Telethon's own rule — so both lanes
+    share this and differ by peer. Opened after preflight, which is what holds
+    the cross-process session lock: two runs on one session file is the
+    `database is locked` §5 refuses rather than meets.
+    """
+    with telegram_person.PersonConnection(journal=journal) as connection:
+        yield connection
+
+
+def _chats(
+    person: telegram_person.PersonConnection,
+    preflight: preflight_module.Preflight,
+    journal: support.Journal,
+) -> dict[str, journey.Chat]:
+    """One chat per lane, with the bot preflight already said hello to.
+
+    The username is handed down from `getMe` (§5) rather than configured a second
+    time, so no bot is named anywhere in this suite and no lane can end up
+    reading a chat that is not its own.
+    """
+    chats: dict[str, journey.Chat] = {}
+    for lane, identity in preflight.bots.items():
+        username = identity.get("username")
+        if not username:
+            # A bot that answered `getMe` without a username is a lane with no
+            # peer to resolve. Said out loud, because the items that need a chat
+            # are about to be blocked and a reader is owed the cause rather than
+            # four blocked rows with no line behind them.
+            journal("chat.unopened", lane=lane, why="the bot's getMe carried no username")
+            continue
+        chats[lane] = journey.Chat(peer=person.peer(str(username)), connection=person)
+        journal("chat.opened", lane=lane, bot=str(username))
+    return chats
 
 
 def _walk_lane(run: LaneRun, arrangement: Arrangement) -> None:
@@ -454,6 +566,8 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
                 engine=engine,
                 session=session,
                 workspace=workspace,
+                run_directory=directory,
+                chat=arrangement.chats.get(lane.name),
                 truth=_agents_own_record(
                     lane, session, environment, machine, workspace, started_at
                 ),

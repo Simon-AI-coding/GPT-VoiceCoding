@@ -28,6 +28,7 @@ DerivedData/
 
 # Local-only research notes, scratch work, and throwaway prototypes.
 docs/research
+docs/design/
 notes/
 scratch/
 *.local.md

@@ -67,9 +67,10 @@ BOOT_WORDS = "reply with the single word READY, and use no tools"
 #: log taken before the turn, and the **address** on the line itself (#355).
 #: Nothing is read *by* the ids: a private chat has two id spaces and this
 #: harness reads the account's, so what the ids give is a count (#354).
-#: The words the line opens with, spelled **once** for the two fields read off
-#: it below: a send line matched by one spelling and parsed by another is two
-#: readings of one contract, and only one of them gets fixed.
+#:
+#: `_SENT` is the words the line opens with, spelled **once** for the two fields
+#: read off it below: a send line matched by one spelling and parsed by another
+#: is two readings of one contract, and only one of them gets fixed.
 _SENT = r"sent Companion Channel message "
 
 ENGINE_SENT_LINE = _SENT + r".*message_ids="
@@ -209,27 +210,34 @@ def not_the_stop_notice(
 
     Counted rather than keyed, because the ids cannot be read back: a private
     chat gives each account its own sequence, so the Bot API's ids are the bot's
-    and this account cannot address them. The failure names **both sides**, since
-    a human reading a red row needs the lines the engine wrote and the messages
-    the chat actually holds.
+    and this account cannot address them.
+
+    **Every branch names both sides** — the lines the engine wrote *and* the
+    messages the chat holds — because a reader of a red row cannot tell which of
+    the two went wrong from one of them, and because a branch that saw only one
+    side would be tempted to claim the other: "no ids issued" is a fact about the
+    engine's record and says nothing whatever about what is in the chat (§1 rule
+    1: nothing is guessed).
     """
-    chat = [(message.id, message.text) for message in arrived]
+    evidence = (
+        f"the engine's own send lines after the mark were {list(sent)!r}, and the messages that "
+        f"arrived after the chat mark were {[(one.id, one.text) for one in arrived]!r}"
+    )
     if not issued:
         return (
-            f"the engine recorded sending a Companion Channel message under no id at all, so "
-            f"nothing reached the chat for this turn's Stop: {list(sent)!r}"
+            f"the engine recorded sending a Companion Channel message under no id at all, so by "
+            f"its own record this turn's Stop reached nobody: {evidence}"
         )
     if len(arrived) != len(issued):
         return (
             f"the engine issued {len(issued)} id(s) for this turn's Stop ({list(issued)!r}) and "
-            f"{len(arrived)} message(s) arrived in the chat after the mark: {chat!r}. The "
-            f"engine's own send lines were {list(sent)!r}"
+            f"{len(arrived)} message(s) arrived in the chat after the mark: {evidence}"
         )
-    own = [(message.id, message.text) for message in arrived if message.outgoing]
+    own = [(one.id, one.text) for one in arrived if one.outgoing]
     if own:
         return (
             f"what arrived after the mark includes this account's own message(s) {own!r} rather "
-            f"than the bot's alone: {chat!r}"
+            f"than the bot's alone: {evidence}"
         )
     return None
 

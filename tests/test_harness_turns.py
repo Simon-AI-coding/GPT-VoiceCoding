@@ -8,6 +8,9 @@ by (`docs/acceptance-design.md` §2, §3):
   so no effect can be mistaken for another;
 * `TestTheEngineLogLine` — the `target=` / `message_ids=` line to whose send it
   was (§2 item 2, §9, #355) and how many messages to expect (#354);
+* `TestTheChatReadItemTwoIsGradedOn` — as many messages after the chat mark as
+  the engine issued ids for, none of them the account's own, and every failure
+  naming both sides (§2 item 2 as amended, #354);
 * `TestTheReceipts` — `relay` and `approve` graded on the `grade` **field**,
   literally `delivered`, never on a substring that a `retained` receipt would
   false-pass (§2 item 3, #71);
@@ -206,6 +209,55 @@ class TestTheEngineLogLine:
     def test_nothing_is_said_when_every_send_was_this_lanes_own(self) -> None:
         assert journey.addressed_elsewhere([self.SENT], OWN_ADDRESS) == ""
         assert journey.addressed_elsewhere([], OWN_ADDRESS) == ""
+
+
+class TestTheChatReadItemTwoIsGradedOn:
+    """§2 item 2 as amended (#354) — the count binding, and what a red row says.
+
+    Driven directly rather than only through a walk, because the thing that has
+    to hold for **every** branch is what the failure carries: a reader of a red
+    row cannot tell an engine that sent nothing from a chat that received nothing
+    unless the row names both, and a branch that saw one side was the bug this
+    class exists to keep out.
+    """
+
+    def test_one_id_and_one_message_that_arrived_is_the_notice(self) -> None:
+        assert journey.not_the_stop_notice(("41",), [_Message()], sent=[SENT_LINE]) is None
+
+    def test_a_split_send_expects_as_many_messages_as_it_has_ids(self) -> None:
+        """#189: a Stop Notice is a whole brief, and a long one lands as two."""
+        arrived = [_Message(CHAT_MARK + 1), _Message(CHAT_MARK + 2)]
+        assert journey.not_the_stop_notice(("41", "42"), arrived, sent=[SPLIT_LINE]) is None
+
+    def test_every_failure_names_the_send_lines_and_the_arrivals(self) -> None:
+        """The rule for all three branches at once, so none can drift off it."""
+        mine = _Message(CHAT_MARK + 1, "my own words", outgoing=True)
+        theirs = _Message(CHAT_MARK + 2, "Session stopped: 工位")
+        for issued, arrived in (
+            ((), [theirs]),  # the engine issued nothing, and yet something arrived
+            (("41",), []),  # one id, and nothing arrived
+            (("41",), [theirs, _Message(CHAT_MARK + 3)]),  # one id, two messages
+            (("41",), [mine]),  # the account's own words
+        ):
+            why = journey.not_the_stop_notice(issued, arrived, sent=[SENT_LINE])
+            assert why is not None, (issued, arrived)
+            assert SENT_LINE in why, f"the engine's send lines are missing from {why!r}"
+            for one in arrived:
+                assert str(one.id) in why, f"arrival {one.id} is missing from {why!r}"
+
+    def test_a_send_that_reached_nobody_claims_nothing_about_the_chat(self) -> None:
+        """§1 rule 1: "no ids issued" is a fact about the engine's own record and
+        says nothing whatever about what the chat holds — so the words must not."""
+        why = journey.not_the_stop_notice((), [_Message()], sent=[SENT_LINE])
+        assert why is not None
+        assert "reached nobody" in why
+        assert "nothing reached the chat" not in why
+
+    def test_the_accounts_own_message_among_the_arrivals_is_a_failure(self) -> None:
+        mine = _Message(CHAT_MARK + 1, "write /tmp/x containing CHARLIE", outgoing=True)
+        why = journey.not_the_stop_notice(("41",), [mine], sent=[SENT_LINE])
+        assert why is not None
+        assert "own message" in why
 
 
 class TestTheReceipts:
@@ -407,10 +459,25 @@ class TestTheCredentialScan:
 CHAT_MARK = 5938
 
 
+#: What the fakes write into a shared `trace` when a test passes one. The names
+#: are the acts §3 puts in an order — two marks, then the turn — and an order is
+#: the one thing no single fake can pin: a `chat.mark()` moved to *after*
+#: `session.submit()` is invisible to any assertion made on one object alone.
+CHAT_MARK_CALL = "chat.mark"
+SUBMIT_CALL = "session.submit"
+ARRIVED_CALL = "chat.arrived"
+
+
 class _Connection:
     """The user-account client, as the three operations `Chat` asks it for."""
 
-    def __init__(self, message: Any = None, *, arrived: tuple[Any, ...] | None = None) -> None:
+    def __init__(
+        self,
+        message: Any = None,
+        *,
+        arrived: tuple[Any, ...] | None = None,
+        trace: list[str] | None = None,
+    ) -> None:
         self.marks: list[Any] = []
         self.arrivals: list[tuple[Any, int]] = []
         self.replies: list[tuple[Any, int, str]] = []
@@ -418,13 +485,18 @@ class _Connection:
         #: What the chat answers after the mark. Defaults to the one message a
         #: one-id send expects, so a test says nothing when that is what it wants.
         self.arrived_with = arrived if arrived is not None else ((message,) if message else ())
+        #: Shared with the `_Session` when a test wants the **order** of the acts
+        #: across both objects rather than each object's own calls.
+        self.trace = trace if trace is not None else []
 
     def mark(self, peer: Any) -> int:
         self.marks.append(peer)
+        self.trace.append(CHAT_MARK_CALL)
         return CHAT_MARK
 
     def arrived(self, peer: Any, since: int) -> tuple[Any, ...]:
         self.arrivals.append((peer, since))
+        self.trace.append(ARRIVED_CALL)
         return self.arrived_with
 
     def reply(self, peer: Any, reply_to_message_id: int, text: str) -> Any:
@@ -513,15 +585,19 @@ class _Session:
         sends: str | None = None,
         transcript: Path = Path(f"/runs/pty-{CODEX_LANE}.log"),
         environment: dict[str, str] | None = None,
+        trace: list[str] | None = None,
     ) -> None:
         self.engine = engine
         self.sends = sends
         self.transcript = transcript
         self.environment = environment or {}
         self.submitted: list[str] = []
+        #: The same list the `_Connection` holds, where a test shares one.
+        self.trace = trace if trace is not None else []
 
     def submit(self, words: str) -> None:
         self.submitted.append(words)
+        self.trace.append(SUBMIT_CALL)
         if self.engine is not None and self.sends is not None:
             self.engine.lines.append(self.sends)
 
@@ -611,10 +687,51 @@ class TestWalkingTheFourItems:
         self, tmp_path: Path
     ) -> None:
         """§3: both marks are `stop notice`'s own and both precede the turn — an
-        engine-log line or a chat message already there belongs to something else."""
+        engine-log line or a chat message already there belongs to something else.
+
+        The **order** is asserted across the two fakes on one shared trace, not
+        on either object's own calls: a chat mark taken after the turn was typed
+        would leave every per-object assertion here passing while the item graded
+        a window instead of a mark.
+        """
         engine = _Engine(
             [f"sent Companion Channel message request=r-0 target={OWN_ADDRESS} message_ids=4000"]
         )
+        trace: list[str] = []
+        connection = _Connection(_Message(), trace=trace)
+        walk = _walk(
+            tmp_path,
+            engine=engine,
+            session=_Session(engine, sends=SENT_LINE, trace=trace),
+            chat=journey.Chat(peer="@lane-bot", connection=connection),
+            selection=items.select(["stop notice"]),
+        )
+        walk.walk()
+        row = _rows(walk)[str(items.Item.STOP_NOTICE)]
+        assert row["verdict"] == "PASS"
+        # The chat mark, then the turn, then the one read that starts from it.
+        assert trace == [CHAT_MARK_CALL, SUBMIT_CALL, ARRIVED_CALL]
+        assert connection.arrivals == [("@lane-bot", CHAT_MARK)]
+        evidence = support.resolve(tmp_path, row["evidence"])
+        # The ids the engine issued are carried as evidence; what was read is the
+        # account's own sequence (#354).
+        assert evidence["message_ids"] == ["4110"]
+        assert evidence["chat_message_ids"] == [CHAT_MARK + 1]
+        assert evidence["target"] == OWN_ADDRESS
+
+    def test_the_engine_log_mark_precedes_the_turn_too(self, tmp_path: Path) -> None:
+        """The other of §3's two marks: a send line already in the log when the item
+        starts is something else's, and the item must not take it as this turn's.
+
+        Both lines here are addressed to this lane's own Session, so only the mark
+        tells them apart — which is what makes this the engine-log mark's own test
+        rather than the address filter's (#355).
+        """
+        already = (
+            f"sent Companion Channel message request=r-0 outcome=delivered "
+            f"target={OWN_ADDRESS} message_ids=4000"
+        )
+        engine = _Engine([already])
         connection = _Connection(_Message())
         walk = _walk(
             tmp_path,
@@ -626,15 +743,8 @@ class TestWalkingTheFourItems:
         walk.walk()
         row = _rows(walk)[str(items.Item.STOP_NOTICE)]
         assert row["verdict"] == "PASS"
-        # The chat mark was taken before the turn typed its send line, and the
-        # read started from it.
-        assert connection.arrivals == [("@lane-bot", CHAT_MARK)]
-        evidence = support.resolve(tmp_path, row["evidence"])
-        # The ids the engine issued are carried as evidence; what was read is the
-        # account's own sequence (#354).
-        assert evidence["message_ids"] == ["4110"]
-        assert evidence["chat_message_ids"] == [CHAT_MARK + 1]
-        assert evidence["target"] == OWN_ADDRESS
+        # 4110 is this turn's; 4000 was in the log before the item started.
+        assert support.resolve(tmp_path, row["evidence"])["message_ids"] == ["4110"]
 
     def test_the_chat_is_read_once_after_the_mark_and_never_by_the_issued_id(
         self, tmp_path: Path

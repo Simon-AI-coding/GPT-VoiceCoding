@@ -565,7 +565,7 @@ class PersonConnection:
         after it belongs to that turn. The ids are the account's own sequence and
         have nothing to do with the ids the product issued (#354).
         """
-        found = newest_id(self.run(self._collect(peer, limit=1)))
+        found = newest_id(self.run(self._client.get_messages(peer, limit=1)))
         self._journal("telegram.person.mark", mark=found)
         return found
 
@@ -584,17 +584,15 @@ class PersonConnection:
         many arrived — and the count a split send is graded against (#189) would
         false-fail on a read this function capped itself.
         """
-        messages = in_arrival_order(self.run(self._collect(peer, limit=None, min_id=int(since))))
+        messages = in_arrival_order(
+            self.run(self._client.get_messages(peer, limit=None, min_id=int(since)))
+        )
         self._journal(
             "telegram.person.arrived",
             since=int(since),
             messages=[message.as_journal_fields() for message in messages],
         )
         return messages
-
-    def _collect(self, peer: Any, **query: Any) -> Any:
-        """The one place the chat is read at all, so there is one query to audit."""
-        return self._client.get_messages(peer, **query)
 
     def reply(self, peer: Any, reply_to_message_id: int, text: str) -> PersonMessage:
         """A reply **anchored to an id** (§2 item 5, ADR 0021 §2–§3).

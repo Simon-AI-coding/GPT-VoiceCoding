@@ -1,84 +1,48 @@
-"""Both lanes' journey, against real agents the harness started by hand.
+"""Both lanes, against real agents this harness started by hand (#350).
 
 ## Two layers, and there is no third
 
-* **Per-ticket, one step.** A build ticket's "Red first" line names a step, and
-  that is what a developer runs while building it:
+* **Per ticket, one item.** A build ticket names an item, and that is what a
+  developer runs while building it:
 
-      .venv/bin/python -m pytest -m acceptance tests/acceptance \\
-          --lane claude --step "stable name"
+      .venv/bin/python -m pytest -m acceptance tests/acceptance \
+          --lane codex --step approval
 
-  The step is graded. Its prerequisites (`journey.PREREQUISITES`) run first as
+  The item is graded. Its prerequisites (`items.PREREQUISITES`) run first as
   **ungraded setup**, on a fresh engine and a hand-started Session of their own,
-  because a step read on ground the walk did not arrange is a step read on
-  nothing. `verdict.json` names both kinds, so a green step is never mistaken for
-  a green lane.
+  because an item read on ground the run did not arrange is an item read on
+  nothing. `verdict.json` names both kinds, so a green item is never mistaken
+  for a green lane (§6).
 
-* **Before merging to `main`, the whole thing.** No options: every step of every
-  lane, the two lanes walking **concurrently** on two Telegram bots. A human
-  triggers it; it never runs in CI.
-
-That is the whole ladder. There is no separate release layer, and the
-consequence is deliberate (#180 §2 decision 4): a step that needs a human runs on
-every full run, or it is not in the acceptance.
-
-## One run per machine, whatever `--lane` it names
-
-Two lanes run at once **inside one run**. Two *runs* must not: they share things
-no option separates, so preflight takes a cross-process lock on the user-account
-session for the length of the run and **refuses** a second run by the holder's
-pid and run directory (`telegram_person.PersonSessionLock`).
-
-* **The Telegram user account is one client.** Its session is an SQLite file
-  holding a bearer auth key, and a second process opening it gets `database is
-  locked` at best (`telegram_person.PersonConnection`). Two lanes share one
-  connection for exactly this reason; two runs cannot — and the lock is taken
-  beside that file, so the refusal arrives before either process opens it.
-* **The trust gate writes the user's own files.** `support.TrustGate`
-  read-modify-writes the user's Claude state file and `~/.codex/config.toml`, and the lock
-  that keeps two lanes off each other there is a **thread** lock — it means
-  nothing to a second pytest process, whose revoke can drop the other run's
-  entry from a file that is not the harness's to lose.
+* **Before merging, the whole thing.** No options: both run-level checks, then
+  five items on both lanes in parallel. A human triggers it; it never runs in CI.
 
 ## One test, parametrised, rather than one module per lane
 
-The two used to be separate files whose bodies were the same forty lines with one
-name changed — and the same forty lines is where a fix applied to one lane and not
-the other comes from. The lane is a value (`journey.Lane`), so the difference
-between the lanes lives entirely in that value; pytest's own parametrisation names
-the lane in the test id, so a failure still says which lane failed without a
-module per lane to say it.
-
-**The walking happens off this test, and the test joins it.** Both lanes are
-started together by the `lane_runs` fixture, one thread each (`conftest.py`
-explains why the concurrency lives there); this test waits for its own lane and
-grades what that lane wrote down. So the run costs one lane's wall clock rather
+The lane is a value (`journey.Lane`), so the difference between the lanes lives
+entirely in that value, and pytest's own parametrisation names the lane in the
+test id. The walking happens off this test and the test joins it: both lanes are
+started together, one thread each, so the run costs one lane's wall clock rather
 than the sum of two, and the verdict is still one file with a block per lane.
 
-What each lane is expected to find on today's `main` is stated on #73 rather than
-guessed at here: the steps are the red lines #74–#80 and #183 clear, and each is red
-until the ticket that owns it lands.
+The join and the walk are **#352's** and **#353's**. What is settled here is the
+shape: one parametrised test, and a lane graded on the rows it wrote.
 """
 
 from __future__ import annotations
 
+import items
 import pytest
 import support
 
-pytestmark = pytest.mark.acceptance
+pytestmark = [pytest.mark.acceptance, pytest.mark.covers(*items.LANE_ITEMS)]
 
 
-def test_the_lane(lane, lane_runs, verdict) -> None:  # noqa: ANN001
-    run = lane_runs[lane.name]
-    if run.thread is not None:
-        run.thread.join()
-    if run.failure is not None:
-        raise run.failure
-
-    recorded = verdict.lanes.get(lane.name, [])
+def test_the_lane(lane, lane_runs, verdict: support.Verdict) -> None:  # noqa: ANN001
+    recorded = verdict.document()["lanes"].get(lane.name, [])
     assert recorded, f"the {lane.name} lane recorded nothing at all"
-    failed = [step for step in recorded if step.result != support.PASS]
+    failed = [row for row in recorded if row["verdict"] != str(support.PASS)]
     assert not failed, "\n".join(
-        f"{step.step}{'' if step.graded else ' (setup)'}: {step.result} — {step.evidence}"
-        for step in failed
+        f"{row['item']}{'' if row['graded'] else ' (setup)'}: {row['verdict']} — {row['evidence']}"
+        for row in failed
     )

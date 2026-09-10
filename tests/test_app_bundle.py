@@ -16,8 +16,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import deadlines
 import pytest
-import support
 from app_bundle import console_script, inputs, lock, mach_o, signing
 from app_bundle import run as bundle_run
 from app_bundle.plan import BuildPlan
@@ -480,7 +480,7 @@ class TestTheThingsThatMustAgree:
         assert shell_path == config.default_socket_path(uid)
 
     def test_the_shell_and_the_harness_give_the_login_shell_the_same_budget(self) -> None:
-        """`LoginShellPath.timeout` and `support.PATH_TIMEOUT_SECONDS`.
+        """`LoginShellPath.timeout` and `deadlines.PATH_TIMEOUT_SECONDS`.
 
         The harness reproduces the shell's login-shell read because the shell is
         out of scope for an acceptance run, and it *refuses* the run when it
@@ -500,7 +500,7 @@ class TestTheThingsThatMustAgree:
             swift,
         )
         assert budget is not None, "LoginShellPath no longer states the budget as one literal"
-        assert float(budget["seconds"]) == support.PATH_TIMEOUT_SECONDS
+        assert float(budget["seconds"]) == deadlines.PATH_TIMEOUT_SECONDS
 
     def test_the_shell_and_the_pipeline_name_the_same_interpreter_path(self) -> None:
         """`BundleLayout.engineInterpreterRelativePath` and `inputs.ENGINE_INTERPRETER`.

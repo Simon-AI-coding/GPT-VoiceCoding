@@ -25,7 +25,7 @@ test id. The walking happens off this test and the test joins it: both lanes are
 started together, one thread each, so the run costs one lane's wall clock rather
 than the sum of two, and the verdict is still one file with a block per lane.
 
-The join and the walk are **#352's** and **#353's**. What is settled here is the
+The join is #352's and the walk is `journey`'s. What is settled here is the
 shape: one parametrised test, and a lane graded on the rows it wrote.
 """
 

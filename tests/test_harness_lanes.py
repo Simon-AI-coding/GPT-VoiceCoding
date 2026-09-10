@@ -1010,6 +1010,15 @@ class _Engine:
 
 
 class _Session:
+    """The pty, as the walk uses it — including the two facts a failure names."""
+
+    def __init__(self) -> None:
+        self.transcript = Path(f"/runs/pty-{CODEX_LANE}.log")
+        self.environment: dict[str, str] = {}
+
+    def submit(self, words: str) -> None:
+        return None
+
     def screen_tail(self) -> str:
         return "<the screen, which nothing parses>"
 
@@ -1033,6 +1042,7 @@ def _walk(tmp_path: Path, lane: str = CODEX_LANE, **overrides: Any) -> journey.W
         "engine": _Engine(),
         "session": _Session(),
         "workspace": tmp_path / f"workspace-{lane}",
+        "run_directory": tmp_path,
         "truth": lambda: None,
     }
     arranged.update(overrides)
@@ -1166,29 +1176,9 @@ class TestWalkingALane:
             ),
         )
         walk.walk()
-        assert [row["item"] for row in _rows(walk)] == [str(items.Item.ROSTER)]
+        rows = {row["item"]: row for row in _rows(walk)}
+        assert rows[str(items.Item.ROSTER)]["verdict"] == "PASS"
         assert [one for one in walk.journal.read() if one["event"] == "daemon.membership"]
-
-    def test_the_four_items_this_ticket_does_not_build_are_owed_rather_than_skipped(
-        self, tmp_path: Path
-    ) -> None:
-        """§7's `missing` is the mechanism for "the run promised this and did not write it".
-
-        A SKIPPED row would say the run reached them and chose not to read them,
-        which is a different and untrue sentence while #353 is unbuilt.
-        """
-        workspace = tmp_path / f"workspace-{CODEX_LANE}"
-        workspace.mkdir()
-        walk = _walk(
-            tmp_path,
-            bridgectl=_Surface(self._payload(workspace)),
-            truth=lambda: hand_started.GroundTruth(
-                session_id="thread-1", pid=7, workspace=workspace
-            ),
-        )
-        walk.walk()
-        assert [row["item"] for row in _rows(walk)] == [str(items.Item.ROSTER)]
-        assert f"{CODEX_LANE}/{items.Item.RELAY}" in walk.verdict.missing
 
 
 class TestTheMarkEveryChatReadStartsFrom:

@@ -220,6 +220,29 @@ def _differing(tree: Path, installed: Path) -> Iterator[str]:
             yield f"{shared} differs"
 
 
+def secrets_of(
+    environ: Mapping[str, str],
+    *,
+    token_variables: Sequence[str],
+    api_hash: str | None,
+) -> tuple[str, ...]:
+    """Every value the end-of-run scan looks for (§8, the deferred item of #351).
+
+    Both lanes' bot tokens, read out of the variables the engine is *told* to
+    read them from, and the Telegram user account's `api_hash`.
+
+    **The `api_id` is deliberately not here.** It is a short integer, and a
+    substring reading of one matches any number a journal happens to carry — a
+    message id, a pid, a count — so scanning for it would turn a clean run red
+    for a reason that is not a leak. The rule §8 states is about a value reaching
+    an artifact; a reading that cannot tell the value apart from the run's own
+    facts is not a reading of that rule.
+    """
+    values = [environ.get(name, "") for name in token_variables]
+    values.append(api_hash or "")
+    return tuple(dict.fromkeys(one for one in values if one))
+
+
 def scan_for_credentials(directory: Path, secrets: Sequence[str]) -> tuple[str, ...]:
     """Every file under `directory` carrying one of these secrets (§8).
 
@@ -479,6 +502,11 @@ class Verdict:
         self.versions = versions or {}
         #: The run's wall clock and each lane's (§7), keyed `run` and by lane.
         self.seconds: dict[str, float] = {}
+        #: §8's rule, read at the end of the run rather than only pinned by a
+        #: fast test: every artifact this run wrote, scanned for the credentials
+        #: it was handed. `None` until the scan has run.
+        self._credentials: tuple[str, ...] | None = None
+        self._credentials_evidence: str | None = None
         self._run: list[Row] = []
         self._rows: dict[str, list[Row]] = {lane: [] for lane in self.lanes}
         self._lock = threading.Lock()
@@ -531,6 +559,26 @@ class Verdict:
             ),
             lane,
         )
+
+    def scanned(self, artifacts: Sequence[str], evidence: str) -> tuple[str, ...]:
+        """What the end-of-run credential scan found, and the line it rests on (§8).
+
+        Not a row: §8's rule is about the run's whole tree rather than about one
+        item, and the closed set of items is a contract build tickets cite. It
+        decides the file all the same — a run that wrote a credential into an
+        artifact does not report PASS — and it decides it as **FAIL**: REFUSED is
+        preflight's word for a run that declined to observe anything, and this
+        run observed everything it promised and then left a token behind.
+
+        The artifact keeps its credential: a reader needs the file to see what
+        leaked, and a harness that deleted the evidence of its own defect would
+        be the last thing to report it.
+        """
+        self._resolved(evidence)
+        with self._lock:
+            self._credentials = tuple(artifacts)
+            self._credentials_evidence = evidence
+        return tuple(artifacts)
 
     def refuse(self, reason: str) -> Row:
         """Preflight refused: the run declines to observe anything (§5, §7).
@@ -638,6 +686,10 @@ class Verdict:
         A **refusal** decides the run wherever it sits, graded or not: a red
         preflight is REFUSED for the whole run and no lane starts (§7), and that
         is true however few items the run was asked for.
+
+        And §7's rule as #353 extends it: a run is PASS only when every graded
+        row is PASS **and** the end-of-run credential scan is clean. An artifact
+        carrying a token is not one item's failure — it is the run's.
         """
         rows = [*self._run, *(row for lane in self._rows.values() for row in lane)]
         if not rows:
@@ -647,6 +699,8 @@ class Verdict:
         if any(row.verdict is REFUSED for row in rows):
             return REFUSED
         if self.missing:
+            return FAIL
+        if self._credentials:
             return FAIL
         return worst([row.verdict for row in rows if row.graded])
 
@@ -664,6 +718,16 @@ class Verdict:
             "commit": self.commit,
             "versions": dict(self.versions),
             "seconds": dict(self.seconds),
+            "credentials": {
+                "scanned": self._credentials is not None,
+                # `null` until the scan has run: a run whose secrets could not
+                # even be assembled has not been found clean, and a reader who
+                # sees `true` beside `scanned: false` reads the reassurance and
+                # not the contradiction.
+                "clean": None if self._credentials is None else not self._credentials,
+                "artifacts": list(self._credentials or ()),
+                "evidence": self._credentials_evidence,
+            },
             "run": [row.document() for row in self._run],
             "lanes": {lane: [row.document() for row in rows] for lane, rows in self._rows.items()},
         }

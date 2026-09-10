@@ -1,10 +1,11 @@
-"""The five lane items, written once and walked by both lanes (#350, #352).
+"""The five lane items, written once and walked by both lanes (#350, #352, #353).
 
 **Responsibilities held here** (§9's `journey.py`): the lane as a value, the
-engine-log lines the items read, and the walk of §2's five per-lane items. #352
-lays the lane value, the arrangement every item stands on — the boot turn, the
-daemon membership, the switches, the drained boot notice — and the first item,
-`roster`. The remaining four are **#353's**, with the three turns of §3.
+engine-log lines and receipts the items read, §3's three turns, and the walk of
+§2's five per-lane items. #352 laid the lane value, the arrangement every item
+stands on — the boot turn, the daemon membership, the switches, the drained boot
+notice — and the first item, `roster`; #353 adds the turns and the four items
+read from them, so a no-option run is now the whole of §2 in code.
 
 The lane is a value rather than a module per lane. The two used to be separate
 files whose bodies were the same forty lines with one name changed, and the same
@@ -19,7 +20,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,9 @@ import items
 import support
 
 from gpt_voicecoding.control_plane.commands import format_address
+from gpt_voicecoding.installation import claude_hooks
+from gpt_voicecoding.seams.agent import ApprovalVerdict, WaitingKind
+from gpt_voicecoding.seams.delivery import Delivery
 
 #: The engine's own line for a Stop it announced (`core/bridge.py`), and the
 #: only engine-log line this harness matches at all (§2 item 2 reads the send
@@ -62,6 +66,206 @@ BOOT_WORDS = "reply with the single word READY, and use no tools"
 #: a **mark** is a position in the lane's engine log taken before the turn whose
 #: message the run is about to read.
 ENGINE_SENT_LINE = r"sent Companion Channel message .*message_ids="
+
+#: The ids on that line, as the engine joined them (`core/bridge.py:2178`).
+_MESSAGE_IDS = re.compile(ENGINE_SENT_LINE + r"(?P<ids>\S*)")
+
+#: §3's three turns, by name. The name is what the journal's `turn` line carries
+#: and what a reader looks for when a run drifts past five minutes (§7).
+ACKNOWLEDGE_TURN = "acknowledge"
+RELAY_TURN = "relay"
+INBOUND_TURN = "inbound"
+
+#: The acknowledge turn, word for word (§3). No tool use **on purpose**: a turn
+#: that raised a permission would sit in `waiting` with nothing allowed to
+#: answer it yet. It ends on its own, and the Stop it ends with is what `stop
+#: notice` reads.
+ACKNOWLEDGE_WORDS = "reply with the single word READY, no tools"
+
+#: The two turns that leave a file, and the file and word each leaves (§3).
+#: **Distinct on purpose**: one filename and one word per turn, so no effect can
+#: be mistaken for another and one item's failure cannot look like another's.
+RELAY_FILE = "relay.txt"
+RELAY_WORD = "BRAVO"
+INBOUND_FILE = "inbound.txt"
+INBOUND_WORD = "CHARLIE"
+
+#: Where the Codex lane's relay write lands: a directory of its own under the
+#: run directory, which is ground no Codex sandbox may write (preflight refuses
+#: a run root inside one) and which is not the list §7 draws at the run
+#: directory's root.
+OUTSIDE_DIRECTORY = "outside"
+
+#: What the user's say-so is spelled as on the `approve` verb — the product's
+#: own word rather than a second spelling of it.
+ALLOW = str(ApprovalVerdict.ALLOW)
+
+#: The one grade that means the words reached the model, read from the product's
+#: own classification (`seams/delivery.py`). Everything else — including a
+#: `retained` receipt — is not this.
+DELIVERED = str(Delivery.DELIVERED)
+
+#: The field a receipt is graded on, and the shape every field on that line has
+#: (`core/relays.py`'s `receipt_line`: `state=… grade=… reason=…`).
+GRADE_FIELD = "grade"
+_RECEIPT_FIELD = re.compile(r"(?P<name>[a-z_]+)=(?P<value>\S+)")
+
+
+def message_ids(line: str) -> tuple[str, ...]:
+    """Every id the engine reported sending one Companion Channel message under.
+
+    A line that is not a send carries none, and a send that reached nobody
+    carries an empty field — both are answers rather than errors, because the
+    item that reads them grades the absence itself.
+    """
+    found = _MESSAGE_IDS.search(line)
+    if found is None:
+        return ()
+    return tuple(one for one in found["ids"].split(",") if one)
+
+
+def stop_notice_id(lines: Sequence[str]) -> str | None:
+    """The id §2 item 2 re-reads by, and §2 item 5 anchors its reply to.
+
+    **The first id of the first send after the mark.** A Stop Notice can span
+    several messages (#189), and the product registers the Anchor against every
+    id of the receipt (`core/bridge.py`'s `anchors.register`), so a reply to the
+    first resolves exactly as a reply to any other would — and one id is one
+    read.
+    """
+    for line in lines:
+        found = message_ids(line)
+        if found:
+            return found[0]
+    return None
+
+
+def receipt_fields(text: str) -> dict[str, str]:
+    """A receipt as the fields it is, never as a string to search (§2 item 3).
+
+    `bridgectl` prints one format for every receipt — `state=… grade=… reason=…`,
+    with `verdict=…` in front of an `approve` reply — and this reads it back as
+    what it is. A substring on `delivered` false-passes a **retained** relay
+    whose reason merely mentions the word (#71), which is the defect this
+    function exists to make impossible.
+    """
+    return {found["name"]: found["value"] for found in _RECEIPT_FIELD.finditer(text)}
+
+
+def undelivered(text: str) -> str | None:
+    """Why this receipt is not a delivery, or `None` when it is.
+
+    One field decides: `grade`, compared **literally** to the product's own
+    `delivered`. `state` is not consulted — a Relay's lifecycle is a fact about
+    the queue, and the grade is the fact about the attempt.
+    """
+    grade = receipt_fields(text).get(GRADE_FIELD)
+    if grade == DELIVERED:
+        return None
+    return (
+        f"the receipt's {GRADE_FIELD} field is {grade!r} and not {DELIVERED!r}, so nothing "
+        f"proves the words reached the model: {text!r}"
+    )
+
+
+def approval_id(row: Mapping[str, Any]) -> str | None:
+    """The permission on this roster row, read from `waiting_for` (§2 item 4).
+
+    **Never from `state`** (#191): a Codex thread stays `running` with its
+    permission dialog on screen, so a reader that waited for a state to change
+    would wait for something that never happens.
+    """
+    waiting = row.get("waiting_for")
+    if not isinstance(waiting, Mapping):
+        return None
+    identifier = waiting.get("approval_id")
+    return str(identifier) if identifier else None
+
+
+def stopped_on(row: Mapping[str, Any]) -> str | None:
+    """What the Session stopped on, or `None` when the engine cannot yet say.
+
+    §2 item 2 grades no wording: the check is that `waiting_for` carries a kind
+    from the product's own closed set. `unknown` is not one — it is "something is
+    being waited on and we cannot yet say what" (`seams/agent.py`), which is the
+    absence of the answer rather than an answer.
+    """
+    waiting = row.get("waiting_for")
+    if not isinstance(waiting, Mapping):
+        return None
+    kind = waiting.get("kind")
+    if not kind or str(kind) == str(WaitingKind.UNKNOWN):
+        return None
+    return str(kind)
+
+
+def write_words(path: Path, word: str) -> str:
+    """One turn's whole instruction: one sentence, one path, one word (§3, §1 rule 3).
+
+    Nothing asks the model to talk, count, recite or explain, and the path is
+    absolute so the effect is where the harness looks rather than where the
+    agent's cwd happened to be.
+    """
+    return f"write {path} containing {word}"
+
+
+def relay_target_file(lane: Lane, *, workspace: Path, run_directory: Path) -> Path:
+    """Where the relay turn's file goes — the one variable between the lanes (§3).
+
+    Inside the workspace where nothing confines the writes: Claude asks for the
+    permission because the run keeps the product's own permission mode. Outside
+    every writable root where a sandbox does: Codex asks only for a write its
+    sandbox refuses, so the **path** is what raises the permission `approval`
+    grades (#105). One file, one word, both lanes.
+    """
+    if lane.sandboxed:
+        return run_directory / f"{OUTSIDE_DIRECTORY}-{lane.name}" / RELAY_FILE
+    return workspace / RELAY_FILE
+
+
+def inbound_target_file(workspace: Path) -> Path:
+    """Where the inbound turn's file goes — inside the workspace on either lane.
+
+    §2 item 5 is graded by the file alone and raises no permission: the transport
+    is what it proves, and a second sandbox refusal on the way would prove the
+    sandbox instead.
+    """
+    return workspace / INBOUND_FILE
+
+
+def wrote(path: Path, word: str) -> bool:
+    """Whether the turn's file is there carrying its word — the one binary signal."""
+    try:
+        return word in path.read_text(errors="replace")
+    except OSError:
+        return False
+
+
+@dataclass(frozen=True)
+class Chat:
+    """One lane's private chat with its bot — and the only two things done to it.
+
+    `read` and `reply`, and no third. There is **no send**: §2 item 5 uses the
+    product's primary inbound form (ADR 0021 §2–§3), a reply anchored to the
+    Stop Notice's own id, so an inbound with no anchor is impossible by
+    construction rather than by care. There is no search either: every id here
+    was issued by the product and read off the engine's own log (§9, #109).
+    """
+
+    #: The entity the lane's bot username stands for, resolved once per lane.
+    peer: Any
+    #: The user-account client (`telegram_person.PersonConnection`), which the
+    #: whole run shares: one SQLite session backs one client, and the two lanes
+    #: differ by peer rather than by account.
+    connection: Any
+
+    def read(self, message_id: str | int) -> Any:
+        """One message, once, by the id the product issued."""
+        return self.connection.read(self.peer, int(message_id))
+
+    def reply(self, anchor: str | int, words: str) -> Any:
+        """Plain words, into the chat, anchored to a message the Session's own."""
+        return self.connection.reply(self.peer, int(anchor), words)
 
 
 @dataclass(frozen=True)
@@ -107,6 +311,11 @@ class Lane:
     #: Whether this lane owns a config directory (§4.1). The Claude lane does;
     #: the Codex lane cannot, under ADR 0022.
     own_config_directory: bool = False
+    #: Whether this lane's Session may only write inside its workspace (§3).
+    #: A fact about the **agent's sandbox** and not about its configuration, so
+    #: it is its own field: it is what decides where the relay turn's file has
+    #: to go for the write to raise a permission at all (#105).
+    sandboxed: bool = False
 
     @property
     def arguments(self) -> tuple[str, ...]:
@@ -159,6 +368,7 @@ LANES: tuple[Lane, ...] = (
         model_flag="-m",
         model="gpt-5.6-luna",
         boot_words=BOOT_WORDS,
+        sandboxed=True,
     ),
 )
 
@@ -324,6 +534,15 @@ class Walk:
     #: The agent's own account of the Session this harness started, or `None`
     #: while there is not one yet.
     truth: Callable[[], hand_started.GroundTruth | None]
+    #: The run's own directory — where the Codex lane's relay write has to land,
+    #: because it is ground that lane's sandbox refuses (§3, preflight's writable
+    #: run root refusal). Every walk has one, so it is required rather than
+    #: defaulted into a branch nothing reaches.
+    run_directory: Path
+    #: This lane's private chat with its bot, or `None` when the run arranged
+    #: none: an item that needs it is **blocked**, never graded, because a chat
+    #: the run could not open is the harness's own ground missing (§6).
+    chat: Chat | None = None
     #: Whether the turn the *launch* started has ended, on the agent's own
     #: bracketing. Always over on a lane with no boot prompt.
     boot_turn_over: Callable[[], bool] = lambda: True
@@ -332,6 +551,13 @@ class Walk:
     membership: Callable[[], support.DaemonMembership | None] = lambda: None
     #: Filled as the walk goes, so a failure message can say where it got to.
     boot_seconds: float | None = None
+    #: The id of the Stop Notice `stop notice` read, kept because `companion
+    #: inbound` replies to it (§6: `stop notice` is that item's reply anchor).
+    notice_id: str | None = None
+    #: Every permission this walk has already answered as **arrangement**, so a
+    #: dialog that lingers for a poll or two is answered once rather than once
+    #: per reading.
+    arranged: set[str] = field(default_factory=set)
     #: The clock and the sleep every wait on this lane is made through, as
     #: `deadlines.wait` takes them. Injectable for the reason that function
     #: gives: the rules above are minutes long — the boot turn is two turns —
@@ -341,15 +567,20 @@ class Walk:
     sleep: Callable[[float], None] = time.sleep
 
     def items_walked(self) -> dict[items.Item, Callable[[], str]]:
-        """Every item this ticket walks, bound to the method that reads it.
+        """Every item of §2's table, bound to the method that reads it.
 
-        The four #353 builds are **not** here, and are not SKIPPED either: a row
-        nobody wrote is named by `Verdict.missing`, which is the mechanism §7 has
-        for "the run promised this and did not write it". A SKIPPED row would say
-        the run reached the item and chose not to read it, which is a different
-        and untrue sentence.
+        Total over `items.LANE_ITEMS` (`tests/test_harness_turns.py`): a row
+        nobody wrote would be named by `Verdict.missing` as something the run
+        promised and did not write, and with #353 there is nothing left to
+        promise and not write.
         """
-        return {items.Item.ROSTER: self.roster}
+        return {
+            items.Item.ROSTER: self.roster,
+            items.Item.STOP_NOTICE: self.stop_notice,
+            items.Item.RELAY: self.relay,
+            items.Item.APPROVAL: self.approval,
+            items.Item.COMPANION_INBOUND: self.companion_inbound,
+        }
 
     # -- the ground every item stands on -------------------------------------
 
@@ -367,16 +598,7 @@ class Walk:
         for item in self.selection.items:
             if item not in items.LANE_ITEMS:
                 continue
-            reading = walked.get(item)
-            if reading is None:
-                self.journal(
-                    "item.unwritten",
-                    lane=self.lane.name,
-                    item=str(item),
-                    why="the four remaining items are #353's",
-                )
-                continue
-            if not self.read(item, reading):
+            if not self.read(item, walked[item]):
                 return
 
     def read(self, item: items.Item, reading: Callable[[], str]) -> bool:
@@ -389,12 +611,33 @@ class Walk:
         started = time.monotonic()
         try:
             evidence = reading()
-        except (ItemFailed, LaneBlocked, deadlines.DeadlineExpired) as failed:
+        except LaneBlocked as unarranged:
+            # **Not a claim about the product** (§6, §1 rule 1): ground the run
+            # could not arrange is a row that never ran, so it is SKIPPED saying
+            # why — a red here would say the main flow broke when what broke was
+            # this harness's own arrangement.
+            why = f"blocked by the {self.lane.name} lane's arrangement: {unarranged}"
+            self.journal(
+                "item.unarranged",
+                lane=self.lane.name,
+                item=str(item),
+                why=str(unarranged),
+                **self.for_a_human(),
+            )
+            self.verdict.skip(item, why, lane=self.lane.name)
+            self.block(why, after=item)
+            return False
+        except (ItemFailed, deadlines.DeadlineExpired) as failed:
+            witness = self.for_a_human()
             reference = (
-                self.journal.expired(failed, lane=self.lane.name, item=str(item))
+                self.journal.expired(failed, lane=self.lane.name, item=str(item), **witness)
                 if isinstance(failed, deadlines.DeadlineExpired)
                 else self.journal(
-                    "item.failed", lane=self.lane.name, item=str(item), why=str(failed)
+                    "item.failed",
+                    lane=self.lane.name,
+                    item=str(item),
+                    why=str(failed),
+                    **witness,
                 )
             )
             self.verdict.record(
@@ -414,6 +657,41 @@ class Walk:
             seconds=time.monotonic() - started,
         )
         return True
+
+    def for_a_human(self) -> dict[str, Any]:
+        """The three places a red is looked at, named on the line that reports it (§3).
+
+        "A real agent that does not perform the action is a FAIL, with the
+        workspace, the pty log and the agent's own transcript as evidence." So a
+        failing row's journal line carries all three rather than leaving a reader
+        to reconstruct where this lane's run happened.
+
+        The agent's own record is the agent's to give: `codex` writes a rollout
+        and `GroundTruth` carries its path; `claude agents --json` names no
+        transcript, so what is carried there is the **session id**, which is what
+        locates the transcript inside the lane's own config directory (§4.1).
+        Asked here rather than kept from `roster`, and never allowed to raise:
+        this line is written on the way out of a failure.
+        """
+        try:
+            record = self.truth()
+        except Exception:  # noqa: BLE001 - an oracle that failed is not this row's cause
+            record = None
+        return {
+            "workspace": str(self.workspace),
+            "pty_log": str(self.session.transcript),
+            # A **path** where the agent writes one, so a reader opens it rather
+            # than hunts for it.
+            "agent_transcript": str(record.record) if record and record.record else None,
+            # Where the Claude lane's transcript is, for the lane whose roster
+            # names none: `claude agents --json` carries a session id and no
+            # transcript path, and the file is that id's inside the lane's own
+            # config directory (§4.1).
+            "agent_config_directory": self.session.environment.get(
+                claude_hooks.CONFIG_DIRECTORY_VARIABLE
+            ),
+            "agent_record": record.describe() if record is not None else None,
+        }
 
     def block(self, why: str, after: items.Item | None = None) -> None:
         """Every item of this lane the run has not written a row for, SKIPPED with why."""
@@ -597,4 +875,272 @@ class Walk:
                 why="a roster row is matched by session_id else pid, and no rendered line "
                 "carries either"
             )
+        )
+
+    def row(self) -> Mapping[str, Any]:
+        """This lane's own roster row, read again — the payload, never a rendering.
+
+        Read afresh at every use rather than kept from `roster`: the fields the
+        items after it read — what the Session stopped on, the permission it
+        raised — are the ones that change, and a row held from earlier would
+        answer with what was true before the turn.
+        """
+        truth = self.truth()
+        if truth is None:
+            raise ItemFailed(
+                f"the {self.lane.binary} Session the harness started is no longer in the agent's "
+                f"own record, so no roster row can be matched to it"
+            )
+        row = roster_row(self.rows(), truth)
+        if row is None:
+            raise ItemFailed(
+                f"the Session the harness started ({truth.describe()}) has no row in the "
+                f"{self.lane.name} engine's roster"
+            )
+        return row
+
+    def the_chat(self) -> Chat:
+        """This lane's chat, or a lane blocked for want of one."""
+        if self.chat is None:
+            raise LaneBlocked(
+                f"the {self.lane.name} lane has no chat with its bot, and the items that read "
+                f"one cannot be graded on ground the run did not arrange"
+            )
+        return self.chat
+
+    def relay_file(self) -> Path:
+        """Where this lane's relay turn writes, made ready for it (§3).
+
+        The **directory** is the harness's own to arrange — on the Codex lane it
+        is a fresh one outside every writable root — so a permission is raised by
+        the write the item is about and not by a missing parent.
+        """
+        written = relay_target_file(
+            self.lane, workspace=self.workspace, run_directory=self.run_directory
+        )
+        written.parent.mkdir(parents=True, exist_ok=True)
+        return written
+
+    def proven(self, answer: support.Answer, what: str) -> None:
+        """A verb answered, and its receipt is a proven delivery — or the item failed.
+
+        Both verbs this harness sends are graded the same way and are graded here
+        once: the surface answered at all, and the receipt's `grade` field is
+        literally `delivered` (§2 items 3 and 4). Two copies of this is how one
+        verb comes to be graded more leniently than the other.
+        """
+        if not answer.ok:
+            raise ItemFailed(f"{what} was refused: {answer.text}")
+        unproven = undelivered(answer.text)
+        if unproven is not None:
+            raise ItemFailed(f"{what}: {unproven}")
+
+    def stop_notice(self) -> str:
+        """§2 item 2 — the acknowledge turn's end reaches the lane's chat.
+
+        Three claims, in the order the run can make them:
+
+        1. the engine **says** it sent a Companion Channel message for the Stop
+           the turn ended with, and says under which ids;
+        2. that message is **there**, re-read once by the first of those ids
+           through the user account — never searched for, never matched by name
+           (§9, #109);
+        3. `status` says what the Session stopped on.
+
+        The chat mark is taken **before** the turn is typed (§3), which is what
+        makes this a deadline on the notice landing rather than a window a
+        message is watched in: everything after the mark belongs to this turn.
+        """
+        chat = self.the_chat()
+        mark = self.mark()
+        with self.journal.turn(ACKNOWLEDGE_TURN, lane=self.lane.name):
+            self.session.submit(ACKNOWLEDGE_WORDS)
+            sent = self.waiting(
+                "TURN_SECONDS",
+                lambda: self.sent_since(mark),
+                what=f"the acknowledge turn's Stop Notice reaching the {self.lane.name} chat",
+            )
+        identifier = stop_notice_id(sent)
+        if identifier is None:
+            raise ItemFailed(
+                f"the engine recorded sending a Companion Channel message under no id at all, "
+                f"so there is nothing to re-read: {sent[-1]!r}"
+            )
+        self.notice_id = identifier
+        message = chat.read(identifier)
+        if message is None:
+            raise ItemFailed(
+                f"the chat does not hold message {identifier}, which the engine recorded having "
+                f"sent for this turn's Stop"
+            )
+        kind = self.waiting(
+            "ROSTER_SECONDS",
+            lambda: stopped_on(self.row()),
+            what=f"the {self.lane.name} engine saying what the Session stopped on",
+        )
+        return self.journal(
+            "stop.notice",
+            lane=self.lane.name,
+            message_id=identifier,
+            waiting_for=kind,
+            chat=message.as_journal_fields(),
+        )
+
+    def relay(self) -> str:
+        """§2 item 3 — the relay turn's receipt is a proven delivery.
+
+        The instruction is sent to the address on this lane's own roster row, and
+        the receipt is graded as **fields**: `grade` literally `delivered`, never
+        a substring (#71). What that instruction then does — the permission it
+        raises and the file it leaves — is `approval`'s to read: the two items
+        are one turn from two ends (§2).
+        """
+        target = address_of(self.row())
+        written = self.relay_file()
+        # The relay turn's **first half**: the instruction and the receipt for
+        # it. Its second half — the permission and the file — is `approval`'s,
+        # and is journalled under the same turn name, because §2 reads one turn
+        # from two ends and a reader adding the two halves gets the turn.
+        with self.journal.turn(
+            RELAY_TURN, lane=self.lane.name, half="instruction", path=str(written)
+        ):
+            answer = self.bridgectl(
+                "relay",
+                target,
+                write_words(written, RELAY_WORD),
+                deadline="RELAY_RECEIPT_SECONDS",
+            )
+        self.proven(answer, f"`relay {target} …`")
+        return self.journal(
+            "relay.receipt",
+            lane=self.lane.name,
+            target=target,
+            receipt=answer.text,
+            path=str(written),
+        )
+
+    def approval(self) -> str:
+        """§2 item 4 — the relay turn's permission, answered, and the file it leaves.
+
+        The permission is read from `waiting_for.approval_id` on the **payload's**
+        roster row and never from `state` (#191), answered with the product's own
+        verb, and the answer's receipt is graded as fields exactly as the relay's
+        was: the Approval Relay's contract is that the outcome is the receipt the
+        verb returns, and the reply belongs to the call that sent the id — so
+        there is no id to correlate afterwards.
+
+        The push of that permission to the chat is **not** read (§2): Telegram is
+        proved by one message out and one in, and nothing more.
+        """
+        written = self.relay_file()
+        with self.journal.turn(
+            RELAY_TURN, lane=self.lane.name, half="permission", path=str(written)
+        ):
+            identifier = self.waiting(
+                "TURN_SECONDS",
+                lambda: approval_id(self.row()),
+                what=(
+                    f"the permission the relay turn raises reaching the {self.lane.name} roster row"
+                ),
+            )
+            # Remembered before it is sent, so the arrangement inside a later
+            # turn cannot answer this same permission a second time if the row
+            # still carries it for a poll or two.
+            self.arranged.add(identifier)
+            answer = self.bridgectl("approve", identifier, ALLOW, deadline="RELAY_RECEIPT_SECONDS")
+            self.proven(answer, f"`approve {identifier} {ALLOW}`")
+            self.waiting(
+                "TURN_SECONDS",
+                lambda: wrote(written, RELAY_WORD),
+                what=f"the relay turn's write of {written} carrying {RELAY_WORD}",
+            )
+        return self.journal(
+            "approval.answered",
+            lane=self.lane.name,
+            approval_id=identifier,
+            verdict=ALLOW,
+            receipt=answer.text,
+            path=str(written),
+        )
+
+    def answer_any_permission(self) -> None:
+        """Answer a permission standing in front of the inbound turn's file — as arrangement.
+
+        **The one place this harness answers a permission it does not grade**
+        (ruling on #353). §3's inbound turn is a write like the relay turn's, and
+        the Claude lane keeps the product's own permission mode (#60), so the
+        same mode that makes `approval` observable here makes item 5's file wait
+        behind a dialog nobody answers. The spec grades item 5 by the file alone
+        and names no permission (§2 item 5), so the permission is arranged away
+        rather than graded: read exactly as `approval` reads it — the payload's
+        `waiting_for.approval_id`, never `state` — answered with the product's
+        own verb, and journalled as setup for the item.
+
+        Nothing here is a claim: no permission is the ordinary answer on the
+        Codex lane, whose sandbox allows a write inside the workspace and asks
+        nothing, and a roster this walk cannot read at this instant is not this
+        item's cause.
+        """
+        try:
+            identifier = approval_id(self.row())
+        except ItemFailed:
+            return
+        if identifier is None or identifier in self.arranged:
+            return
+        # Retired whatever the engine answers, so a permission this run cannot
+        # answer is asked about once rather than every half-second — and the
+        # refusal is on the line below, so the deadline this item then hits has
+        # the reason beside it rather than a silence.
+        self.arranged.add(identifier)
+        answer = self.bridgectl("approve", identifier, ALLOW, deadline="RELAY_RECEIPT_SECONDS")
+        self.journal(
+            "approval.arranged",
+            lane=self.lane.name,
+            approval_id=identifier,
+            verdict=ALLOW,
+            accepted=answer.ok,
+            reply=answer.text,
+            setup_for=str(items.Item.COMPANION_INBOUND),
+        )
+
+    def companion_inbound(self) -> str:
+        """§2 item 5 — plain words from the chat become a delivered relay.
+
+        Sent as a **reply** anchored to this Session's own Stop Notice (ADR 0021
+        §2–§3), which is why `stop notice` is this item's ground: the anchor is
+        that item's reading. `@<name>:` addressing is retired (ADR 0024) and this
+        harness has no way to send it — `Chat` has no `send`.
+
+        Graded by the file alone. No engine-log line is read: the file is the one
+        binary signal, and the old inbound log-line check is dropped as
+        superfluous (#48).
+        """
+        chat = self.the_chat()
+        if self.notice_id is None:
+            raise LaneBlocked(
+                "this lane has no Stop Notice id to anchor an inbound reply to, and the reply "
+                "anchor is what `stop notice` arranges for this item (§6)"
+            )
+        written = inbound_target_file(self.workspace)
+
+        def settled() -> bool:
+            """The file, and — on the way — any permission standing in front of it."""
+            if wrote(written, INBOUND_WORD):
+                return True
+            self.answer_any_permission()
+            return wrote(written, INBOUND_WORD)
+
+        with self.journal.turn(INBOUND_TURN, lane=self.lane.name, path=str(written)):
+            sent = chat.reply(self.notice_id, write_words(written, INBOUND_WORD))
+            self.waiting(
+                "REPLY_SECONDS",
+                settled,
+                what=f"the inbound turn's write of {written} carrying {INBOUND_WORD}",
+            )
+        return self.journal(
+            "companion.inbound",
+            lane=self.lane.name,
+            anchor=self.notice_id,
+            path=str(written),
+            chat=sent.as_journal_fields(),
         )

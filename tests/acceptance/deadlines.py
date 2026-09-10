@@ -29,6 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gpt_voicecoding.adapters.agent.claude import settings
+from gpt_voicecoding.control_plane import client
 
 #: The whole two-lane run, §1 rule 3 and §7. The one number the spec *does* fix.
 #: Not a deadline anything waits on — the run is measured against it and a run
@@ -78,6 +79,35 @@ ENGINE_START_SECONDS = 30.0
 #: That engine stopping when the lane is done with it. Shorter than a start: it
 #: has a socket to close and a log to flush, not adapters to build.
 ENGINE_STOP_SECONDS = 20.0
+
+#: A hand-started Session going when its lane is done with it, per signal (§4.4:
+#: the whole process group is asked, then insisted). Shorter than the engine's:
+#: a TUI has a screen to give back and no state to write, and a lane that has
+#: finished reading is not waiting on anything it does.
+SESSION_STOP_SECONDS = 10.0
+
+#: `claude agents --json` answering — the harness's own oracle for who it
+#: started (§2 item 1's "where the agent has one"). A read of a local registry,
+#: so this is a *hang* budget rather than a wait on work: the answer is there or
+#: the command is stuck.
+AGENT_ROSTER_SECONDS = 30.0
+
+#: One `ps` answering. The process table is read to find the native `codex`
+#: under its npm shim, and a `ps` that has not answered in this long is not
+#: going to.
+PROCESS_TABLE_SECONDS = 10.0
+
+#: What `bridgectl` itself gives an action that names no deadline — read off the
+#: product's own client rather than copied, so the harness waits the surface's
+#: wait rather than a second opinion about it.
+DEFAULT_SURFACE_SECONDS = client.DEFAULT_TIMEOUT_SECONDS
+
+#: How much longer than its own stated deadline a `bridgectl` call is given
+#: before the *harness* gives up on it. Generous on purpose, so a timeout here
+#: always means the surface hung and never that the action was merely slow —
+#: which is the distinction #28 was about: the CLI carries its own deadline and
+#: answers when it expires, so a harness racing it would report the race.
+SURFACE_GRACE_SECONDS = 30.0
 
 #: The engine-free realtime probe (§2 item 0b). The figure `docs/app-bundle.md`
 #: gives for this probe; the script has no duration flag — it runs until

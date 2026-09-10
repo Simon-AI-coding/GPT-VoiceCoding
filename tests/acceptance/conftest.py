@@ -10,24 +10,32 @@ loaded by pytest **by path** and is not an importable name
 suite — and every deadline in this harness is pinned by a fast test. The
 selection is in `items.py` for the same reason.
 
-What is **not** here: the concurrency of §4 and the walk of §2. Both are #352's
-and #353's, and both are named below so those tickets have somewhere to land.
+§4's concurrency is here too, and it is the reason `_one_lane` is a function
+rather than three more fixtures: a fixture is set up on the thread that
+*requests* it, which is pytest's, so two lanes' engines built there would be two
+engines built one after the other. What is **not** here is the walk of §2, which
+is `journey`'s.
 """
 
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import hand_started
 import items
 import journey
 import preflight as preflight_module
 import pytest
 import support
 from items import Item
+
+from gpt_voicecoding.installation import claude_hooks
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
@@ -237,8 +245,49 @@ def preflight(
         pytest.fail(f"preflight refused — {refused.check}: {refused.reason}", pytrace=False)
 
 
+@dataclass(frozen=True)
+class Arrangement:
+    """Everything a lane's walk needs that belongs to the **run** rather than the lane.
+
+    One value rather than seven parameters through two functions: what the lanes
+    share is a run, and naming it once is what keeps the next thing a run
+    acquires from becoming an eighth parameter in three signatures.
+    """
+
+    run_directory: Path
+    journal: support.Journal
+    verdict: support.Verdict
+    selection: items.Selection
+    machine: preflight_module.Machine
+    path_value: str
+
+
+@dataclass
+class LaneRun:
+    """One lane's whole walk, on its own thread, and how it ended.
+
+    An exception that escapes a thread is a traceback on stderr and a test that
+    passes, so the thread keeps hold of it — and writes the rows the lane owed
+    before it does, because a lane that left no row is one the verdict cannot
+    tell apart from a lane that was never asked to run.
+    """
+
+    lane: journey.Lane
+    thread: threading.Thread | None = None
+    failure: BaseException | None = None
+
+
 @pytest.fixture(scope="session")
-def lane_runs(preflight: str, probe_run: object) -> object:
+def lane_runs(
+    preflight: str,  # noqa: ARG001 - the refusals happen before a thread is started
+    probe_run: object,  # noqa: ARG001 - both run-level checks precede any lane (§2)
+    selected_lanes: tuple[str, ...],
+    selection: items.Selection,
+    run_directory: Path,
+    journal: support.Journal,
+    verdict: support.Verdict,
+    machine: preflight_module.Machine,
+) -> dict[str, LaneRun]:
     """Both lanes, walking in parallel on one thread each (§4).
 
     Depends on `probe_run` because §2 puts both run-level checks **before any
@@ -248,12 +297,235 @@ def lane_runs(preflight: str, probe_run: object) -> object:
     is FAIL for the run and the lanes walk on (§7), so `probe_run` answers
     rather than raising when the probe found nothing.
 
-    The walking itself is **#352's** (the engine, the config directories, the
-    trust, the Session) and **#353's** (the items). This fixture **joins** both
-    lanes before it yields, so the tests that read the verdict read a finished
-    one.
+    Session-scoped and **joined here**, so the tests that read the verdict read
+    a finished one, and so the run costs one lane's wall clock rather than the
+    sum of two.
+
+    The threads are where §4's isolation is actually spent: two engines, two
+    workspaces, two bots, and — on the Claude lane — a config directory of its
+    own. Everything they do not share is arranged in `_one_lane`.
     """
-    raise NotImplementedError("the lane runs are #352's")
+    arrangement = Arrangement(
+        run_directory=run_directory,
+        journal=journal,
+        verdict=verdict,
+        selection=selection,
+        machine=machine,
+        path_value=machine.path_of_login_shell() or "",
+    )
+    runs = {name: LaneRun(lane=journey.lane(name)) for name in selected_lanes}
+    for run in runs.values():
+        run.thread = threading.Thread(
+            target=_walk_lane, args=(run, arrangement), name=f"lane-{run.lane.name}"
+        )
+        run.thread.start()
+    for run in runs.values():
+        if run.thread is not None:
+            run.thread.join()
+    return runs
+
+
+def _walk_lane(run: LaneRun, arrangement: Arrangement) -> None:
+    """The thread body: arrange this lane, walk it, and never raise into the thread."""
+    started = time.monotonic()
+    try:
+        _one_lane(run, arrangement)
+    except BaseException as unfinished:  # noqa: BLE001 - the verdict is what reports it
+        run.failure = unfinished
+        journey.unarranged(
+            run.lane,
+            selection=arrangement.selection,
+            journal=arrangement.journal,
+            verdict=arrangement.verdict,
+            why=f"the lane ended in {type(unfinished).__name__}: {unfinished}",
+        )
+    finally:
+        arrangement.verdict.seconds[run.lane.name] = time.monotonic() - started
+
+
+def _one_lane(run: LaneRun, arrangement: Arrangement) -> None:
+    """A fresh engine, a fresh workspace and a hand-started Session, then the walk (§4).
+
+    This is one function rather than three fixtures because the two lanes run on
+    two threads: a fixture is set up on the thread that *requests* it, which is
+    pytest's, and two lanes' engines built there would be two engines built one
+    after the other.
+
+    Both of this lane's sockets live under `/tmp` rather than in the run
+    directory, because Darwin caps an `AF_UNIX` path at 103 bytes and the run
+    directory is 111 before the socket's own name — the same reason
+    `config.RUNTIME_ROOT` exists. `support.lane_sockets` makes that directory,
+    journals where it went, and takes it away again.
+
+    **The Session is started after the engine, and that is a choice with a
+    reason.** Both of the Claude lane's routes are hot — a Session already
+    running is reached by the built-in inbox socket and by the user-scope hooks
+    (#71) — so the harder order (Session first) is one the product claims to
+    survive, and a later ticket may want it. It is not this run's order because a
+    Session started before the engine has no `SessionStart` for the engine to
+    have heard, and every red would then have the same single cause.
+    """
+    lane = run.lane
+    directory = arrangement.run_directory
+    workspace = support.fresh_workspace(
+        directory / f"workspace-{lane.name}", arrangement.path_value
+    )
+    with support.lane_sockets(directory.name, lane.name, arrangement.journal) as sockets:
+        _the_lane_on(run, arrangement, workspace, sockets)
+
+
+def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, sockets: Path) -> None:
+    """The engine, the trust, the Session and the walk, on ground already arranged."""
+    lane, machine = run.lane, arrangement.machine
+    directory = arrangement.run_directory
+    config = support.derive_config(
+        source=machine.source_config,
+        engine_directory=directory / f"engine-{lane.name}",
+        workspace=workspace,
+        socket_path=sockets / "control.sock",
+        token_variable=machine.token_variable(lane.name),
+        codex_socket_directory=sockets,
+        delegate_model=journey.DELEGATED_TURN_MODEL,
+        dropped_agents=lane.dropped_agents,
+    )
+    # §4.1: the Claude lane's own config directory reaches the Session **and**
+    # the engine — `claude agents --json` inherits the engine process's
+    # environment, so an engine without the variable lists another registry.
+    # The Codex lane has none, and cannot: ADR 0022 derives the shared
+    # app-server's socket from one `CODEX_HOME`.
+    lane_variables = (
+        {claude_hooks.CONFIG_DIRECTORY_VARIABLE: str(machine.claude_config)}
+        if lane.own_config_directory
+        else {}
+    )
+    environment = hand_started.terminal_environment(arrangement.path_value, extra=lane_variables)
+    engine = support.Engine(
+        config=config,
+        bundle=machine.bundle,
+        journal=arrangement.journal,
+        token=machine.environ[config.token_variable],
+        path_value=arrangement.path_value,
+        # The **scrubbed** environment, the Session's own. The engine runs
+        # `claude agents --json` (§4.1), and the real engine is started by the
+        # menu-bar shell with no agent markers in its environment at all — this
+        # harness is run from inside a Claude Code session, which is the one
+        # place they come from (§4.4, #73).
+        base=environment,
+        extra=lane_variables,
+    )
+    surface = support.Bridgectl(
+        bundle=machine.bundle, socket_path=config.socket_path, journal=arrangement.journal
+    )
+    binary = hand_started.resolve(lane.binary, arrangement.path_value)
+    if binary is None:  # §5 refuses this before a lane starts; here it is a lane that cannot
+        raise hand_started.SessionRefused(
+            f"`{lane.binary}` does not resolve on the PATH the engine was handed"
+        )
+
+    with support.TrustGate(
+        workspace,
+        agent=lane.agent,
+        # The **Session's** environment, not this process's: it is what decides
+        # which Claude state file the grant has to land in (§4.1, #217).
+        environment=environment,
+        journal=arrangement.journal,
+        run_id=directory.name,
+    ):
+        engine.start()
+        session: hand_started.Session | None = None
+        try:
+            started_at = time.time()
+            session = hand_started.Session(
+                lane=lane.name,
+                binary=binary,
+                arguments=hand_started.launch_arguments(lane.arguments, lane.boot_words),
+                workspace=workspace,
+                environment=environment,
+                journal=arrangement.journal,
+                transcript=directory / f"pty-{lane.name}.log",
+            )
+            session.start()
+            journey.Walk(
+                lane=lane,
+                selection=arrangement.selection,
+                journal=arrangement.journal,
+                verdict=arrangement.verdict,
+                bridgectl=surface,
+                engine=engine,
+                session=session,
+                workspace=workspace,
+                truth=_agents_own_record(
+                    lane, session, environment, machine, workspace, started_at
+                ),
+                boot_turn_over=_boot_turn_over(lane, machine, workspace, started_at),
+                membership=_daemon_membership(lane, session, machine, workspace, started_at),
+            ).walk()
+        finally:
+            # Both, whatever either does: `Engine.stop` can raise after a kill
+            # that did not take, and a hand-started TUI left running is a
+            # Session on the *next* run's roster (§5's foreign-codex refusal is
+            # what it would meet).
+            try:
+                engine.stop()
+            finally:
+                if session is not None:
+                    session.stop()
+
+
+def _agents_own_record(
+    lane: journey.Lane,
+    session: hand_started.Session,
+    environment: dict[str, str],
+    machine: preflight_module.Machine,
+    workspace: Path,
+    started_at: float,
+) -> Callable[[], hand_started.GroundTruth | None]:
+    """Who the harness started, according to the **agent** rather than the engine.
+
+    The two lanes answer this differently and neither is the other's fallback:
+    `claude` keeps an official roster of its own, and `codex` writes nothing at
+    all until its first turn — so its oracle is the process the harness started,
+    which is the same evidence the product's own discovery has.
+    """
+    if lane.own_config_directory:
+        return lambda: hand_started.claude_ground_truth(session.pid or 0, environment)
+    return lambda: hand_started.codex_ground_truth(
+        session.pid or 0, machine.codex_home, workspace, started_at
+    )
+
+
+def _boot_turn_over(
+    lane: journey.Lane, machine: preflight_module.Machine, workspace: Path, started_at: float
+) -> Callable[[], bool]:
+    """Whether the turn the launch started has ended, on Codex's own bracketing (§3)."""
+    if lane.boot_words is None:
+        return lambda: True
+    return lambda: hand_started.codex_turn_over(
+        hand_started.codex_rollout(machine.codex_home, workspace, started_at)
+    )
+
+
+def _daemon_membership(
+    lane: journey.Lane,
+    session: hand_started.Session,
+    machine: preflight_module.Machine,
+    workspace: Path,
+    started_at: float,
+) -> Callable[[], support.DaemonMembership | None]:
+    """Whether the shared Codex daemon holds this Session's thread (§4.3, #232).
+
+    Asked of the thread id **as of now** rather than of one resolved earlier: the
+    id is written when the first turn starts, and the boot turn this follows is
+    that turn.
+    """
+    if lane.own_config_directory:
+        return lambda: None
+    return lambda: support.codex_daemon_membership(
+        hand_started.codex_ground_truth(
+            session.pid or 0, machine.codex_home, workspace, started_at
+        ).session_id,
+        control_socket=machine.codex_control_socket,
+    )
 
 
 @pytest.fixture(scope="session")

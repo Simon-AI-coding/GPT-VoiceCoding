@@ -9,8 +9,10 @@ a machine that is wrong in exactly one way.
 
 What each class pins:
 
-* `TestEveryRefusal` — one test per row of `docs/acceptance-design.md` §5, plus
-  the arranged machine that must **not** refuse.
+* `TestEveryRefusal` — one test per refusal `Preflight.ORDER` names, plus the
+  arranged machine that must **not** refuse. `ORDER` is the authority on what
+  the fourteen are: §5's table says the same thing, but the design document is
+  local-only (#356) and nothing here may read it (#362).
 * `TestTheOrder` — the session lock is taken before anything two runs collide
   over, and the costly check is last but for the two HTTP calls.
 * `TestWhatARefusalWrites` — non-zero exit, a valid `verdict.json` naming the
@@ -150,7 +152,7 @@ def journal(tmp_path: Path) -> support.Journal:
 
 
 class TestEveryRefusal:
-    """One test per row of §5's table, each fired by one wrong reading."""
+    """One test per refusal in `Preflight.ORDER`, each fired by one wrong reading."""
 
     def test_an_arranged_machine_is_not_refused(
         self, tmp_path: Path, journal: support.Journal
@@ -160,16 +162,37 @@ class TestEveryRefusal:
         events = [line["event"] for line in journal.read()]
         assert "preflight.passed" in events
 
-    def test_the_table_and_the_checks_are_the_same_fourteen(self) -> None:
-        """§5 lists fifteen rows; the stale trust row is explicitly not a refusal."""
-        table = [
-            line
-            for line in (REPOSITORY / "docs" / "acceptance-design.md").read_text().splitlines()
-            if line.startswith("| ") and "|" in line[2:]
+    def test_the_order_and_the_checks_are_the_same_fourteen(self) -> None:
+        """§5's fourteen refusals, read off the code that runs them.
+
+        §5 lists fifteen rows and the stale trust row is explicitly not a
+        refusal, which leaves fourteen — but the design document is local-only
+        (#356), so it is not what this reads. A test that opens it passes only
+        on the machine that wrote it and fails in CI, in a worktree and in every
+        fresh clone (#362); `Preflight.ORDER` is the authority, and it is the
+        one of the two that a runner actually has.
+
+        Both directions are the point. An `ORDER` entry that dispatches to
+        nothing is a refusal that raises `AttributeError` where it should have
+        refused, and a check absent from `ORDER` is one that never fires at all
+        — neither shows up as anything but a red somewhere else. `@check` is
+        what makes the second direction answerable: a check is what says it is
+        one, rather than whatever a reader guessed from its shape.
+        """
+        order = preflight.Preflight.ORDER
+        assert len(order) == 14
+        assert len(set(order)) == 14
+        dispatched = {preflight.Preflight._method(name) for name in order}
+        undefined = [
+            name for name in dispatched if not callable(getattr(preflight.Preflight, name, None))
         ]
-        assert len(preflight.Preflight.ORDER) == 14
-        assert len(set(preflight.Preflight.ORDER)) == 14
-        assert table, "the design document is local-only but must be present on this machine"
+        assert undefined == [], undefined
+        defined = {
+            name
+            for name, value in vars(preflight.Preflight).items()
+            if getattr(value, "__refusal_check__", False)
+        }
+        assert defined == dispatched, defined ^ dispatched
 
     def test_a_missing_bundle(self, tmp_path: Path, journal: support.Journal) -> None:
         refused = refusal(arranged(tmp_path, bundle=tmp_path / "nowhere.app"), journal)

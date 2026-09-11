@@ -521,7 +521,8 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
         if lane.own_config_directory
         else {}
     )
-    environment = hand_started.terminal_environment(arrangement.path_value, extra=lane_variables)
+    terminal = hand_started.terminal_environment(arrangement.path_value, extra=lane_variables)
+    environment = terminal.environment
     # §4.3: and one variable the **engine alone** carries — the Claude lane
     # engine's own empty `CODEX_HOME`, so it joins no shared app-server and sees
     # no Codex thread on the machine (#355). The Session's environment above is
@@ -580,7 +581,7 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
                 binary=binary,
                 arguments=hand_started.launch_arguments(lane.arguments, lane.boot_words),
                 workspace=workspace,
-                environment=environment,
+                environment=terminal,
                 journal=arrangement.journal,
                 transcript=directory / f"pty-{lane.name}.log",
             )

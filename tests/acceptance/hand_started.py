@@ -118,12 +118,27 @@ def extended_path(path_value: str, inherited: str) -> str:
     return os.pathsep.join(dict.fromkeys(entry for entry in entries if entry))
 
 
+@dataclass(frozen=True)
+class TerminalEnvironment:
+    """What a launch hands the child, and the markers it took away to get there.
+
+    The two are one answer and travel as one. `scrubbed` is the evidence for
+    `environment`: it is the set this call removed, computed where the removal
+    happened. Anyone who recomputes it later has to read some environment to do
+    it, and the only one they have is their own process's — which is a fact
+    about the harness's machine and not about the launch (§4.4, #362).
+    """
+
+    environment: dict[str, str]
+    scrubbed: list[str]
+
+
 def terminal_environment(
     path_value: str,
     *,
     base: Mapping[str, str] | None = None,
     extra: Mapping[str, str] | None = None,
-) -> dict[str, str]:
+) -> TerminalEnvironment:
     """The environment a terminal the operator opened would carry, not this agent's.
 
     `extra` is how a lane adds what only it needs — the Claude lane's
@@ -131,12 +146,18 @@ def terminal_environment(
     engine, so it is passed in rather than decided here.
     """
     inherited = dict(os.environ if base is None else base)
-    scrubbed = set(agent_markers(inherited))
-    environment = {name: value for name, value in inherited.items() if name not in scrubbed}
+    markers = set(agent_markers(inherited))
+    environment = {name: value for name, value in inherited.items() if name not in markers}
     environment["PATH"] = extended_path(path_value, inherited.get("PATH", ""))
     environment["TERM"] = "xterm-256color"
     environment.update(extra or {})
-    return environment
+    # Read off the finished environment rather than off `markers`: a lane's
+    # `extra` is applied last and could put one back, and a name the child is
+    # holding is not one this launch took away.
+    return TerminalEnvironment(
+        environment=environment,
+        scrubbed=[name for name in sorted(markers) if name not in environment],
+    )
 
 
 def agent_markers(environment: Mapping[str, str]) -> list[str]:
@@ -191,7 +212,7 @@ class Session:
         binary: Path,
         arguments: tuple[str, ...],
         workspace: Path,
-        environment: Mapping[str, str],
+        environment: TerminalEnvironment,
         journal: Any,  # support.Journal — imported nowhere here, to stay a leaf
         transcript: Path,
     ) -> None:
@@ -199,7 +220,10 @@ class Session:
         self.binary = binary
         self.arguments = arguments
         self.workspace = workspace
-        self.environment = dict(environment)
+        self.environment = dict(environment.environment)
+        #: What `terminal_environment` took away to build the above. Carried
+        #: rather than recomputed — see `TerminalEnvironment`.
+        self.scrubbed = list(environment.scrubbed)
         self.journal = journal
         self.transcript = transcript
         self._master: int | None = None
@@ -262,9 +286,11 @@ class Session:
             # About the **child**, not about this process: the row that rests on
             # this line is a claim that the Session was started clean, and a
             # count of the harness's own markers is not that claim. `markers`
-            # must be empty; `scrubbed` is what this launch took away.
+            # must be empty; `scrubbed` is what this launch took away, as the
+            # launch itself reported it — never a second reading of `os.environ`
+            # (#362).
             markers=agent_markers(self.environment),
-            scrubbed=[name for name in agent_markers(os.environ) if name not in self.environment],
+            scrubbed=self.scrubbed,
         )
 
     def stop(self) -> None:

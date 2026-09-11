@@ -122,6 +122,18 @@ TEMPORARY_DIRECTORY_VARIABLE = "TMPDIR"
 #: is named once so the check and the reason cannot drift apart.
 TOKEN_VARIABLE_CHECK = "bot token variable"
 
+
+def check(method: Callable[[Preflight], str | None]) -> Callable[[Preflight], str | None]:
+    """Mark a §5 refusal check, so `ORDER` can be held to naming every one.
+
+    Identity, not shape: a check is what this says it is. Recognising them by
+    their `str | None` return instead would collect the next helper that happens
+    to share it and drop the next check that spells it differently (#362).
+    """
+    method.__refusal_check__ = True  # type: ignore[attr-defined]
+    return method
+
+
 #: The two lanes by role rather than by index. Spelled from `items.LANES` so the
 #: names still live in one place (`tests/test_harness_contract.py`), and named
 #: here because two of §5's checks are about **one** lane each and `LANES[0]` at
@@ -645,6 +657,7 @@ class Preflight:
 
     # -- the machine's own arrangement ---------------------------------------
 
+    @check
     def _bundle(self) -> str | None:
         """The bundle is there, has an interpreter, and is this checkout's `src/`."""
         bundle = self.machine.bundle
@@ -658,6 +671,7 @@ class Preflight:
         provenance = self.machine.provenance()
         return None if provenance.matches else provenance.reason
 
+    @check
     def _realtime_probe_script(self) -> str | None:
         """A missing probe is a refusal, not a SKIPPED row (§5) — worktrees are why."""
         if self.machine.probe_script is not None:
@@ -669,6 +683,7 @@ class Preflight:
             "does not carry the sibling checkout."
         )
 
+    @check
     def _live_engine(self) -> str | None:
         """One bot, one engine: the menu-bar app's engine is not stopped for you."""
         live = self.machine.engine_socket
@@ -680,6 +695,7 @@ class Preflight:
             f"run will not stop it for you."
         )
 
+    @check
     def _writable_run_root(self) -> str | None:
         """A run root Codex may already write is an `approval` that can never fire.
 
@@ -707,6 +723,7 @@ class Preflight:
             f"with {support.ACCEPTANCE_ROOT_VARIABLE}."
         )
 
+    @check
     def _claude_config_directory(self) -> str | None:
         """The lane's own `CLAUDE_CONFIG_DIR`, logged in once by hand (§4.1)."""
         if CLAUDE_LANE not in self.machine.lanes:
@@ -734,6 +751,7 @@ class Preflight:
             )
         return None
 
+    @check
     def _codex_app_server(self) -> str | None:
         """The operator's shared app-server is live at its derived socket (§4.3).
 
@@ -757,6 +775,7 @@ class Preflight:
 
     # -- what a second run must not walk into --------------------------------
 
+    @check
     def _session_lock(self) -> str | None:
         """One acceptance run per machine, refused rather than kept by hand (#203).
 
@@ -773,6 +792,7 @@ class Preflight:
 
     # -- the bots ------------------------------------------------------------
 
+    @check
     def _bot_token_variable(self) -> str | None:
         """Each lane's token is in the environment, under the name its config gives."""
         for lane in self.machine.lanes:
@@ -784,6 +804,7 @@ class Preflight:
                 )
         return None
 
+    @check
     def _one_bot_token_for_both_lanes(self) -> str | None:
         """Two lanes is two bots: two engines long-polling one take each other's updates."""
         held: dict[str, list[str]] = {}
@@ -803,6 +824,7 @@ class Preflight:
 
     # -- the PATH the engine will really run on ------------------------------
 
+    @check
     def _login_shell_PATH(self) -> str | None:  # noqa: N802 - the table's own spelling
         path = self.machine.path_of_login_shell()
         if path:
@@ -813,6 +835,7 @@ class Preflight:
             "`shell/Sources/ShellCore/LoginShellPath.swift` is the method being mirrored."
         )
 
+    @check
     def _agent_binary(self) -> str | None:
         """`claude` / `codex` resolve on the PATH the engine will be handed (§4.4)."""
         for lane in self.machine.lanes:
@@ -823,11 +846,13 @@ class Preflight:
                 )
         return None
 
+    @check
     def _foreign_codex(self) -> str | None:
         return self.machine.foreign_codex()
 
     # -- the two calls -------------------------------------------------------
 
+    @check
     def _bot_reachable(self) -> str | None:
         """`getMe`: it answers, and says who it is. The token itself is never recorded."""
         for lane in self.machine.lanes:
@@ -849,6 +874,7 @@ class Preflight:
             )
         return None
 
+    @check
     def _chat_opened(self) -> str | None:
         """A bot cannot open a chat with a person — Telegram gives the human the first move.
 

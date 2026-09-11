@@ -684,7 +684,7 @@ class TestTheHandStartedSession:
             "HOME": "/Users/simon",
             "LANG": "en_NZ.UTF-8",
         }
-        arranged = hand_started.terminal_environment("/usr/bin", base=inherited)
+        arranged = hand_started.terminal_environment("/usr/bin", base=inherited).environment
         assert not [name for name in arranged if name.startswith("CLAUDE")]
         assert arranged["HOME"] == "/Users/simon"
         assert arranged["LANG"] == "en_NZ.UTF-8"
@@ -694,7 +694,7 @@ class TestTheHandStartedSession:
         arranged = hand_started.terminal_environment(
             "/opt/homebrew/bin:/usr/bin",
             base={"HOME": "/Users/simon", "PATH": "/usr/bin:/Users/simon/.local/bin"},
-        )
+        ).environment
         entries = arranged["PATH"].split(os.pathsep)
         assert entries[:2] == ["/opt/homebrew/bin", "/usr/bin"]
         assert "/Users/simon/.local/bin" in entries
@@ -707,7 +707,7 @@ class TestTheHandStartedSession:
             "/usr/bin",
             base={"HOME": "/Users/simon"},
             extra={claude_hooks.CONFIG_DIRECTORY_VARIABLE: "/somewhere/claude-config"},
-        )
+        ).environment
         assert arranged[claude_hooks.CONFIG_DIRECTORY_VARIABLE] == "/somewhere/claude-config"
 
     def test_the_binary_is_resolved_and_a_shell_function_is_not_the_command(
@@ -806,25 +806,37 @@ class TestTheHandStartedSession:
         A count of the harness's own markers is not that claim: this process is
         run from inside a Claude Code session and always carries them, so a line
         computed from `os.environ` reads identically whether the launch scrubbed
-        anything or not.
+        anything or not — green here, and on a runner a row claiming *nothing
+        was scrubbed* about a launch that scrubbed (#362).
+
+        So the two launches below differ in one marker and nothing else, and the
+        row has to tell them apart on a machine that carries markers of its own
+        and on one that carries none.
         """
-        journal = _journal(tmp_path)
+        home = tmp_path / "home"
+        planted = {"HOME": str(home), "CLAUDECODE": "1"}
+        assert self._scrub_row(tmp_path, "planted", planted) == ["CLAUDECODE"]
+        assert self._scrub_row(tmp_path, "bare", {"HOME": str(home)}) == []
+
+    def _scrub_row(self, tmp_path: Path, name: str, base: dict[str, str]) -> list[str]:
+        """Start a Session on `base`, stop it, and return the row's `scrubbed`."""
+        directory = tmp_path / name
+        directory.mkdir()
+        journal = _journal(directory)
         session = hand_started.Session(
             lane=CLAUDE_LANE,
             binary=Path(sys.executable),
             arguments=("-c", "pass"),
             workspace=tmp_path,
-            environment=hand_started.terminal_environment(
-                os.environ["PATH"], base={"HOME": "/Users/simon", "CLAUDECODE": "1"}
-            ),
+            environment=hand_started.terminal_environment(os.environ["PATH"], base=base),
             journal=journal,
-            transcript=tmp_path / "pty-claude.log",
+            transcript=tmp_path / f"pty-claude-{name}.log",
         )
         session.start()
         session.stop()
         (line,) = [one for one in journal.read() if one["event"] == "session.hand_started"]
         assert line["markers"] == []
-        assert "CLAUDECODE" in line["scrubbed"]
+        return line["scrubbed"]
 
     def test_the_settle_between_text_and_submit_is_the_named_one(self) -> None:
         """§4.4: `\\r` in the same burst reads as a newline, not a submit."""
@@ -1025,7 +1037,7 @@ class TestTheEnginesOwnCodexHome:
             "/usr/bin",
             base={"HOME": "/Users/simon", codex_runtime.CODEX_HOME_VARIABLE: "/Users/simon/.codex"},
             extra=self.SESSION,
-        )
+        ).environment
         assert session[codex_runtime.CODEX_HOME_VARIABLE] == "/Users/simon/.codex"
 
     def test_the_variable_reaches_the_engine_process(self, tmp_path: Path) -> None:
@@ -1612,12 +1624,14 @@ class TestWhatTheCodexLaneMayNotDo:
         (if they have one) travels unchanged.
         """
         assert journey.lane(CODEX_LANE).own_config_directory is False
-        bare = hand_started.terminal_environment("/usr/bin", base={"HOME": "/Users/simon"})
+        bare = hand_started.terminal_environment(
+            "/usr/bin", base={"HOME": "/Users/simon"}
+        ).environment
         assert codex_runtime.CODEX_HOME_VARIABLE not in bare
         theirs = hand_started.terminal_environment(
             "/usr/bin",
             base={"HOME": "/Users/simon", codex_runtime.CODEX_HOME_VARIABLE: "/elsewhere/.codex"},
-        )
+        ).environment
         assert theirs[codex_runtime.CODEX_HOME_VARIABLE] == "/elsewhere/.codex"
 
     def test_no_lane_installs_the_shared_app_servers_job_or_reconciles_it(self) -> None:

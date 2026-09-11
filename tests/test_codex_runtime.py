@@ -39,12 +39,19 @@ def on_path(root: Path, *, name: str = "codex", executable: bool = True) -> Path
 
 
 class TestResolvingTheUsersCodex:
-    """An ordinary `which` over the `PATH` this process was given — option (A)."""
+    """An ordinary `which` over the `PATH` this machine states — option (A), #327.
+
+    "The `PATH` this process was given" was the rule until #327 found that a
+    terminal is a process too. What is resolved over is
+    :func:`codex_runtime.machine_path`, and the class below is about where that
+    comes from; this one is about the `which` itself, so every environment here
+    states one outright.
+    """
 
     def test_the_codex_on_the_path_is_the_one(self, tmp_path: Path) -> None:
         directory = on_path(tmp_path)
 
-        found = codex_runtime.resolve({"PATH": str(directory)}, tmp_path)
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: str(directory)}, tmp_path)
 
         assert found.runtime is not None
         assert found.runtime.executable == directory / "codex"
@@ -64,7 +71,9 @@ class TestResolvingTheUsersCodex:
         first = on_path(tmp_path / "first")
         second = on_path(tmp_path / "second")
 
-        found = codex_runtime.resolve({"PATH": f"{first}:{second}"}, tmp_path)
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: f"{first}:{second}"}, tmp_path
+        )
 
         assert found.runtime is not None
         assert found.runtime.executable == first / "codex"
@@ -74,7 +83,7 @@ class TestResolvingTheUsersCodex:
         empty = tmp_path / "empty"
         empty.mkdir()
 
-        found = codex_runtime.resolve({"PATH": str(empty)}, tmp_path)
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: str(empty)}, tmp_path)
 
         assert found.runtime is None
         assert not found.found
@@ -91,11 +100,13 @@ class TestResolvingTheUsersCodex:
         found = codex_runtime.resolve({}, tmp_path)
 
         assert found.runtime is None
-        assert "no PATH" in found.reason
+        assert found.reason == codex_runtime.NO_MACHINE_PATH
 
     @pytest.mark.parametrize("stated", ["", "   "])
     def test_a_blank_path_is_no_path(self, tmp_path: Path, stated: str) -> None:
-        assert codex_runtime.resolve({"PATH": stated}, tmp_path).runtime is None
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: stated}, tmp_path)
+
+        assert found.runtime is None
 
     def test_a_codex_that_cannot_be_run_is_no_codex(self, tmp_path: Path) -> None:
         """#272's second edge case, in the form that survives option (A).
@@ -106,7 +117,7 @@ class TestResolvingTheUsersCodex:
         """
         directory = on_path(tmp_path, executable=False)
 
-        found = codex_runtime.resolve({"PATH": str(directory)}, tmp_path)
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: str(directory)}, tmp_path)
 
         assert found.runtime is None
         assert "there is no codex" in found.reason
@@ -115,7 +126,12 @@ class TestResolvingTheUsersCodex:
         directory = tmp_path / "bin"
         (directory / "codex").mkdir(parents=True)
 
-        assert codex_runtime.resolve({"PATH": str(directory)}, tmp_path).runtime is None
+        assert (
+            codex_runtime.resolve(
+                {codex_runtime.LOGIN_PATH_VARIABLE: str(directory)}, tmp_path
+            ).runtime
+            is None
+        )
 
     def test_resolution_is_repeated_and_never_remembered(self, tmp_path: Path) -> None:
         """The `nvm use` case, and why no `config.toml` key records this.
@@ -127,12 +143,139 @@ class TestResolvingTheUsersCodex:
         staleness check to write.
         """
         directory = on_path(tmp_path)
-        environ = {"PATH": str(directory)}
+        environ = {codex_runtime.LOGIN_PATH_VARIABLE: str(directory)}
         assert codex_runtime.resolve(environ, tmp_path).runtime is not None
 
         (directory / "codex").unlink()
 
         assert codex_runtime.resolve(environ, tmp_path).runtime is None
+
+
+class TestWhereTheRenderedPathComesFrom:
+    """#327: a fact about the machine, never about whichever process typed the verb.
+
+    #275 fixed the half of this that lives in Swift — the login-shell read stopped
+    inheriting the app's own `PATH` — and accepted the half that lives here: a CLI
+    run from a terminal compared against that terminal. It compared, and then it
+    *wrote*, which is the defect. The rule now has two sources and no third: a
+    `PATH` the caller **states**, else the one the standing job already **records**.
+    The process's own `PATH` is not one of them.
+    """
+
+    def test_the_stated_login_path_is_the_one_the_render_uses(self, tmp_path: Path) -> None:
+        machine = on_path(tmp_path / "machine")
+
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: str(machine)}, tmp_path)
+
+        assert found.runtime is not None
+        assert found.runtime.path == str(machine)
+        assert found.runtime.executable == machine / "codex"
+
+    def test_the_callers_own_path_is_never_used(self, tmp_path: Path) -> None:
+        """The reported defect, at the seam that causes it.
+
+        A terminal whose `PATH` carries anything the profile does not — an agent's
+        session directories, a version-pinned plugin cache — must not be able to
+        get those entries into a rendered job through any verb.
+        """
+        machine = on_path(tmp_path / "machine")
+        terminal = on_path(tmp_path / "terminal")
+
+        found = codex_runtime.resolve(
+            {
+                codex_runtime.LOGIN_PATH_VARIABLE: str(machine),
+                "PATH": f"{machine}:{terminal}",
+            },
+            tmp_path,
+        )
+
+        assert found.runtime is not None
+        assert found.runtime.path == str(machine)
+        assert str(terminal) not in found.runtime.path
+
+    def test_with_nothing_stated_the_recorded_path_is_the_one(self, tmp_path: Path) -> None:
+        """What a terminal run falls back to, and why it is not a new copy.
+
+        The standing job is what the one login-shell reading last wrote, so reusing
+        it defers to the machine's existing record rather than making a second one —
+        which is what `LoginShellPath`'s rule against recording a profile forbids.
+        """
+        recorded = on_path(tmp_path / "recorded")
+        terminal = on_path(tmp_path / "terminal")
+
+        found = codex_runtime.resolve(
+            {"PATH": str(terminal)}, tmp_path, recorded_path=str(recorded)
+        )
+
+        assert found.runtime is not None
+        assert found.runtime.path == str(recorded)
+        assert found.runtime.executable == recorded / "codex"
+
+    def test_a_statement_beats_a_record(self, tmp_path: Path) -> None:
+        """The app's own reconcile, on a machine whose profile has since changed."""
+        recorded = on_path(tmp_path / "recorded")
+        machine = on_path(tmp_path / "machine")
+
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: str(machine)},
+            tmp_path,
+            recorded_path=str(recorded),
+        )
+
+        assert found.runtime is not None
+        assert found.runtime.path == str(machine)
+
+    def test_neither_stated_nor_recorded_is_a_reason_and_not_a_guess(self, tmp_path: Path) -> None:
+        """A fresh machine, from a caller that cannot say what its `PATH` is.
+
+        `ok` stays true through `_no_codex` — Simon's ruling on #276 — so this is a
+        sentence and not a failed install. What it must never be is the caller's
+        own `PATH` used anyway.
+        """
+        on_path(tmp_path / "terminal")
+
+        found = codex_runtime.resolve({"PATH": str(tmp_path / "terminal" / "bin")}, tmp_path)
+
+        assert found.runtime is None
+        assert not found.found
+        assert found.reason == codex_runtime.NO_MACHINE_PATH
+
+    @pytest.mark.parametrize("stated", ["", "   "])
+    def test_a_blank_statement_falls_through_to_the_record(
+        self, tmp_path: Path, stated: str
+    ) -> None:
+        recorded = on_path(tmp_path / "recorded")
+
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: stated}, tmp_path, recorded_path=str(recorded)
+        )
+
+        assert found.runtime is not None
+        assert found.runtime.path == str(recorded)
+
+    @pytest.mark.parametrize("recorded", ["", "   ", None])
+    def test_a_blank_record_is_no_record(self, tmp_path: Path, recorded: str | None) -> None:
+        found = codex_runtime.resolve({}, tmp_path, recorded_path=recorded)
+
+        assert found.runtime is None
+
+    def test_a_recorded_path_its_codex_has_left_is_no_codex(self, tmp_path: Path) -> None:
+        """And that is the honest answer: the job runs on the recorded `PATH`.
+
+        A terminal that has codex on its own `PATH` does not make the standing job
+        runnable, so borrowing the terminal's answer here would report a machine
+        that works when the login item does not.
+        """
+        recorded = on_path(tmp_path / "recorded")
+        (recorded / "codex").unlink()
+        on_path(tmp_path / "terminal")
+
+        found = codex_runtime.resolve(
+            {"PATH": str(tmp_path / "terminal" / "bin")}, tmp_path, recorded_path=str(recorded)
+        )
+
+        assert found.runtime is None
+        assert str(recorded) in found.reason, "the reason must say where it looked"
 
 
 class TestTheControlSocket:
@@ -147,7 +290,8 @@ class TestTheControlSocket:
         moved = tmp_path / "elsewhere"
 
         found = codex_runtime.resolve(
-            {"PATH": str(on_path(tmp_path)), "CODEX_HOME": str(moved)}, tmp_path
+            {codex_runtime.LOGIN_PATH_VARIABLE: str(on_path(tmp_path)), "CODEX_HOME": str(moved)},
+            tmp_path,
         )
 
         assert found.runtime is not None
@@ -166,7 +310,9 @@ class TestTheControlSocket:
         )
 
     def test_the_server_the_job_starts_listens_on_exactly_that_path(self, tmp_path: Path) -> None:
-        found = codex_runtime.resolve({"PATH": str(on_path(tmp_path))}, tmp_path)
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: str(on_path(tmp_path))}, tmp_path
+        )
         assert found.runtime is not None
 
         assert found.runtime.server_arguments == [
@@ -179,15 +325,17 @@ class TestTheControlSocket:
 class TestTheLaunchEnvironment:
     """The third fact, which #271 did not anticipate and found by failing."""
 
-    def test_the_path_is_the_one_this_process_was_given(self, tmp_path: Path) -> None:
+    def test_the_path_is_the_one_this_machine_states(self, tmp_path: Path) -> None:
         """#38: nothing rendered may be a constant standing in for the environment.
 
         launchd's own `/usr/bin:/bin:/usr/sbin:/sbin` written into a plist would
-        be exactly that. What goes in is the `PATH` the reconcile ran on.
+        be exactly that. What goes in is the `PATH` this machine states — and not,
+        since #327, the one the reconcile happened to be started with, which is
+        the same defect with a different constant.
         """
         stated = f"{on_path(tmp_path)}:/usr/bin:/bin"
 
-        found = codex_runtime.resolve({"PATH": stated}, tmp_path)
+        found = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: stated}, tmp_path)
 
         assert found.runtime is not None
         assert found.runtime.launch_environment["PATH"] == stated
@@ -203,7 +351,9 @@ class TestTheLaunchEnvironment:
         """
         directory = on_path(tmp_path)
 
-        found = codex_runtime.resolve({"PATH": f"/usr/bin:{directory}"}, tmp_path)
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: f"/usr/bin:{directory}"}, tmp_path
+        )
 
         assert found.runtime is not None
         carried = found.runtime.launch_environment["PATH"].split(":")
@@ -215,7 +365,9 @@ class TestTheLaunchEnvironment:
         Without this, a user who moved their Codex home gets a server on one
         home and TUIs on another, and an empty roster nothing explains.
         """
-        found = codex_runtime.resolve({"PATH": str(on_path(tmp_path))}, tmp_path)
+        found = codex_runtime.resolve(
+            {codex_runtime.LOGIN_PATH_VARIABLE: str(on_path(tmp_path))}, tmp_path
+        )
 
         assert found.runtime is not None
         assert found.runtime.launch_environment["CODEX_HOME"] == str(tmp_path / ".codex")
@@ -224,7 +376,10 @@ class TestTheLaunchEnvironment:
         """A login shell can set anything, and a job that inherited it would be a
         second, invisible configuration file — `LoginShellPath`'s own rule."""
         found = codex_runtime.resolve(
-            {"PATH": str(on_path(tmp_path)), "OPENAI_API_KEY": "sk-not-this-jobs-business"},
+            {
+                codex_runtime.LOGIN_PATH_VARIABLE: str(on_path(tmp_path)),
+                "OPENAI_API_KEY": "sk-not-this-jobs-business",
+            },
             tmp_path,
         )
 

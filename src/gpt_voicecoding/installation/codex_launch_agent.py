@@ -116,7 +116,11 @@ from gpt_voicecoding.installation import (
     replace_text,
     write_bootstrapped_render,
 )
-from gpt_voicecoding.installation.codex_runtime import CodexRuntime, Resolution
+from gpt_voicecoding.installation.codex_runtime import (
+    PATH_VARIABLE,
+    CodexRuntime,
+    Resolution,
+)
 
 #: How this item is named in a report.
 NAME: Final = "codex-launch-agent"
@@ -398,15 +402,42 @@ def _read(path: Path) -> JobFile | None | str:
     return JobFile(document=document, sha256=hashlib.sha256(contents).hexdigest())
 
 
-#: Why the `PATH` in a no-codex reason may not be the user's own — #276.
+def recorded_path(launch_agents_directory: Path) -> str | None:
+    """The ``PATH`` the standing job carries, or ``None`` when it carries none.
+
+    **This machine's own record of a fact it cannot re-derive** — #327. The
+    login `PATH` is read once, in Swift, and this side is handed the answer; a
+    caller nobody handed it needs somewhere to get one that is not its own
+    environment, and the plist is that somewhere. Not a second copy of the
+    user's profile, which ``LoginShellPath``'s rule forbids: it is the copy
+    launchd already loads, read back rather than kept beside.
+
+    Every shape that is not one `PATH` string answers ``None``, and none of them
+    raises. ``_read`` already refuses a file this product never wrote and one
+    that is not a property list at all, and both arrive here as "no record" for
+    the same reason the verbs treat them as "nothing to go on".
+    """
+    standing = _read(plist_path(launch_agents_directory))
+    if not isinstance(standing, JobFile):
+        return None
+    environment = standing.document.get("EnvironmentVariables")
+    if not isinstance(environment, Mapping):
+        return None
+    stated = environment.get(PATH_VARIABLE)
+    if not isinstance(stated, str):
+        return None
+    return stated.strip() or None
+
+
+#: Why the `PATH` in a no-codex reason may not be the user's own — #276, #327.
 #:
-#: The reason already names the `PATH` that was searched. What it did not say is
-#: where that `PATH` comes from, and the answer is the difference between "this
-#: machine has no codex" and "this reconcile could not see the one it has": the
-#: shell reads the user's login `PATH` and hands it to this subprocess, that read
-#: **fails open**, and what a failed read leaves behind is launchd's own
-#: `/usr/bin:/bin:/usr/sbin:/sbin`, on which `which codex` finds nothing on a
-#: machine that has one.
+#: The reason already names the `PATH` that was searched, where there was one.
+#: What it does not say is where a searched `PATH` comes from, and that is the
+#: difference between "this machine has no codex" and "this reconcile could not
+#: see the one it has": the shell reads the user's login `PATH` and **states** it
+#: to this subprocess, that read **fails open**, and a run nobody stated one to
+#: has only what the standing job records — which on a machine that has never had
+#: one is nothing at all.
 #:
 #: **Unconditional, and it names no value.** Deciding this wording by comparing
 #: the searched `PATH` against a hard-coded launchd default is #38 exactly — a
@@ -416,13 +447,13 @@ def _read(path: Path) -> JobFile | None | str:
 #: every login-shell read, failed or not (#118).
 #:
 #: **It points at nothing, which is what lets it be unconditional.**
-#: `codex_runtime.resolve` composes two reasons, and the second is "this process
-#: was given no PATH" — after which "that PATH" would refer to something the
-#: same sentence had just said does not exist. So this states the rule rather
-#: than the value, and reads as well after either.
+#: `codex_runtime.resolve` composes two reasons, and the second is that nothing
+#: stated a `PATH` and nothing recorded one — after which "that PATH" would refer
+#: to something the same sentence had just said does not exist. So this states
+#: the rule rather than the value, and reads as well after either.
 _PATH_PROVENANCE: Final = (
-    "A reconcile searches the PATH it was handed, and the login-shell read "
-    "behind that fails open to launchd's own; the menu bar reports the reading"
+    "A reconcile renders over the PATH the app states from its login-shell read, "
+    "or else the one the standing job records; the menu bar reports the reading"
 )
 
 
@@ -445,6 +476,30 @@ def _no_codex(reason: str) -> Outcome:
         NAME,
         State.ABSENT,
         note=f"{reason} — nothing to start, so nothing to install. {_PATH_PROVENANCE}",
+    )
+
+
+def _no_machine_path(reason: str) -> Outcome:
+    """A caller with no standing to say what this machine's `PATH` is — #327.
+
+    **`ok` is false here, and that is the one place it differs from `_no_codex`**
+    (Simon's ruling, 2026-09-11, on #327's review). The two look alike and are
+    not: "there is no codex on this machine's PATH" is a fact about the machine,
+    said while the run carries on, and #276 ruled it `ok`. This is a run that
+    could not find out what the machine's `PATH` *is* — nothing stated one and no
+    standing job records one — so there is no render to compare against and none
+    to write, and a zero exit would report an installation that never happened.
+
+    Nothing is written either way. What changes is that the run says so.
+    """
+    return Outcome(
+        NAME,
+        State.ABSENT,
+        ok=False,
+        note=(
+            f"{reason} — nothing to render, so nothing was written. Open the app, "
+            f"which states it. {_PATH_PROVENANCE}"
+        ),
     )
 
 
@@ -542,14 +597,21 @@ def inspect(
     loaded-render SHA matches the file. A plist that is current with no job, or
     whose loaded SHA differs, is a machine that is not current now.
     """
-    if codex.runtime is None:
-        return _no_codex(codex.reason)
-    runtime = codex.runtime
-
+    # The file is read before the codex question, not after — #327. Reading the
+    # standing job for its `PATH` gave every unreadable one a second, quieter
+    # reading: `recorded_path` answers `None` for a file it refuses, the resolver
+    # then has nothing to render over, and a `_no_codex` taken first would report
+    # `absent, ok` about a plist this boundary had already refused to touch. So
+    # "this install would destroy it" is said before "there is nothing to install".
     path = plist_path(launch_agents_directory)
     standing = _read(path)
     if isinstance(standing, str):
         return Outcome(NAME, State.ABSENT, ok=False, note=standing)
+    if codex.path_unknown:
+        return _no_machine_path(codex.reason)
+    if codex.runtime is None:
+        return _no_codex(codex.reason)
+    runtime = codex.runtime
 
     # Asked once. Asked twice, the two answers can differ — launchd is a live
     # thing — and the report would then carry a `state` decided by one reading
@@ -593,15 +655,20 @@ def install(
     record_path: Path,
     launchd: Launchd,
 ) -> Outcome:
-    """Put the job where launchd finds it, and have launchd hold it now. Idempotent."""
-    if codex.runtime is None:
-        return _no_codex(codex.reason)
-    runtime = codex.runtime
+    """Put the job where launchd finds it, and have launchd hold it now. Idempotent.
 
+    The file is read before the codex question for `inspect`'s reason, which is
+    sharper here: this is the verb that would otherwise go on to write.
+    """
     path = plist_path(launch_agents_directory)
     standing = _read(path)
     if isinstance(standing, str):
         return Outcome(NAME, State.ABSENT, ok=False, note=standing)
+    if codex.path_unknown:
+        return _no_machine_path(codex.reason)
+    if codex.runtime is None:
+        return _no_codex(codex.reason)
+    runtime = codex.runtime
 
     wanted = job(runtime, log_path)
     wanted_text = render(wanted)

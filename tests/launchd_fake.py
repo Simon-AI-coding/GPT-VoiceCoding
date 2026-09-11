@@ -147,19 +147,27 @@ def codex(root: Path, *, home: Path | None = None) -> codex_runtime.Resolution:
     the test composed, rather than by constructing a `CodexRuntime` outright: a
     fake that skipped resolution would let the item's tests pass over a runtime
     the resolver could never produce.
+
+    The `PATH` is **stated**, under `LOGIN_PATH_VARIABLE`, because that is what
+    the shell does and since #327 it is the only thing that answers. A fixture
+    that set `PATH` here would be composing the one input the resolver is
+    required to ignore, and every test built on it would pass over a machine.
     """
     return codex_runtime.resolve(
         {
-            "PATH": str(codex_on_path(root)),
+            codex_runtime.LOGIN_PATH_VARIABLE: str(codex_on_path(root)),
             codex_runtime.CODEX_HOME_VARIABLE: str(home if home is not None else codex_home(root)),
         }
     )
 
 
 def no_codex(root: Path) -> codex_runtime.Resolution:
-    """A machine with a `PATH` and no codex anywhere on it."""
+    """A machine with a stated `PATH` and no codex anywhere on it."""
     empty = root / "empty-bin"
     empty.mkdir(parents=True, exist_ok=True)
     return codex_runtime.resolve(
-        {"PATH": str(empty), codex_runtime.CODEX_HOME_VARIABLE: str(codex_home(root))}
+        {
+            codex_runtime.LOGIN_PATH_VARIABLE: str(empty),
+            codex_runtime.CODEX_HOME_VARIABLE: str(codex_home(root)),
+        }
     )

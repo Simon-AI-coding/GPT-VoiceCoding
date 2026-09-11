@@ -35,6 +35,8 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from gpt_voicecoding.installation import (
     BootstrappedRender,
     State,
@@ -466,22 +468,28 @@ def test_the_no_codex_note_says_where_that_path_came_from(
 def test_the_provenance_sentence_reads_after_either_reason() -> None:
     """`resolve` composes two reasons, and the sentence follows both.
 
-    The second is "this process was given no PATH", after which a sentence
-    opening "that PATH" would point at something the clause before it had just
-    said does not exist. Unconditional was the ruling (#276), so the way to keep
-    it unconditional is to state the rule rather than the value — which is a
-    claim about the wording, and is pinned as one.
+    The second is that nothing stated a `PATH` and nothing recorded one (#327),
+    after which a sentence opening "that PATH" would point at something the
+    clause before it had just said does not exist. Unconditional was the ruling
+    (#276), so the way to keep it unconditional is to state the rule rather than
+    the value — which is a claim about the wording, and is pinned as one.
     """
-    on_a_path = codex_runtime.resolve({"PATH": "/nowhere-at-all"})
+    on_a_path = codex_runtime.resolve({codex_runtime.LOGIN_PATH_VARIABLE: "/nowhere-at-all"})
     with_no_path = codex_runtime.resolve({})
 
-    assert "on PATH (/nowhere-at-all)" in agent._no_codex(on_a_path.reason).note
-    assert "given no PATH" in agent._no_codex(with_no_path.reason).note
-    for outcome in (agent._no_codex(on_a_path.reason), agent._no_codex(with_no_path.reason)):
+    # Each reason with the outcome it actually reaches: the two absences are
+    # acted on differently (#327), and only the sentence is shared.
+    said = (agent._no_codex(on_a_path.reason), agent._no_machine_path(with_no_path.reason))
+    assert "on PATH (/nowhere-at-all)" in said[0].note
+    assert codex_runtime.NO_MACHINE_PATH in said[1].note
+    for outcome in said:
         assert agent._PATH_PROVENANCE in outcome.note
         # The sentence points at no value, so neither reason leaves it dangling.
         assert "That PATH" not in outcome.note
-        assert (outcome.ok, outcome.state) == (True, State.ABSENT)
+        assert outcome.state is State.ABSENT
+    # And the one thing that is not shared: a machine with no codex carries on,
+    # a caller that cannot say what the machine's PATH is does not (#276, #327).
+    assert (said[0].ok, said[1].ok) == (True, False)
 
 
 def test_a_codex_without_the_executable_bit_is_no_codex(
@@ -501,7 +509,12 @@ def test_a_codex_without_the_executable_bit_is_no_codex(
     (bin_directory / "codex").write_text("#!/bin/sh\n", encoding="utf-8")
     (bin_directory / "codex").chmod(0o644)
 
-    found = codex_runtime.resolve({"PATH": str(bin_directory), "CODEX_HOME": str(tmp_path)})
+    found = codex_runtime.resolve(
+        {
+            codex_runtime.LOGIN_PATH_VARIABLE: str(bin_directory),
+            "CODEX_HOME": str(tmp_path),
+        }
+    )
 
     assert found.runtime is None
     assert "there is no codex" in found.reason
@@ -598,6 +611,168 @@ def test_the_command_timeout_fits_inside_the_shell_ceiling_it_is_derived_from() 
 
     assert float(stated.group(1)) == agent.SHELL_RECONCILE_DEADLINE_SECONDS
     assert agent.COMMAND_TIMEOUT_SECONDS * agent.COMMANDS_PER_RUN <= float(stated.group(1))
+
+
+# -- the PATH this machine records ---------------------------------------
+
+
+def test_the_recorded_path_is_the_one_the_standing_job_carries(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """#327: what a caller that cannot state a `PATH` falls back to.
+
+    Read off the job rather than kept beside it, so there is nothing to keep in
+    step: the file launchd loads *is* the record.
+    """
+    directory, found = launch_agents(tmp_path), codex(tmp_path)
+    agent.install(directory, found, log_in(tmp_path), record_in(tmp_path), launchd.launchd)
+
+    assert found.runtime is not None
+    assert agent.recorded_path(directory) == found.runtime.path
+
+
+def test_no_job_on_disk_records_no_path(tmp_path: Path) -> None:
+    assert agent.recorded_path(launch_agents(tmp_path)) is None
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        pytest.param(None, id="no environment at all"),
+        pytest.param({}, id="an environment with no PATH"),
+        pytest.param({"PATH": "   "}, id="a blank PATH"),
+        pytest.param({"PATH": 7}, id="a PATH that is not a string"),
+        pytest.param("not a dictionary", id="an environment that is not a dictionary"),
+    ],
+)
+def test_a_job_that_records_no_usable_path_answers_nothing(
+    tmp_path: Path, environment: object
+) -> None:
+    """Never a half-read answer: anything but a `PATH` string is no record.
+
+    This reads a file the user can edit, so every shape that is not the one
+    thing wanted has to arrive as "no answer" rather than as an exception —
+    a reconcile runs before the engine, from a shell with nowhere to put one.
+    """
+    directory = launch_agents(tmp_path)
+    document: dict = {"Label": agent.LABEL}
+    if environment is not None:
+        document["EnvironmentVariables"] = environment
+    agent.plist_path(directory).write_bytes(plistlib.dumps(document, sort_keys=True))
+
+    assert agent.recorded_path(directory) is None
+
+
+def test_a_job_this_product_never_wrote_records_nothing(tmp_path: Path) -> None:
+    """The foreign-label guard, which `_read` already owns, reaching this too."""
+    directory = launch_agents(tmp_path)
+    agent.plist_path(directory).write_bytes(
+        plistlib.dumps(
+            {"Label": "com.example.someone-else", "EnvironmentVariables": {"PATH": "/theirs"}},
+            sort_keys=True,
+        )
+    )
+
+    assert agent.recorded_path(directory) is None
+
+
+def test_an_unreadable_job_records_nothing_rather_than_raising(tmp_path: Path) -> None:
+    directory = launch_agents(tmp_path)
+    agent.plist_path(directory).write_text("this is not a property list", encoding="utf-8")
+
+    assert agent.recorded_path(directory) is None
+
+
+def test_the_shell_and_this_module_spell_the_stated_variable_the_same_way() -> None:
+    """#47's guard, on #327's constant: one name, two languages, one test.
+
+    The shell is the only writer of this variable and this side is the only
+    reader, so a rename on one side and not the other is a silent return to the
+    defect — the reader would find nothing stated and fall back for ever, and
+    every profile change would stop reaching the plist.
+    """
+    swift = (
+        Path(__file__).resolve().parents[1] / "shell/Sources/ShellCore/Installation.swift"
+    ).read_text(encoding="utf-8")
+    stated = re.search(r'loginPathVariable\s*=\s*"([^"]+)"', swift)
+    assert stated, "the shell no longer states the variable this side reads"
+
+    assert stated.group(1) == codex_runtime.LOGIN_PATH_VARIABLE
+
+
+@pytest.mark.parametrize("act", [agent.inspect, agent.install])
+def test_a_file_that_cannot_be_read_is_refused_before_the_codex_question(
+    tmp_path: Path, launchd: FakeLaunchd, act
+) -> None:
+    """A plist this install would destroy outranks having no codex to install.
+
+    Reading the standing job for its `PATH` (#327) gives every unreadable file a
+    second, quieter reading: `recorded_path` answers `None` for one, the resolver
+    then has nothing to render over, and `_no_codex` would report `absent, ok` and
+    exit zero about a file the boundary had already refused to touch. ADR 0012
+    gives a failed item a non-zero run, and "this install would destroy it" is the
+    sharpest failure this item has.
+    """
+    directory = launch_agents(tmp_path)
+    agent.plist_path(directory).write_text("this is not a property list", encoding="utf-8")
+
+    outcome = act(
+        directory, no_codex(tmp_path), log_in(tmp_path), record_in(tmp_path), launchd.launchd
+    )
+
+    assert not outcome.ok
+    assert "would destroy it" in outcome.note
+
+
+@pytest.mark.parametrize("act", [agent.inspect, agent.install])
+def test_a_machine_with_no_codex_and_no_job_is_still_only_a_sentence(
+    tmp_path: Path, launchd: FakeLaunchd, act
+) -> None:
+    """The guard above must not turn "nothing here" into a failure — #276's ruling."""
+    outcome = act(
+        launch_agents(tmp_path),
+        no_codex(tmp_path),
+        log_in(tmp_path),
+        record_in(tmp_path),
+        launchd.launchd,
+    )
+
+    assert outcome.ok
+    assert outcome.state is State.ABSENT
+
+
+@pytest.mark.parametrize("act", [agent.inspect, agent.install])
+def test_a_caller_that_cannot_say_what_this_machines_path_is_is_refused(
+    tmp_path: Path, launchd: FakeLaunchd, act
+) -> None:
+    """#327: no statement and no job to read one from is a refusal, not a shrug.
+
+    Told apart from "this machine's PATH is known and has no codex on it", which
+    is #276's state and stays `ok`. This one is a caller with no authority over
+    the question at all — it cannot render, so it says so and the run is non-zero.
+    """
+    outcome = act(
+        launch_agents(tmp_path),
+        codex_runtime.resolve({}),
+        log_in(tmp_path),
+        record_in(tmp_path),
+        launchd.launchd,
+    )
+
+    assert not outcome.ok
+    assert outcome.state is State.ABSENT
+    assert codex_runtime.NO_MACHINE_PATH in outcome.note
+
+
+def test_a_refused_caller_writes_no_job(tmp_path: Path, launchd: FakeLaunchd) -> None:
+    directory = launch_agents(tmp_path)
+
+    agent.install(
+        directory, codex_runtime.resolve({}), log_in(tmp_path), record_in(tmp_path), launchd.launchd
+    )
+
+    assert not agent.plist_path(directory).exists()
+    assert launchd.commands == []
 
 
 # -- migrating a machine that ran #82's job ------------------------------

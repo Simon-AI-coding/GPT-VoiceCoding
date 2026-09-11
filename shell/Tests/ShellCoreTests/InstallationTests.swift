@@ -197,6 +197,61 @@ import Testing
         #expect(report.lines == ["/opt/only-here:/usr/bin:/bin"])
     }
 
+    // MARK: - Stating that PATH, rather than letting the child inherit one (#327)
+
+    @Test func theReadingIsStatedToTheChildUnderItsOwnName() async {
+        // The child may not take this from `PATH`, because a terminal has one of
+        // those too and the render it wrote carried that terminal's entries. So
+        // the reading arrives under a name only this app ever sets.
+        let report = await InstallationRunner(
+            readPath: { _, _ in .said("/opt/only-here:/usr/bin:/bin") },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf '%s' \"$\(Installation.loginPathVariable)\""],
+                source: .developerPath))
+
+        #expect(report.lines == ["/opt/only-here:/usr/bin:/bin"])
+    }
+
+    @Test func aReadingThatWasNotTakenStatesNothing() async {
+        // The fail-open, carried across: a reading that could not be taken states
+        // nothing rather than stating a guess, and the child falls back to the
+        // PATH the standing job records. Stating `PATH` here — which is launchd's
+        // own after a failed read — is the one answer that must not happen.
+        let report = await InstallationRunner(
+            readPath: { _, _ in .ranOutOfTime },
+            environment: ["SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf '%s' \"$\(Installation.loginPathVariable)\""],
+                source: .developerPath))
+
+        #expect(report.lines == [])
+    }
+
+    @Test func anInheritedStatementIsNotOneAndIsTakenAway() async {
+        // Stated, never inherited — and an app opened from a shell that exported
+        // this name would otherwise hand the child a value nobody read. It is
+        // removed on every path the reading did not produce, so the name means
+        // one thing only: this launch read the login shell and got this answer.
+        let report = await InstallationRunner(
+            readPath: { _, _ in .ranOutOfTime },
+            environment: [
+                "SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin",
+                Installation.loginPathVariable: "/somewhere/a/terminal/exported",
+            ]
+        ).run(
+            EngineCommand(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf '%s' \"$\(Installation.loginPathVariable)\""],
+                source: .developerPath))
+
+        #expect(report.lines == [])
+    }
+
     @Test func aBundledRunStillKeepsBytecodeOutOfTheBundle() async {
         // The PATH handover replaced the branch that built this environment, so
         // the rule it used to carry is pinned rather than assumed to have come

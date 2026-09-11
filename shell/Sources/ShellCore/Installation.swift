@@ -30,6 +30,31 @@ public enum Installation {
     /// How long each step of stopping it is given before the next, harder one.
     /// Short: by the time this is being counted, the run has already failed.
     public static let grace: TimeInterval = 2
+
+    /// How the login-shell reading is **stated** to the reconcile — #327.
+    ///
+    /// Deliberately not `PATH`. A reconcile renders the `LaunchAgent`'s
+    /// `EnvironmentVariables.PATH` from the `PATH` it resolves codex over, and
+    /// while this app was the only caller that was the same thing as the login
+    /// reading. A terminal is a caller too: `bridge-install reconcile` typed at
+    /// one rendered from *that terminal's* `PATH` and wrote the result to disk,
+    /// putting an agent session's own directories — two of them version-pinned
+    /// plugin caches a plugin upgrade deletes — into a real login job. #275 met
+    /// the half of that which only *compared* and accepted it for `status`; this
+    /// is the half that wrote.
+    ///
+    /// A name of this product's own cannot arrive by inheritance from somebody's
+    /// profile, so a value under it is always an act. It is set **only** when the
+    /// reading was actually taken, and removed otherwise, so the Python side can
+    /// tell "this launch read the login shell" from "nobody could", and fall back
+    /// to the `PATH` the standing job already records rather than to whatever the
+    /// caller happened to have.
+    ///
+    /// Spelled in two languages, and `tests/test_codex_launch_agent.py` reads this
+    /// line to hold them together — #47's guard, on a constant that would fail
+    /// silently: a rename here alone leaves the reader finding nothing stated, for
+    /// ever, and no profile change ever reaching the plist again.
+    public static let loginPathVariable = "GPT_VOICECODING_LOGIN_PATH"
 }
 
 /// What one reconcile said. The lines are the run's own words, never rephrased.
@@ -170,11 +195,31 @@ public struct InstallationRunner: Sendable {
                 report(path.outcome)
                 continuation.resume(
                     returning: Self.runBlocking(
-                        command, environment: path.environment, deadline: deadline))
+                        command, environment: Self.environmentStatingLoginPath(path),
+                        deadline: deadline))
             }
             thread.name = "gpt-voicecoding.installation"
             thread.start()
         }
+    }
+
+    /// The child's environment, with this machine's `PATH` stated on it — #327.
+    ///
+    /// Only the reading that was actually taken is stated, and an inherited value
+    /// under the same name is taken away rather than passed on: the name has to
+    /// mean "this launch read the login shell and got this", or the child is back
+    /// to trusting a value nobody read. ``Installation/loginPathVariable`` carries
+    /// why it is not simply `PATH`.
+    private static func environmentStatingLoginPath(
+        _ path: LoginShellPath.Applied
+    ) -> [String: String] {
+        var stated = path.environment
+        guard case .adopted(_, let resolved) = path.outcome else {
+            stated.removeValue(forKey: Installation.loginPathVariable)
+            return stated
+        }
+        stated[Installation.loginPathVariable] = resolved
+        return stated
     }
 
     private static func runBlocking(

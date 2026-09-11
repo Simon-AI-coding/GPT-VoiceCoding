@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -72,15 +73,34 @@ def settings(directory: Path) -> str:
 
 
 def with_codex(root: Path, environ: dict) -> dict:
-    """One environment, with a `PATH` this machine's codex is on.
+    """One environment as **the shell** hands it down: this machine's `PATH`, stated.
 
-    Since #272 the boundary resolves the Codex item's executable with an
-    ordinary `which` over the `PATH` it was given — which in the shipping shape
-    is the user's own login `PATH`, handed down by the shell. So a test that
-    wants the Codex item to be a real participant states one, and a test that
-    wants a machine with no codex simply does not.
+    Since #272 the boundary resolves the Codex item's executable with an ordinary
+    `which`, and since #327 it does that over the `PATH` the caller *states* —
+    which in the shipping shape is the user's own login `PATH`, read once in
+    Swift and put under `LOGIN_PATH_VARIABLE`. So a test that wants the Codex
+    item to be a real participant states one, and a test that wants a machine
+    with no codex simply does not.
     """
-    return {**environ, "PATH": str(codex_on_path(root))}
+    return {**environ, codex_runtime.LOGIN_PATH_VARIABLE: str(codex_on_path(root))}
+
+
+def as_a_terminal(root: Path, environ: dict) -> dict:
+    """The same environment as **a person at a terminal** has it — #327.
+
+    Nothing stated, and an ambient `PATH` carrying everything the profile has
+    plus the entries that belong to this one session. The reference machine's
+    was the profile `PATH` plus seven, two of them version-pinned plugin caches
+    that the next plugin upgrade deletes; this is that shape, smaller.
+    """
+    return {
+        **{
+            name: value
+            for name, value in environ.items()
+            if name != codex_runtime.LOGIN_PATH_VARIABLE
+        },
+        "PATH": f"{codex_on_path(root)}:{root / 'plugin-cache-1.2.3' / 'bin'}",
+    }
 
 
 def _run(verb: str, environ: dict, base: Path, launchd: FakeLaunchd, home: Path) -> int:
@@ -282,12 +302,13 @@ def test_reconcile_installs_on_a_first_run_and_records_it(
     tmp_path: Path, launchd: FakeLaunchd
 ) -> None:
     directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
     base = tmp_path / "support"
 
     assert read_intent(base).first_run is True
     code = main(
         ["reconcile"],
-        environ={"CLAUDE_CONFIG_DIR": str(directory)},
+        environ=with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)}),
         base_dir=base,
         interpreter=INTERPRETER,
         home=tmp_path,
@@ -318,8 +339,9 @@ def test_reconcile_leaves_an_uninstalled_machine_alone(
 
 def test_install_overrides_a_recorded_uninstall(tmp_path: Path, launchd: FakeLaunchd) -> None:
     directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
     base = tmp_path / "support"
-    environ = {"CLAUDE_CONFIG_DIR": str(directory)}
+    environ = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
 
     write_intent(False, base)
     assert _run("install", environ, base, launchd, tmp_path) == EXIT_OK
@@ -364,12 +386,13 @@ def test_a_failed_install_still_records_the_want(tmp_path: Path, launchd: FakeLa
 
 def test_status_writes_nothing(tmp_path: Path, launchd: FakeLaunchd) -> None:
     directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
     base = tmp_path / "support"
     original = settings(directory)
 
     code = main(
         ["status"],
-        environ={"CLAUDE_CONFIG_DIR": str(directory)},
+        environ=with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)}),
         base_dir=base,
         interpreter=INTERPRETER,
         home=tmp_path,
@@ -497,7 +520,10 @@ def test_a_user_with_no_codex_is_not_a_failed_install(tmp_path: Path, launchd: F
 
     code = _run(
         "install",
-        {"CLAUDE_CONFIG_DIR": str(directory), "PATH": str(tmp_path / "nothing-on-it")},
+        {
+            "CLAUDE_CONFIG_DIR": str(directory),
+            codex_runtime.LOGIN_PATH_VARIABLE: str(tmp_path / "nothing-on-it"),
+        },
         tmp_path / "support",
         launchd,
         tmp_path,
@@ -517,7 +543,10 @@ def test_status_reports_both_items_and_the_app_server(
 
     assert _run(
         "status",
-        {"CLAUDE_CONFIG_DIR": str(directory), "PATH": str(tmp_path / "nothing-on-it")},
+        {
+            "CLAUDE_CONFIG_DIR": str(directory),
+            codex_runtime.LOGIN_PATH_VARIABLE: str(tmp_path / "nothing-on-it"),
+        },
         tmp_path,
         launchd,
         tmp_path,
@@ -568,7 +597,12 @@ def test_status_tracks_a_same_program_render_across_the_next_login(
     record = installation_path(base)
     codex.install(
         launch_agents,
-        codex_runtime.resolve({"PATH": environ["PATH"], "CODEX_HOME": str(home)}),
+        codex_runtime.resolve(
+            {
+                codex_runtime.LOGIN_PATH_VARIABLE: environ[codex_runtime.LOGIN_PATH_VARIABLE],
+                "CODEX_HOME": str(home),
+            }
+        ),
         old_log,
         record,
         launchd.launchd,
@@ -591,3 +625,166 @@ def test_status_tracks_a_same_program_render_across_the_next_login(
 
     assert f"{codex.NAME}: current" in after_login
     assert "previous render" not in after_login
+
+
+# -- the rendered PATH is this machine's, whoever typed the verb (#327) ---
+
+
+def plist_in(root: Path) -> Path:
+    return codex.plist_path(root / "Library" / "LaunchAgents")
+
+
+@pytest.mark.parametrize("verb", ["reconcile", "install"])
+def test_a_terminals_own_path_never_reaches_the_plist(
+    tmp_path: Path, launchd: FakeLaunchd, verb: str
+) -> None:
+    """The reported defect, end to end through the CLI that caused it.
+
+    #275 accepted a terminal-run `status` *misreading* the `PATH`; the same
+    render was being written from one. A caller carrying entries the profile does
+    not have — an agent session's directories, a version-pinned plugin cache —
+    must not be able to get them onto disk through any verb.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+    base = tmp_path / "support"
+    stated = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
+    _run("install", stated, base, launchd, tmp_path)
+    written = plist_in(tmp_path).read_bytes()
+
+    code = _run(verb, as_a_terminal(tmp_path, stated), base, launchd, tmp_path)
+
+    assert code == EXIT_OK
+    assert plist_in(tmp_path).read_bytes() == written, "a terminal's PATH was written to disk"
+    assert "plugin-cache-1.2.3" not in plist_in(tmp_path).read_text(encoding="utf-8")
+
+
+def test_status_from_a_terminal_reports_a_current_machine_as_current(
+    tmp_path: Path, launchd: FakeLaunchd, capsys
+) -> None:
+    """Simon's ruling, 2026-09-11, retiring what #275 could only accept.
+
+    A terminal has no standing to judge the profile `PATH`, so "this plist carries
+    the `PATH` this machine recorded" is the honest answer — and the authority on
+    whether the profile changed is the shell's reading, which runs at every launch.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+    base = tmp_path / "support"
+    stated = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
+    _run("install", stated, base, launchd, tmp_path)
+    capsys.readouterr()
+
+    assert _run("status", as_a_terminal(tmp_path, stated), base, launchd, tmp_path) == EXIT_OK
+
+    said = capsys.readouterr()
+    printed = said.out + said.err
+    assert "would write differently" not in printed
+    assert "EnvironmentVariables.PATH" not in printed
+
+
+def test_a_profile_that_really_changed_is_still_written(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """The other direction, and the one a fix can quietly break.
+
+    Deferring to the record must not become never writing: when the shell states
+    a `PATH` that differs from the standing job's, that is the machine changing
+    and the job follows it.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+    base = tmp_path / "support"
+    _run(
+        "install",
+        with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)}),
+        base,
+        launchd,
+        tmp_path,
+    )
+    moved = codex_on_path(tmp_path / "after-a-profile-edit")
+
+    code = _run(
+        "reconcile",
+        {
+            "CLAUDE_CONFIG_DIR": str(directory),
+            codex_runtime.LOGIN_PATH_VARIABLE: str(moved),
+        },
+        base,
+        launchd,
+        tmp_path,
+    )
+
+    assert code == EXIT_OK
+    carried = json.loads(json.dumps(plistlib.loads(plist_in(tmp_path).read_bytes()), default=str))
+    assert carried["EnvironmentVariables"]["PATH"] == str(moved)
+
+
+def test_another_key_changing_rewrites_the_job_without_taking_the_callers_path(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """The hole in comparing the `PATH` by content, which is why this compares nothing.
+
+    A rule that only asked "is the standing `PATH` a superset?" would protect the
+    case where `PATH` is the sole difference and no other. Any other changed key
+    rewrites the whole document — here the log path, moved by a different base
+    directory — and the caller's `PATH` would ride along on that write.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+    stated = with_codex(tmp_path, {"CLAUDE_CONFIG_DIR": str(directory)})
+    _run("install", stated, tmp_path / "support", launchd, tmp_path)
+    recorded = plistlib.loads(plist_in(tmp_path).read_bytes())["EnvironmentVariables"]["PATH"]
+
+    code = _run(
+        "reconcile", as_a_terminal(tmp_path, stated), tmp_path / "moved-support", launchd, tmp_path
+    )
+
+    assert code == EXIT_OK
+    rewritten = plistlib.loads(plist_in(tmp_path).read_bytes())
+    assert "moved-support" in rewritten["StandardOutPath"], "the changed key was not written"
+    assert rewritten["EnvironmentVariables"]["PATH"] == recorded
+
+
+@pytest.mark.parametrize("verb", ["reconcile", "install"])
+def test_a_caller_that_cannot_say_what_the_machines_path_is_fails_the_run(
+    tmp_path: Path, launchd: FakeLaunchd, verb: str
+) -> None:
+    """#327's refusal, at the exit status a person or a script reads.
+
+    Nothing stated and nothing recorded: there is no render to write, and a zero
+    exit would report an installation that never happened. Told apart from a
+    machine whose `PATH` is known and has no codex on it, which stays `ok` —
+    #276's ruling, guarded by the test below this one.
+    """
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+
+    code = _run(
+        verb, {"CLAUDE_CONFIG_DIR": str(directory)}, tmp_path / "support", launchd, tmp_path
+    )
+
+    assert code == EXIT_FAILED
+    assert not plist_in(tmp_path).exists()
+    assert launchd.commands == []
+
+
+def test_a_known_path_with_no_codex_on_it_is_still_not_a_failure(
+    tmp_path: Path, launchd: FakeLaunchd
+) -> None:
+    """The boundary the refusal above must not cross — #276's ruling, unchanged."""
+    directory = config_directory(tmp_path, FOREIGN)
+    codex_home(tmp_path)
+
+    code = _run(
+        "install",
+        {
+            "CLAUDE_CONFIG_DIR": str(directory),
+            codex_runtime.LOGIN_PATH_VARIABLE: str(tmp_path / "nothing-on-it"),
+        },
+        tmp_path / "support",
+        launchd,
+        tmp_path,
+    )
+
+    assert code == EXIT_OK

@@ -30,10 +30,16 @@ because the managed standalone was a native binary.
 **Where the resolution happens: one point on the machine** (Simon's ruling on
 #272, option A). The shell already reads the user's login ``PATH`` for the
 engine — ``LoginShellPath.swift``, login **and interactive**, sentinel-delimited
-— and #272 makes it hand that same environment to the installation subprocess.
-So resolution here is an ordinary ``which`` over the ``PATH`` this process was
-given, and there is no second login-shell read and no second implementation of
-the interactive-shell lesson to get wrong.
+— and #272 makes it hand that reading to the installation subprocess. So
+resolution here is an ordinary ``which``, and there is no second login-shell
+read and no second implementation of the interactive-shell lesson to get wrong.
+
+**Over the machine's ``PATH``, which is stated and never inherited** — #327.
+"The ``PATH`` this process was given" was the rule until a terminal turned out
+to be a process too: the same render that #275 accepted a terminal *misreading*
+was also being written to disk from one, carrying that terminal's own entries.
+``machine_path`` is the rule now — what the caller states, else what the
+standing job records, and never the ambient ``PATH``.
 
 **Nothing is written down.** ``LoginShellPath.swift``'s own ruling applies
 unchanged: a copy of something the user's shell already states goes stale the
@@ -71,6 +77,24 @@ DEFAULT_CODEX_HOME_NAME: Final = ".codex"
 
 #: The variable this resolves over, and the one the job is given.
 PATH_VARIABLE: Final = "PATH"
+
+#: How a caller **states** the `PATH` this machine's job is rendered from — #327.
+#:
+#: Deliberately not `PATH` itself, and that is the whole of the fix. A value read
+#: out of `PATH` is one every process inherits, so the render was a function of
+#: whoever typed the verb: the shell handed down the login-shell reading and a
+#: terminal handed down its own, and `reconcile` wrote whichever it got. #275 met
+#: the comparing half of that and accepted it for `status`; the writing half is
+#: what put an agent session's own directories — two of them version-pinned
+#: plugin caches that a plugin upgrade deletes — into a real `LaunchAgent`.
+#:
+#: A variable of this product's own cannot be arrived at by inheritance from a
+#: login shell, so stating it is an act and never an accident. The shell sets it
+#: on the installation subprocess, and only when the reading actually succeeded;
+#: `Installation.swift` is the one writer and `tests/test_codex_launch_agent.py`
+#: holds the two spellings together, which is the guard #47 records as missing
+#: wherever a constant is spelled in two languages.
+LOGIN_PATH_VARIABLE: Final = "GPT_VOICECODING_LOGIN_PATH"
 
 #: What the user types. Resolved, never assumed to be anywhere in particular.
 EXECUTABLE_NAME: Final = "codex"
@@ -163,18 +187,54 @@ def control_socket(codex_home: Path) -> Path:
     return codex_home.joinpath(*CONTROL_SOCKET_PARTS)
 
 
-def resolve_executable(environ: Mapping[str, str]) -> Path | None:
-    """The codex on this environment's ``PATH``, or nothing at all.
+def executable_on(path: str) -> Path | None:
+    """The codex on this ``PATH``, or nothing at all.
 
     Nothing at all is an answer and not a failure: a machine with no codex is a
     machine whose Codex lane reports itself absent, with the reason. This never
     raises and never invents a path.
     """
-    stated = environ.get(PATH_VARIABLE)
-    if not stated or not stated.strip():
+    searched = path.strip()
+    if not searched:
         return None
-    found = shutil.which(EXECUTABLE_NAME, path=stated)
+    found = shutil.which(EXECUTABLE_NAME, path=searched)
     return Path(found) if found else None
+
+
+def resolve_executable(environ: Mapping[str, str]) -> Path | None:
+    """The codex on this environment's own ``PATH``.
+
+    The engine's, not the installation's. Inside the engine the ambient ``PATH``
+    *is* the machine's — the shell spawns it with the login-shell reading — so
+    defaulting the adapter's executable from it is the same answer by a shorter
+    road. The installation side may not take that road, because it also runs
+    where nobody handed it that reading; see :func:`machine_path`.
+    """
+    return executable_on(environ.get(PATH_VARIABLE) or "")
+
+
+def machine_path(environ: Mapping[str, str], recorded: str | None = None) -> str | None:
+    """The ``PATH`` a job on this machine is rendered from, or nothing — #327.
+
+    Two sources and no third, in order:
+
+    1. **What the caller states**, under `LOGIN_PATH_VARIABLE`. That is the
+       login-shell reading, which ADR 0022 keeps to one implementation on this
+       machine and puts in Swift; this side is handed the answer and reads no
+       shell of its own.
+    2. **What the standing job records.** Its `PATH` is what that one reading
+       last wrote, so deferring to it defers to the machine's existing record
+       instead of making a second one — which is exactly the distinction
+       `LoginShellPath`'s "never record a copy of the profile" rule turns on.
+
+    ``None`` when neither answers, and the caller's own ``PATH`` is never the
+    third source. A render built from it is a render that is true of one launch,
+    which is #38's defect with the environment standing in for the constant.
+    """
+    stated = (environ.get(LOGIN_PATH_VARIABLE) or "").strip()
+    if stated:
+        return stated
+    return (recorded or "").strip() or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,9 +263,12 @@ class CodexRuntime:
         moved their Codex home would get a server on one home and TUIs on
         another, and an empty roster that nothing explains.
 
-        **The ``PATH`` is the one this process was given, not one composed
-        here.** #38 forbids a rendered artifact naming a path that was true only
-        on the machine that rendered it, and launchd's own
+        **The ``PATH`` is this machine's, not one composed here and not the
+        caller's** (:func:`machine_path`, #327). #38 forbids a rendered artifact
+        naming a path that was true only on the machine that rendered it — and a
+        `PATH` inherited from whichever process typed the verb is that defect
+        with the environment standing in for the constant, which is how an agent
+        session's plugin-cache directories reached a real job. launchd's own
         ``/usr/bin:/bin:/usr/sbin:/sbin`` written into a plist would be exactly
         that — a constant standing in for something the environment already
         states. The directory holding the executable is on this ``PATH`` by
@@ -215,6 +278,17 @@ class CodexRuntime:
         harmless there, so there is no branch on install kind.
         """
         return {CODEX_HOME_VARIABLE: str(self.codex_home), PATH_VARIABLE: self.path}
+
+
+#: Why there is no runtime when nothing answered :func:`machine_path` — #327.
+#:
+#: Told apart from "there is a `PATH` and no codex on it" because the two send a
+#: person to different places: one to install codex, one to the app. It names no
+#: value, for `_PATH_PROVENANCE`'s reason — there is no value to name, which is
+#: the whole content of the sentence.
+NO_MACHINE_PATH: Final = (
+    f"nothing states this machine's PATH and no {EXECUTABLE_NAME} job on disk records one"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,32 +305,61 @@ class Resolution:
     runtime: CodexRuntime | None
     #: Why there is none. Empty exactly when ``runtime`` is not.
     reason: str
+    #: The machine ``PATH`` this looked on, or ``None`` when nothing answered
+    #: :func:`machine_path`. Carried rather than left to be read back out of
+    #: ``reason``, because the two absences it tells apart are acted on
+    #: differently and a caller matching on a sentence would go quietly wrong the
+    #: day the sentence is reworded.
+    searched: str | None = None
 
     @property
     def found(self) -> bool:
         return self.runtime is not None
 
+    @property
+    def path_unknown(self) -> bool:
+        """Nothing stated this machine's ``PATH`` and nothing recorded one — #327.
 
-def resolve(environ: Mapping[str, str], home: Path | None = None) -> Resolution:
+        The difference between *this machine has no codex* — which is a fact
+        about the machine, said out loud while the run carries on (#276) — and
+        *this caller has no standing to say what the machine's `PATH` is*, which
+        is nothing to report and everything to refuse over: rendering anyway
+        would put a `PATH` that is true of one launch into a login job.
+        """
+        return self.runtime is None and self.searched is None
+
+
+def resolve(
+    environ: Mapping[str, str],
+    home: Path | None = None,
+    recorded_path: str | None = None,
+) -> Resolution:
     """This machine's Codex Runtime, or the reason there is none.
 
     Never raises. This runs on the reconcile that precedes every engine start,
     from a shell with nowhere to put a traceback.
+
+    **Both answers are the machine's** — #327. The executable is resolved over
+    :func:`machine_path` and so is the rendered ``PATH``, because a `which` run
+    over the caller's own ``PATH`` decides which codex goes into
+    ``ProgramArguments`` and is the same defect one key across.
     """
     codex_home = default_codex_home(environ, home)
-    executable = resolve_executable(environ)
+    path = machine_path(environ, recorded_path)
+    if path is None:
+        return Resolution(None, NO_MACHINE_PATH)
+    executable = executable_on(path)
     if executable is None:
-        stated = (environ.get(PATH_VARIABLE) or "").strip()
-        where = f"on PATH ({stated})" if stated else "and this process was given no PATH"
-        return Resolution(None, f"there is no {EXECUTABLE_NAME} {where}")
+        return Resolution(None, f"there is no {EXECUTABLE_NAME} on PATH ({path})", path)
     return Resolution(
         CodexRuntime(
             executable=executable,
             codex_home=codex_home,
             control_socket=control_socket(codex_home),
-            path=(environ.get(PATH_VARIABLE) or "").strip(),
+            path=path,
         ),
         "",
+        path,
     )
 
 

@@ -76,9 +76,10 @@ class Placement:
     interpreter: Path
     launch_agents_directory: Path
     #: This machine's one codex, or the reason there is none. Resolved here,
-    #: once, from the ``PATH`` this process was given — which is the user's own
-    #: login ``PATH``, because the shell hands the installation subprocess the
-    #: environment it built for the engine (#272, ADR 0022).
+    #: once, over the ``PATH`` this machine states — the user's own login
+    #: ``PATH``, which the shell reads and hands to this subprocess (#272,
+    #: ADR 0022), or failing that the one the standing job records (#327).
+    #: Never the ``PATH`` this process happens to have been started with.
     codex: codex_runtime.Resolution
     codex_log_path: Path
     installation_record_path: Path
@@ -92,11 +93,23 @@ def _resolve(
     home: Path | None,
     launchd: codex_launch_agent.Launchd | None,
 ) -> Placement:
+    """Where this run puts things, and what `PATH` it may render over — #327.
+
+    The standing job's own `PATH` is read here and handed to the resolver, which
+    is the same arrangement as every other answer on `Placement`: the item knows
+    how to read its file, and this file decides that the reading happens once and
+    travels down. It is also the only place that *can* join them — the resolver
+    may not reach for a `LaunchAgent` (the import goes the other way), and the
+    item may not resolve a codex.
+    """
+    launch_agents_directory = codex_launch_agent.default_launch_agents_directory(home)
     return Placement(
         claude_config_directory=claude_hooks.default_config_directory(environ, home),
         interpreter=interpreter,
-        launch_agents_directory=codex_launch_agent.default_launch_agents_directory(home),
-        codex=codex_runtime.resolve(environ, home),
+        launch_agents_directory=launch_agents_directory,
+        codex=codex_runtime.resolve(
+            environ, home, codex_launch_agent.recorded_path(launch_agents_directory)
+        ),
         codex_log_path=codex_daemon_log_path(base_dir),
         installation_record_path=installation_path(base_dir),
         launchd=launchd or codex_launch_agent.default_launchd(),

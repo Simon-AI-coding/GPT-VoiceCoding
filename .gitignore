@@ -29,6 +29,10 @@ DerivedData/
 # Local-only research notes, scratch work, and throwaway prototypes.
 docs/research
 docs/design/
+# The Claude Design deliverable a build lane works from (spec #358). Local-only like the
+# prompts above, but linked into every worktree by the post-checkout hook, so no trailing
+# slash: with one, git would list the symlink as untracked.
+docs/design-handoff
 notes/
 scratch/
 *.local.md

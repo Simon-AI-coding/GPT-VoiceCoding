@@ -79,7 +79,7 @@ What this engine adds after a half's Stock Text: who the Voice is and how it spe
 _Avoid_: house rules, our prompt, custom instructions
 
 **Delegated Turn**:
-Work the system hands to a coding model on the user's behalf, asked for from any surface — during a Live Call, distinct from the call's own speech, or from the Companion Channel. Its model is a user-facing setting, one for every surface.
+Work the system hands to a coding model on the user's behalf, asked for from any surface — during a Live Call, distinct from the call's own speech, or from the Companion Channel. Its model and effort are one user-facing setting, shared with the Call Agent, one for every surface (#344).
 _Avoid_: side request, background query
 
 ### Control side
@@ -97,7 +97,7 @@ Whether the system may speak into, open, or otherwise touch the Live Call.
 _Avoid_: speech mode, live switch
 
 **Message Switch**:
-Whether the system may push messages through the Companion Channel. Independent of the Voice Switch.
+Whether the system may push messages through the Companion Channel. Independent of the Voice Switch. On the Control Panel it is worded as *Telegram connected / disconnected*, and turning it off never unbinds the bot — that is Settings' Unbind (ADR 0028, #349).
 _Avoid_: notification switch, push switch
 
 **Auto Hang-up Switch**:
@@ -119,6 +119,10 @@ _Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, r
 **Duty Card**:
 The small always-on-top card that sits on the desktop while the Duty Switch is on and is gone while it is off — the one surface the user sees without clicking. It carries the Call Phase and the Roster Brief cut to its size: how many main Sessions wait on the user and how many have finished, and the first such Session's row — its agent, Session Name, state word and the start of its newest message. A click on it offers the Live Toggle and the doors into the Control Panel; a secondary click, Quit. It shows and does not reply (ADR 0028). It is not a third thing beside the Roster Brief and the Session Brief; it is where they show on the desktop.
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
+
+**Diagnostics**:
+The one page, under the Control Panel's settings, where technical words are allowed: the engine's health, the app, engine and codex versions, the socket and log paths, Verify and its seam table, the last lines of engine output, and one action that copies the whole page for a bug report. Every other surface says nothing technical and at most offers a door here (#344, ADR 0028). Verify promises seam wiring only, never that a call can be placed.
+_Avoid_: debug panel, advanced settings, developer mode
 
 **Installation**:
 Everything the system places in files the **user** owns so the coding agents can reach it, and takes back byte for byte when asked. Done at first launch and reconciled at every launch after (ADR 0012), never by hand and never by the Control Panel — which only triggers it and, on first launch, tells the user in plain words what was placed and that it can be taken back (#345).

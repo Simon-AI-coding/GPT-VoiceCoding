@@ -42,7 +42,7 @@ import support
 
 from gpt_voicecoding import config as engine_config
 from gpt_voicecoding.adapters.agent.codex import shared_daemon as codex_shared_daemon
-from gpt_voicecoding.installation import claude_hooks, codex_runtime
+from gpt_voicecoding.installation import State, claude_hooks, codex_runtime
 from gpt_voicecoding.seams.identity import AgentKind
 
 ACCEPTANCE = Path(__file__).resolve().parent / "acceptance"
@@ -416,6 +416,102 @@ class TestTheClaudeLanesConfigDirectory:
         ):
             pass
         assert sorted(one.name for one in home.iterdir()) == []
+
+
+class TestTheLanesClaudeHooks:
+    """§4.1 — the product's own two hooks, in the lane's own config directory.
+
+    A real user's `claude` carries them because installing the product puts them
+    there; the lane's directory is the harness's own, so the run puts them there
+    itself. Measured on run `20260911T001134Z`, where they were absent: the
+    Session never registered, the engine recovered it from disk with no
+    transcript, and `relay` answered `grade=unknown` because a Claude Session's
+    transcript is the only proof of delivery it offers.
+    """
+
+    def _environment(self, directory: Path) -> dict[str, str]:
+        return {claude_hooks.CONFIG_DIRECTORY_VARIABLE: str(directory)}
+
+    def _arrange(self, root: Path, directory: Path, bundle: Path) -> support.Journal:
+        journal = _journal(root)
+        support.arrange_claude_hooks(self._environment(directory), bundle=bundle, journal=journal)
+        return journal
+
+    def _hooks(self, directory: Path) -> dict[str, Any]:
+        settings = json.loads(claude_hooks.settings_path(directory).read_text())
+        return settings["hooks"]
+
+    def test_both_hooks_land_naming_the_bundle_under_tests_interpreter(
+        self, tmp_path: Path
+    ) -> None:
+        """The registration hook and the approval hook, on the interpreter being graded."""
+        directory = tmp_path / "claude-config"
+        directory.mkdir()
+        bundle = tmp_path / "GPT-VoiceCoding.app"
+        self._arrange(tmp_path, directory, bundle)
+        hooks = self._hooks(directory)
+        assert set(hooks) >= {claude_hooks.REGISTRATION_EVENT, claude_hooks.APPROVAL_EVENT}
+        commands = [
+            one["command"] for event in hooks.values() for entry in event for one in entry["hooks"]
+        ]
+        assert all(str(support.bundled_python(bundle)) in one for one in commands)
+
+    def test_it_is_the_products_own_installer_and_not_a_second_spelling(
+        self, tmp_path: Path
+    ) -> None:
+        """What the hooks *are* is the product's decision, so this is its own answer."""
+        directory = tmp_path / "claude-config"
+        directory.mkdir()
+        bundle = tmp_path / "GPT-VoiceCoding.app"
+        self._arrange(tmp_path, directory, bundle)
+        assert (
+            claude_hooks.inspect(directory, support.bundled_python(bundle)).state is State.CURRENT
+        )
+
+    def test_arranging_twice_writes_nothing_the_second_time(self, tmp_path: Path) -> None:
+        """Idempotent, which is what makes arranging it every run cost one read."""
+        directory = tmp_path / "claude-config"
+        directory.mkdir()
+        bundle = tmp_path / "GPT-VoiceCoding.app"
+        self._arrange(tmp_path, directory, bundle)
+        journal = self._arrange(tmp_path, directory, bundle)
+        arranged = [one for one in journal.read() if one["event"] == "hooks.arranged"]
+        assert [one["changed"] for one in arranged] == [True, False]
+        assert [one["state"] for one in arranged] == [str(State.CURRENT)] * 2
+
+    def test_a_hook_of_the_operators_own_is_kept(self, tmp_path: Path) -> None:
+        """Merged in, never written over: the installer keeps every other hook."""
+        directory = tmp_path / "claude-config"
+        directory.mkdir()
+        theirs = {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "/usr/bin/true"}]}],
+            }
+        }
+        claude_hooks.settings_path(directory).write_text(json.dumps(theirs))
+        self._arrange(tmp_path, directory, tmp_path / "GPT-VoiceCoding.app")
+        assert self._hooks(directory)["Stop"] == theirs["hooks"]["Stop"]
+
+    def test_a_directory_that_is_not_there_is_refused_rather_than_reported_ok(
+        self, tmp_path: Path
+    ) -> None:
+        """`ok` alone is not the question: no directory is `ok` and ABSENT (§4.1).
+
+        §5 refuses a run whose lane directory is missing, so this is only
+        reachable when something removed it after preflight passed — and a lane
+        that walked on would grade a degraded product as the product.
+        """
+        directory = tmp_path / "claude-config"
+        with pytest.raises(support.HooksNotArranged) as refused:
+            self._arrange(tmp_path, directory, tmp_path / "GPT-VoiceCoding.app")
+        assert str(State.ABSENT) in str(refused.value)
+
+    def test_there_is_no_fallback_to_the_operators_own_directory(self, tmp_path: Path) -> None:
+        """The same rule the trust grant is held to: an unset variable is a mistake (#217)."""
+        with pytest.raises(support.NoConfigDirectory):
+            support.arrange_claude_hooks(
+                {}, bundle=tmp_path / "GPT-VoiceCoding.app", journal=_journal(tmp_path)
+            )
 
 
 class TestTheCodexLanesTrustRow:

@@ -543,6 +543,15 @@ def _the_lane_on(run: LaneRun, arrangement: Arrangement, workspace: Path, socket
             f"`{lane.binary}` does not resolve on the PATH the engine was handed"
         )
 
+    # §4.1, and **before the engine**: the hooks are what the Session registers
+    # through, and the engine publishes the address they look for. Only the lane
+    # with a config directory of its own has one to arrange; the Codex lane
+    # starts no Claude Session and its engine drops that kind entirely (§4.3).
+    if lane.own_config_directory:
+        support.arrange_claude_hooks(
+            environment, bundle=machine.bundle, journal=arrangement.journal
+        )
+
     with support.TrustGate(
         workspace,
         agent=lane.agent,

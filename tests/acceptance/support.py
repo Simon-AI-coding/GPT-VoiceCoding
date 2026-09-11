@@ -50,7 +50,7 @@ from gpt_voicecoding.adapters.agent.codex import discovery as codex_discovery
 from gpt_voicecoding.adapters.agent.codex import shared_daemon as codex_shared_daemon
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
 from gpt_voicecoding.control_plane import client as control_plane_client
-from gpt_voicecoding.installation import claude_hooks, codex_runtime
+from gpt_voicecoding.installation import State, claude_hooks, codex_runtime
 from gpt_voicecoding.seams.control_plane import Action, Request
 
 # --- where a run lives -------------------------------------------------------
@@ -1551,6 +1551,78 @@ def claude_state_path(environment: Mapping[str, str]) -> Path:
             f"Session would read (§4.1, #217). The claude lane always exports it."
         )
     return claude_hooks.default_config_directory(environment) / CLAUDE_STATE_NAME
+
+
+# --- the lane's own hooks (§4.1) ---------------------------------------------
+
+
+class HooksNotArranged(RuntimeError):
+    """The product's own Claude hooks are not in the lane's config directory (§4.1).
+
+    A lane that walks without them walks against a **degraded** product, and
+    measured on run `20260911T001134Z`: with no `SessionStart` hook the Session
+    never registers, so the engine falls back to recovering it from disk — one
+    glob for the transcript, taken 3 s before `claude` created the file (born
+    12:12:31, looked for at 12:12:28) and cached for the Session's whole life
+    (`claude/adapter.py`, `_report_for`: "Recovery is attempted once per Session
+    and its outcome is kept, refusals included"). The transcript is the only
+    proof of delivery a Claude Session offers — it sends no receipt frame — so
+    `relay` answered `state=retained grade=unknown reason=duplicate_risk` and
+    `approval` could not have been answered from here either: with no
+    `PermissionRequest` hook the engine's own Stop Notice said "answer: at the
+    terminal".
+
+    Raised rather than worked around: every one of those reds is the arrangement
+    reporting itself as the product, which is the one thing §1 says a red may
+    never mean.
+    """
+
+
+def arrange_claude_hooks(environment: Mapping[str, str], *, bundle: Path, journal: Journal) -> None:
+    """Put the product's two Claude hooks in the lane's own config directory (§4.1).
+
+    **Arrangement, never graded** — the same standing as `TrustGate`: a real
+    user's `claude` has these hooks because installing the product puts them
+    there, and a lane whose config directory is the harness's own has nobody
+    else to put them there for it.
+
+    **Installed per run, not once by hand.** The hook command names an
+    interpreter — this bundle's — so a directory arranged by hand goes silently
+    stale the first time the bundle moves, and a stale hook is the same red as
+    an absent one with a longer search attached. `claude_hooks.install` is
+    idempotent and writes nothing when the file already says what this build
+    would write, so the cost of re-arranging every run is one read.
+
+    **The product's own installer, not a copy of its settings.** What the hooks
+    are is the product's decision (`desired_hooks`), and a harness that spelled
+    them out again would grade a Session wired up the way the harness imagines
+    rather than the way an install leaves it.
+
+    **Its `claude_hooks.install`, never `installation`'s verb.** The CLI installs
+    the Codex LaunchAgent in the same breath, and §4.3 forbids this harness
+    touching it: one job per user, and the loser of that race reports `degraded`
+    without saying so.
+
+    `ok` alone is not the question. An item with no config directory to install
+    into is `ok` and `ABSENT` — "a user who does not run Claude Code is not a
+    failed install" — so the state this demands is `CURRENT`.
+    """
+    directory = claude_state_path(environment).parent
+    outcome = claude_hooks.install(directory, bundled_python(bundle))
+    journal(
+        "hooks.arranged",
+        agent=CLAUDE_LANE,
+        settings=str(claude_hooks.settings_path(directory)),
+        interpreter=str(bundled_python(bundle)),
+        state=str(outcome.state),
+        changed=outcome.changed,
+        note=outcome.note,
+    )
+    if not outcome.ok or outcome.state is not State.CURRENT:
+        raise HooksNotArranged(
+            f"the product's Claude hooks are {outcome.state} in {directory} after an install "
+            f"that reports {'ok' if outcome.ok else 'FAILED'}: {outcome.note or 'no reason given'}"
+        )
 
 
 def codex_config_path(

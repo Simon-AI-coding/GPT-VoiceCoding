@@ -14,6 +14,7 @@ API and read nothing else.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import threading
@@ -37,13 +38,30 @@ def journal(run_directory: Path) -> support.Journal:
     return support.Journal(run_directory / support.JOURNAL_NAME)
 
 
-def _verdict(journal: support.Journal, names: list[str] | None = None) -> support.Verdict:
+def _verdict(
+    journal: support.Journal, names: list[str] | None = None, **facts: object
+) -> support.Verdict:
     return support.Verdict(
         run_id="20260910T000000Z",
         selection=items.select(names),
         lanes=items.LANES,
         journal=journal,
+        **facts,  # type: ignore[arg-type]
     )
+
+
+#: What the two agents printed about themselves on the run this was written
+#: against, spelled as they spell it — `claude` gives the bare version and its
+#: product name, `codex` gives the package name first.
+VERSIONS = {"claude": "2.1.268 (Claude Code)", "codex": "codex-cli 0.154.0"}
+BUNDLE = "/Applications/GPT-VoiceCoding.app"
+
+#: The conftest, read rather than imported. A conftest is loaded by pytest **by
+#: path** and is not an importable name (`tests/test_layout.py`), so the one
+#: place the run builds its verdict cannot be called from here — but it can be
+#: read, which is what `tests/test_harness_contract.py` already does to the rest
+#: of the harness.
+CONFTEST = Path(__file__).resolve().parent / "acceptance" / "conftest.py"
 
 
 class TestTheRunDirectory:
@@ -352,6 +370,74 @@ class TestTheVerdictDocument:
             "run",
             "lanes",
         }
+
+    def test_the_run_passes_every_fact_section_seven_names(self) -> None:
+        """#357: the constructor accepted `bundle` and `versions`; nobody passed them.
+
+        Every test above builds a verdict of its own, so all of them were green
+        while each real run wrote `"bundle": ""` and `"versions": {}` — the
+        defect was never in the shape of the file but in the one call that fills
+        it. Read here rather than asserted on a run, because the run costs five
+        minutes and this costs a parse.
+
+        **Exact on purpose**, which makes it the one test here a rename breaks:
+        the set is §7's list of what the file carries, so a keyword dropped is
+        the fact leaving the verdict, and a keyword added is §7 growing one and
+        this list owing an entry. Both are edits worth making by hand.
+        """
+        built = [
+            node
+            for node in ast.walk(ast.parse(CONFTEST.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Verdict"
+        ]
+        assert len(built) == 1, "the run builds exactly one verdict"
+        assert {keyword.arg for keyword in built[0].keywords} == {
+            "run_id",
+            "selection",
+            "lanes",
+            "journal",
+            "bundle",
+            "commit",
+            "versions",
+        }
+
+    def test_the_build_and_the_agents_are_given_at_construction(
+        self, journal: support.Journal
+    ) -> None:
+        """The gap #357 closed, pinned at the seam a run really builds one through.
+
+        `bundle` and `versions` were accepted by the constructor and passed by
+        nobody, so every real run wrote `"bundle": ""` and `"versions": {}` while
+        the test above — which sets them on the object afterwards — stayed green.
+        A fact a reader needs has to arrive the way the run supplies it.
+        """
+        document = _verdict(journal, bundle=BUNDLE, commit="95ea513", versions=VERSIONS).document()
+        assert document["bundle"] == BUNDLE
+        assert document["commit"] == "95ea513"
+        assert document["versions"] == VERSIONS
+
+    def test_a_refused_run_still_names_the_build_and_the_agents(
+        self, journal: support.Journal
+    ) -> None:
+        """§7: a refusal writes a valid verdict, and these two are still in it.
+
+        They are facts about the machine rather than claims about anything the
+        run observed, so the run that observed nothing is exactly the one whose
+        verdict has nothing else to be attributed by.
+        """
+        verdict = _verdict(journal, bundle=BUNDLE, versions=VERSIONS)
+        verdict.refuse("the bundle is missing")
+        document = verdict.document()
+        assert document["result"] == "REFUSED"
+        assert document["bundle"] == BUNDLE
+        assert document["versions"] == VERSIONS
+
+    def test_the_versions_are_one_entry_per_lane(self, journal: support.Journal) -> None:
+        """One name per lane, so a reader attributes a red to the agent that ran it."""
+        document = _verdict(journal, versions=VERSIONS).document()
+        assert set(document["versions"]) == set(items.LANES)
 
     def test_the_selection_says_what_was_graded_and_what_was_arranged(
         self, journal: support.Journal

@@ -195,13 +195,23 @@ def verdict(
 
     Written from a teardown rather than by whatever finished last, because a run
     that raised is exactly the one whose verdict is worth having.
+
+    Every fact §7 names the file carries is handed over **here**, at the one
+    construction there is, and before preflight has decided anything: §7's rule
+    is that a refusal still writes a valid verdict, and what a red read months
+    later is attributed by is the build under test and the agents that walked it
+    (#357). Both come off the machine — `bundle` is the path preflight also
+    journals, and the versions are read from the binaries on the PATH the engine
+    is handed. Neither reading refuses a run, and neither can raise.
     """
     written = support.Verdict(
         run_id=run_directory.name,
         selection=selection,
         lanes=selected_lanes,
         journal=journal,
+        bundle=str(machine.bundle),
         commit=commit,
+        versions=machine.agent_versions(),
     )
     started = time.monotonic()
     try:

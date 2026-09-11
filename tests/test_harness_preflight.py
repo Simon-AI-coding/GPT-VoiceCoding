@@ -18,6 +18,8 @@ What each class pins:
 * `TestTheProbe` — §2 item 0b: SIGINT and never a kill, and the frame count read
   out of the probe's own words.
 * `TestCredentialsReachNoArtifact` — §8, read off a written journal and verdict.
+* `TestTheAgentVersions` — §7's "the agent versions seen": one entry per lane,
+  read off the binary the lane will launch, and never a refusal.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import deadlines
 import items
 import preflight
 import pytest
@@ -640,6 +643,167 @@ class TestCredentialsReachNoArtifact:
             if "_journal(" in line or "journal(" in line:
                 for forbidden in ("api_id", "api_hash", "session_path", "credentials"):
                     assert forbidden not in line, line
+
+
+class TestTheAgentVersions:
+    """§7's "the agent versions seen", ruled on by #357.
+
+    The roster carries no version — `control_plane/payloads.py`'s
+    `session_document` has a target, a name, a workspace, a lifecycle, a state
+    and a progress, and nothing about the binary — so the only reading there is
+    is the binary's own `--version`, taken off the file the lane really execs.
+
+    It is a **fact and never a refusal**: nothing here decides whether a run
+    starts, and the verdict is constructed from it before preflight has run, so
+    a reading that could not be taken is the sentence saying so rather than an
+    exception that would cost the run its whole file.
+    """
+
+    def test_each_lane_is_named_with_what_its_own_binary_printed(self, tmp_path: Path) -> None:
+        machine = arranged(
+            tmp_path,
+            read_version=lambda binary: f"{Path(binary).name}-cli 1.2.3",
+        )
+        assert machine.agent_versions() == {
+            "claude": "claude-cli 1.2.3",
+            "codex": "codex-cli 1.2.3",
+        }
+
+    def test_the_binary_read_is_the_one_the_lane_will_launch(self, tmp_path: Path) -> None:
+        """Resolved on the PATH the engine is handed, which is where `hand_started` execs.
+
+        A `--version` run as a bare name would answer for whatever the *harness*
+        process finds first, which is exactly the attribution the verdict is
+        carrying this fact to make possible.
+        """
+        read: list[Path] = []
+
+        def note(binary: Path) -> str:
+            read.append(binary)
+            return "1.0"
+
+        machine = arranged(
+            tmp_path,
+            path_of_login_shell=lambda: "/opt/lane/bin",
+            which=lambda binary, path: f"{path}/{binary}",
+            read_version=note,
+        )
+        machine.agent_versions()
+        assert read == [Path("/opt/lane/bin/claude"), Path("/opt/lane/bin/codex")]
+
+    def test_a_binary_that_does_not_resolve_is_an_unknown_and_not_a_missing_key(
+        self, tmp_path: Path
+    ) -> None:
+        """A lane with no entry reads as a lane that did not run (§7's `missing`)."""
+        machine = arranged(
+            tmp_path,
+            which=lambda binary, path: None if binary == "codex" else f"/usr/bin/{binary}",  # noqa: ARG005
+            read_version=lambda binary: "1.0",  # noqa: ARG005
+        )
+        versions = machine.agent_versions()
+        assert set(versions) == set(items.LANES)
+        assert versions["codex"].startswith(preflight.UNKNOWN_VERSION)
+        assert "does not resolve" in versions["codex"]
+
+    def test_a_reading_that_raises_costs_one_fact_and_not_the_verdict(self, tmp_path: Path) -> None:
+        """The verdict is built from this, so a raise here is a run with no verdict at all."""
+
+        def explode(binary: str) -> str:
+            raise RuntimeError(f"no {binary} today")
+
+        versions = arranged(tmp_path, read_version=explode).agent_versions()
+        assert set(versions) == set(items.LANES)
+        assert all(one.startswith(preflight.UNKNOWN_VERSION) for one in versions.values())
+
+    def test_a_lane_nothing_knows_is_an_unknown_and_not_a_raise(self, tmp_path: Path) -> None:
+        """`journey.lane` raises for a name it does not have, and this is called first."""
+        machine = arranged(tmp_path, lanes=("nowhere",), read_version=lambda binary: "1.0")  # noqa: ARG005
+        assert set(machine.agent_versions()) == {"nowhere"}
+        assert machine.agent_versions()["nowhere"].startswith(preflight.UNKNOWN_VERSION)
+
+    def test_a_binary_that_printed_and_then_failed_is_quoted_rather_than_denied(
+        self, tmp_path: Path
+    ) -> None:
+        """ "Printed no version" would be untrue, and untrue is the one thing this cannot be."""
+        complaining = _a_binary_that(
+            tmp_path, "complaining", 'echo "usage: tool [options]"\nexit 2'
+        )
+        read = preflight.agent_version(complaining)
+        assert read.startswith(preflight.UNKNOWN_VERSION)
+        assert "usage: tool [options]" in read
+
+    def test_only_the_lanes_this_run_selected_are_read(self, tmp_path: Path) -> None:
+        machine = arranged(
+            tmp_path,
+            lanes=("codex",),
+            read_version=lambda binary: "1.0",  # noqa: ARG005
+        )
+        assert set(machine.agent_versions()) == {"codex"}
+
+    def test_the_refusal_and_the_version_resolve_the_binary_once(self, tmp_path: Path) -> None:
+        """§5's `agent binary` row and §7's version are one question asked twice.
+
+        Two walks of the same PATH could answer it two ways — a verdict naming a
+        version of a binary the refusal said was absent is the disagreement this
+        shares one resolver to prevent.
+        """
+        asked: list[tuple[str, str]] = []
+
+        def which(binary: str, path: str) -> str | None:
+            asked.append((binary, path))
+            return None
+
+        machine = arranged(tmp_path, path_of_login_shell=lambda: "/opt/lane/bin", which=which)
+        assert machine.resolved_binary("claude") is None
+        assert machine.agent_versions()["claude"].startswith(preflight.UNKNOWN_VERSION)
+        assert refusal(machine, support.Journal(tmp_path / "j.jsonl")).check == "agent binary"
+        assert {one for one in asked} == {("claude", "/opt/lane/bin"), ("codex", "/opt/lane/bin")}
+
+    def test_the_reader_keeps_the_one_line_the_binary_answered_with(self, tmp_path: Path) -> None:
+        """Run for real: both agents print one line and exit, and that line is the version."""
+        printed = _a_binary_that(
+            tmp_path, "printer", 'echo "codex-cli 0.154.0"\necho "and chatter"'
+        )
+        assert preflight.agent_version(printed) == "codex-cli 0.154.0"
+
+    def test_a_version_printed_on_stderr_is_still_the_version(self, tmp_path: Path) -> None:
+        """Not every CLI prints it to stdout, and the fact is the same either way."""
+        noisy = _a_binary_that(tmp_path, "noisy", 'echo "tool 9.9" >&2')
+        assert preflight.agent_version(noisy) == "tool 9.9"
+
+    def test_a_binary_that_fails_is_an_unknown_naming_what_it_did(self, tmp_path: Path) -> None:
+        broken = _a_binary_that(tmp_path, "broken", "exit 3")
+        assert preflight.agent_version(broken).startswith(preflight.UNKNOWN_VERSION)
+
+    def test_a_binary_that_never_answers_is_given_up_on_rather_than_waited_out(self) -> None:
+        """What `VERSION_TIMEOUT_SECONDS` is for: a hang is one unreadable fact.
+
+        Driven through the injected `run` rather than by hanging for the real
+        budget — the rule being pinned is that the timeout ends the read and the
+        sentence says so, not how long it is.
+        """
+
+        def hangs(*_: Any, **__: Any) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired("claude", deadlines.VERSION_TIMEOUT_SECONDS)
+
+        read = preflight.agent_version(Path("/usr/local/bin/claude"), run=hangs)
+        assert read.startswith(preflight.UNKNOWN_VERSION)
+        assert "did not answer" in read
+
+    def test_a_binary_that_will_not_start_is_an_unknown_and_not_a_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        assert preflight.agent_version(tmp_path / "nothing-here").startswith(
+            preflight.UNKNOWN_VERSION
+        )
+
+
+def _a_binary_that(root: Path, name: str, does: str) -> Path:
+    """An executable that answers `--version` however one test needs it to."""
+    path = root / name
+    path.write_text(f"#!/bin/sh\n{does}\n")
+    path.chmod(0o755)
+    return path
 
 
 class TestTheRealReadings:

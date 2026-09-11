@@ -126,6 +126,15 @@ PROBE_GRACE_SECONDS = 20.0
 #: `LoginShellPath.timeout` out of the Swift and fails if the two drift.
 PATH_TIMEOUT_SECONDS = 10.0
 
+#: `claude --version` / `codex --version` answering, for §7's record of which
+#: agents the run saw (#357). A **hang** budget rather than a wait on work, like
+#: `AGENT_ROSTER_SECONDS`: each binary prints one line and exits, so this is the
+#: point at which it is not going to rather than a length of work it might need.
+#: Nothing refuses on it either way — a version that cannot be read is the
+#: verdict saying so — which is why it is the shortest budget here that is still
+#: a whole process start.
+VERSION_TIMEOUT_SECONDS = 10.0
+
 #: The gap between typing a turn's text into a TUI and submitting it (§4.4). Not
 #: a deadline on anything ending — it is the settle both TUIs need, and the
 #: smallest gap measured to submit on both.

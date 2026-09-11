@@ -1,8 +1,12 @@
 """The two run-level checks: the machine is arranged, and the backend answers (#351).
 
-**Responsibilities held here:** §5's refusals, and §2 item 0b's probe. Both are
-run-level, both run once before any lane starts, both are reads, and neither
-starts an engine — which is the whole of "the run can start or refuse".
+**Responsibilities held here:** §5's refusals, §2 item 0b's probe, and the two
+facts §7's verdict carries about the machine the run happened on — the bundle
+under test and the agent versions seen. The first two are run-level, run once
+before any lane starts, are reads, and start no engine — which is the whole of
+"the run can start or refuse". The third is here because `Machine` **is** the
+machine: the bundle path was already one of its fields, and a second module
+reading the same PATH for the same binaries would be a second answer about them.
 
 `docs/acceptance-design.md` §9 parks the refusals in `conftest.py`. They are here
 for #350's reason and no other: a conftest is loaded by pytest **by path** and is
@@ -245,6 +249,54 @@ PATH_SENTINEL = "<<<GVC-PATH>>>"
 PATH_SCRIPT = f"printf '{PATH_SENTINEL}%s{PATH_SENTINEL}' \"$PATH\""
 
 
+#: What a version reads as when it could not be read. A sentence under the
+#: lane's own key, never a missing key and never an empty string: `""` is what
+#: every run of the rebuilt harness wrote while nothing passed a version at all
+#: (#357), and a reader cannot tell that apart from an agent that printed none.
+UNKNOWN_VERSION = "unknown"
+
+
+def _unknown(reason: str) -> str:
+    """A version that could not be read, as the one sentence the verdict carries."""
+    return f"{UNKNOWN_VERSION} — {reason}"
+
+
+def agent_version(
+    binary: Path, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+) -> str:
+    """What `<binary> --version` says it is, or the sentence saying why it does not.
+
+    The one line each agent answers with, taken from whichever stream it used —
+    `claude` prints `2.1.268 (Claude Code)` and `codex` prints `codex-cli
+    0.154.0` (read 2026-09-11), both on stdout, and a CLI that chose stderr is
+    reporting the same fact. Never raises: this is read into the verdict's
+    constructor, and a fact that took the file down with it would be worse than
+    the gap it is filling.
+    """
+    try:
+        answered = run(
+            [str(binary), "--version"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=deadlines.VERSION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as unreadable:
+        return _unknown(f"`{binary} --version` did not answer: {unreadable!r}")
+    printed = (answered.stdout or "").strip() or (answered.stderr or "").strip()
+    if answered.returncode != 0 or not printed:
+        # **Carrying what it said, not only that it failed.** A binary that
+        # printed something and then exited non-zero did not answer the
+        # question — the line may be a usage message rather than a version — but
+        # a reader attributing a red months later needs the words it used, and
+        # dropping them leaves a sentence that says it printed nothing when it
+        # did not.
+        said = f"printed {printed.splitlines()[0].strip()!r}" if printed else "printed nothing"
+        return _unknown(f"`{binary} --version` exited {answered.returncode} and {said}")
+    return printed.splitlines()[0].strip()
+
+
 def foreign_codex(
     acceptance_root: Path,
     *,
@@ -342,6 +394,10 @@ class Machine:
     which: Callable[[str, str], str | None] = field(
         default=lambda binary, path: shutil.which(binary, path=path)
     )
+    #: What one agent binary reports about itself, for §7's verdict (#357). Not
+    #: consulted by any check: no run refuses over a version, and this is read
+    #: before preflight so that a refused run's verdict names the agents too.
+    read_version: Callable[[Path], str] = field(default=agent_version)
     foreign_codex: Callable[[], str | None] = field(default=lambda: None)
     server_live: Callable[[Path], bool] = field(default=answering)
     ask_bot: Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]] = field(default=ask_bot)
@@ -392,6 +448,55 @@ class Machine:
                 held_by=telegram_person.ACCEPTANCE_RUN_HOLDER,
             ).acquire(),
         )
+
+    def resolved_binary(self, lane: str) -> Path | None:
+        """Where this lane's agent really is, or nothing at all (§4.4, §7).
+
+        The one resolution there is: §5's `agent binary` refusal and §7's
+        version are the same question asked for two reasons, and two walks of
+        the same PATH could answer it two ways. It is `hand_started.resolve`'s
+        walk, because that is the file the lane execs.
+        """
+        found = self.which(journey.lane(lane).binary, self.path_of_login_shell() or "")
+        return Path(found) if found else None
+
+    def agent_versions(self) -> dict[str, str]:
+        """The agent versions seen (§7) — one entry per lane, whatever happened.
+
+        **The ruling #357 asked for.** "The agent versions seen" means the
+        version each lane's own binary reports, and nothing else: the roster
+        carries no version at all — `control_plane/payloads.py`'s
+        `session_document` travels a target, a name, a workspace, a lifecycle, a
+        state, a progress and a reply window — so there is no second reading for
+        this to be half of.
+
+        Read off the file `which` finds on the PATH the engine will be handed,
+        which is the one `hand_started.resolve` execs, so the version named is
+        the agent the lane really launched rather than another of the same name
+        earlier on this process's own PATH. That PATH is the memoised reading
+        the refusals share, so this asks no second question about it.
+
+        Never raises and never omits a lane. The verdict is **constructed** from
+        this, before preflight has decided anything, so an exception here is a
+        run with no `verdict.json` at all, and a missing key is a lane a reader
+        would take for one that never ran.
+        """
+        return {lane: self._version_of(lane) for lane in self.lanes}
+
+    def _version_of(self, lane: str) -> str:
+        # Everything inside, the lane's own name included: `journey.lane` raises
+        # for a name it does not know, and a raise here is the run with no
+        # verdict at all that this method exists not to be.
+        try:
+            resolved = self.resolved_binary(lane)
+            if resolved is None:
+                return _unknown(
+                    f"`{journey.lane(lane).binary}` does not resolve on the PATH the engine "
+                    f"will be handed"
+                )
+            return self.read_version(resolved)
+        except Exception as unreadable:  # noqa: BLE001 - every way it fails is one sentence
+            return _unknown(f"reading the {lane} lane's version raised {unreadable!r}")
 
     def token_variable(self, lane: str) -> str:
         """The variable the lane's engine is told to read its token out of (§4.2).
@@ -710,13 +815,11 @@ class Preflight:
 
     def _agent_binary(self) -> str | None:
         """`claude` / `codex` resolve on the PATH the engine will be handed (§4.4)."""
-        path = self.machine.path_of_login_shell() or ""
         for lane in self.machine.lanes:
-            binary = journey.lane(lane).binary
-            if self.machine.which(binary, path) is None:
+            if self.machine.resolved_binary(lane) is None:
                 return (
-                    f"the {lane} lane's `{binary}` does not resolve on the PATH the engine "
-                    f"will be handed"
+                    f"the {lane} lane's `{journey.lane(lane).binary}` does not resolve on the "
+                    f"PATH the engine will be handed"
                 )
         return None
 

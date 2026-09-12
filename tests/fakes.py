@@ -249,10 +249,13 @@ class FakeAgent:
 class FakeCall:
     """A Call adapter that holds a call and knows nothing about the one-call rule."""
 
+    call_agent = None
+
     def __init__(
         self,
         *,
         delegated_turn_model: str = "a-model-the-user-chose",
+        delegated_turn_effort: str | None = None,
         delegated_text: str = "the delegated answer",
         reachable: bool = True,
         verify_result: VerifyResult | None = None,
@@ -262,6 +265,7 @@ class FakeCall:
         #: for the Call Agent and every Delegated Turn. Kept so a test can read
         #: back that the root passed it; nothing in this fake acts on it.
         self.delegated_turn_model = delegated_turn_model
+        self.delegated_turn_effort = delegated_turn_effort
         self.delegated_text = delegated_text
         #: False makes every attempt stall at CONNECTING — a call that never
         #: comes up, which is not the same as one that came up and went away.
@@ -301,6 +305,12 @@ class FakeCall:
         #: (#186). Moments, not sounds: the fake opens no device and makes no
         #: noise, which is exactly what lets a hub test grade the order.
         self.cues: list[Cue] = []
+
+    async def models(self) -> tuple:
+        return ()
+
+    def forget_call_agent(self) -> None:
+        self.call_agent = None
 
     async def ensure_call(self, dial: Dial) -> CallSnapshot:
         if self._snapshot.is_up:
@@ -422,7 +432,7 @@ def _items(call: FakeCall) -> list[HandoverItem]:
 def _words(item: HandoverItem) -> tuple[str, ...]:
     match item:
         case SpokenRosterBrief():
-            return (item.counts, item.focus or "", *item.rows)
+            return (item.counts, *item.rows)
         case SpokenBrief():
             return (
                 str(item.name),

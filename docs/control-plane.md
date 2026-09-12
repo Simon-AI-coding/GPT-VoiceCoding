@@ -84,7 +84,7 @@ ADR 0016 as amended).
 ```
 
 `action` is `null` when the line never named a usable one. `protocol` is the
-numeric protocol version, currently `11`. A missing field or JSON `null` means the
+numeric protocol version, currently `12`. A missing field or JSON `null` means the
 reply did not declare a usable version. The Swift shell refuses to interpret any
 reply whose version is missing or differs from the version it supports, and shows
 that protocol mismatch separately from an engine refusal or an unreachable engine.
@@ -105,11 +105,58 @@ the user is told.
 | `stale_session` | Known session id, unreachable under that identity — a fork, or an end. |
 | `unknown_pending` | Nothing is waiting under that id; it was answered, or its hook ended. |
 | `refused` | Any other Bridge Core refusal. Still carries its own words. |
+| `telegram_credentials`, `telegram_network`, `telegram_destination`, `telegram_api` | Binding refused at the named Telegram layer; no token is included. |
 | `engine_unreachable` | Raised by a **surface**, never sent by the engine: nothing answered. |
+
+### Redesign documents and actions (protocol 12)
+
+`status.engine_version` is the running engine's package version. `status.call_agent`
+is absent until the first Call Agent is created after startup, and absent again
+after `forget_call_agent`. When present it contains `model`, `effort`,
+`context_window`, `context_percent`, `total`, and `last`. Each usage object has
+`input`, `output`, `reasoning`, and `cached` token counts. Usage and context fields
+are `null` until the live `thread/tokenUsage/updated` notification arrives;
+the meter is percent used, with codex's 12,000-token baseline removed from
+capacity. These are the Call Agent's tokens, not the Voice's. `bridgectl status`
+prints these fields alongside the existing diagnostics.
+
+`models` takes no payload and returns `{"models": [{"model": "…", "efforts": ["low", "high"]}]}`.
+The engine asks its shared, long-lived app-server once at startup; reads never
+poll codex. Hidden models are omitted. An empty or unavailable catalog returns
+an empty list until restart, which fetches a fresh catalog.
+
+`forget_call_agent` takes no payload and returns `{}`. It is refused while a call
+is connecting, up, or closing. Between calls it clears the current thread and
+its usage. A user's `live` dial always starts a fresh Call Agent; a system dial
+continues the current thread or starts one if none exists. This memory is never
+persisted across engine restarts.
+
+`bind_telegram` uses three requests, without changing configuration or storing
+the token on disk:
+
+- `{"token": "<pasted token>"}` validates it and returns `bot_name`, `username`,
+  `chat_id: null`, and `chat_type: null`. It discards pre-binding updates.
+- An empty payload checks for a new `/start`; while waiting it returns the same
+  pending document. After Start it returns the chat id as a string and Telegram's
+  actual chat type (`private`, `group`, or `supergroup`), sends one confirmation,
+  and completes. Another empty request after completion is refused.
+- `{"cancel": true}` abandons a pending binding. A surface dismissing the flow
+  must cancel it. Supplying another token replaces the pending flow.
+
+The existing Telegram wire constructs a transport bound to the pasted token.
+A composed Telegram adapter pauses its poll for the entire flow, including
+waiting for its in-flight poll to finish, and resumes on success, refusal, or
+cancellation. The null channel is unchanged and needs no Telegram knowledge.
+Refusals carry the existing Telegram layer words; tokens are never logged.
+CLI equivalents are `bridgectl models`, `bridgectl forget_call_agent`, and
+`bridgectl bind_telegram [<token>|--cancel]` (no argument checks for Start).
+Prefer the socket payload for tokens: entering a literal token in a shell command
+can leave it in shell history even though the engine never logs it.
 
 ## The actions
 
-Eleven, and the set is closed. Adding one is a contract change. Protocol 6
+Fourteen, and the set is closed. Adding one is a contract change. Protocol 12
+adds `models`, `forget_call_agent`, and `bind_telegram` (#359). Protocol 6
 retired `sessions` and added `brief`, the one verb Session state is fetched
 through. Protocol 7 retired `progress` and added `history`: the Session Brief
 carries the newest message whole and the History page carries that message and
@@ -267,13 +314,25 @@ of them.
 
 Every reply carries `kind`, `text`, and the structure `text` was rendered from:
 
+Roster rows and counts include every live, addressable Session, whether Focus
+or not. Rows are ordered by most recent activity descending on every surface;
+unknown activity sorts last and ties retain registry order. `focus` remains
+call-side metadata, never a sorting or counting rule. Each row adds `newest`
+(the first line of the newest assistant message, or `null` when unavailable)
+and `last_activity_at` (ISO 8601, or `null`). The target-specific Session Brief
+continues to carry the whole newest message. Names start at the known project
+alone and climb to `<project> · <task>` when a task source arrives; an unknown
+project is not fabricated from a socket address or pid.
+
 ```json
 {"kind": "roster",
- "text": "the others: 1 running\n  …",
- "roster": {"counts": {"running": 1},
+ "text": "sessions: 1 waiting for your decision\n  …",
+ "roster": {"counts": {"decision": 1},
             "focus": {"agent": "codex", "session_id": "abc", "pid": null},
             "rows": [{"target": {…}, "name": "gpt-voicecoding · port the log",
-                      "agent": "codex", "state": "decision", "focus": true}]}}
+                      "agent": "codex", "state": "decision", "focus": true,
+                      "newest": "I rebuilt the index.",
+                      "last_activity_at": "2026-09-02T03:04:05+00:00"}]}}
 ```
 
 ```json
@@ -689,6 +748,8 @@ codex  = "gpt_voicecoding.adapters.agent.codex:codex_agent"
 
 [adapters.settings.call]            # optional; every key belongs to that adapter
 workspace = "~/code"                # where the bridge's own threads run; default is ~
+voice = "cove"                      # optional; the default Voice
+realtime_model = "gpt-live-1-codex"   # optional; realtime model, not the Call Agent model
 
 [policy]                            # optional; these are the locked defaults
 silence_end_seconds     = 60
@@ -704,6 +765,7 @@ stripped_environment_prefixes = ["Malloc"]
 
 [delegate]
 model = "the-model-you-chose"       # required: the cost lever has no default
+effort = "high"                     # optional; shared by Call Agent and Delegated Turn
 cli   = "/Applications/GPT-VoiceCoding.app/Contents/Resources/engine/bin/bridgectl"
 ```
 

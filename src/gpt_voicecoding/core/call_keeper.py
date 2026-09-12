@@ -65,7 +65,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -856,7 +856,7 @@ class CallKeeper:
                 return None
             hand_over = fresh
         try:
-            dial = self._dial_for(hand_over)
+            dial = replace(self._dial_for(hand_over), user_opened=user_opened)
             snapshot = await self._call.ensure_call(dial)
         except Exception:
             # A dial that could not be built — no instructions to open on — or an

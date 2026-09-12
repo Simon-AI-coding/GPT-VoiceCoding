@@ -83,7 +83,9 @@ from typing import Any
 #: word it has no light for would draw nothing where the user reads the one fact
 #: they act on. The number is the only gate the Swift shell compares, so a
 #: closed set that changed under an unchanged number is a gate that lies.
-PROTOCOL_VERSION = 11
+#: 12 adds the model catalog and Call Agent / Telegram binding actions (#359).
+#: Roster counts and ordering no longer distinguish the Focus Session.
+PROTOCOL_VERSION = 12
 
 #: The longest line either side will read. Generous for a roster, small enough
 #: that a peer cannot make the engine hold an unbounded buffer.
@@ -100,6 +102,9 @@ class Action(StrEnum):
 
     #: Everything the hub knows: switches, roster, call, pending work.
     STATUS = "status"
+    MODELS = "models"
+    FORGET_CALL_AGENT = "forget_call_agent"
+    BIND_TELEGRAM = "bind_telegram"
     #: Flip one switch. Never gated — ADR 0002.
     SWITCH = "switch"
     #: The Roster Brief, or one Session Brief with Detail when an address comes
@@ -144,6 +149,9 @@ class Action(StrEnum):
 #: table exists to remove.
 USAGE: dict[Action, str] = {
     Action.STATUS: "status",
+    Action.MODELS: "models",
+    Action.FORGET_CALL_AGENT: "forget_call_agent",
+    Action.BIND_TELEGRAM: "bind_telegram [<token>|--cancel]",
     Action.SWITCH: "switch <name> on|off",
     Action.BRIEF: "brief [<agent>:<session id>[:<pid>]]",
     Action.HISTORY: "history <agent>:<session id>[:<pid>] [--before <ordinal>]",
@@ -225,6 +233,10 @@ class ErrorCode(StrEnum):
     REFUSED = "refused"
     #: Raised by a *surface*, never by the engine: nothing answered the socket.
     ENGINE_UNREACHABLE = "engine_unreachable"
+    TELEGRAM_CREDENTIALS = "telegram_credentials"
+    TELEGRAM_NETWORK = "telegram_network"
+    TELEGRAM_DESTINATION = "telegram_destination"
+    TELEGRAM_API = "telegram_api"
 
 
 class MalformedRequest(Exception):

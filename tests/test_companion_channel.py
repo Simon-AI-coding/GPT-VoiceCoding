@@ -2040,6 +2040,39 @@ def root_of(server: ThreadingHTTPServer) -> str:
 class TestTheWireItself:
     """The one file that speaks HTTP, against something that really answers."""
 
+    def test_a_malformed_refusal_is_not_an_invalid_token(self, bot_api) -> None:
+        _FakeBotApi.answers = {
+            "getMe": (200, {"ok": False, "error_code": "not-a-code", "description": "broken"})
+        }
+        call = http_transport(token="test-token", api_root=root_of(bot_api))
+        with pytest.raises(TelegramError) as refused:
+            call("getMe", {}, timeout_seconds=5.0)
+        assert refused.value.layer is FailureLayer.API
+
+    def test_binding_redacts_a_token_echoed_by_a_refusal(self, bot_api, caplog) -> None:
+        from gpt_voicecoding.adapters.companion_channel.telegram.api import TelegramBinding
+        from gpt_voicecoding.control_plane.actions import ControlPlane
+        from gpt_voicecoding.seams.control_plane import Request
+        from test_control_plane_actions import Surface
+
+        token = "secret-token-value"
+        _FakeBotApi.answers = {
+            "getMe": (401, {"ok": False, "description": f"Unauthorized token {token}"})
+        }
+        binding = TelegramBinding(
+            transport_for=lambda pasted: http_transport(token=pasted, api_root=root_of(bot_api)),
+            confirmation="Binding confirmed.",
+        )
+        reply = asyncio.run(
+            ControlPlane(Surface().core, telegram_binding=binding).handle(
+                Request(Action.BIND_TELEGRAM, {"token": token})
+            )
+        )
+        assert not reply.ok
+        assert reply.error.code == "telegram_credentials"
+        assert token not in reply.error.message
+        assert token not in caplog.text
+
     def test_a_result_comes_back(self, bot_api) -> None:
         _FakeBotApi.answers = {"getMe": (200, {"ok": True, "result": {"username": "a_bot"}})}
         call = http_transport(token="123:abc", api_root=root_of(bot_api))

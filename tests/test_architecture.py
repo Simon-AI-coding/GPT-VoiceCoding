@@ -308,24 +308,25 @@ def test_the_telegram_wire_module_is_where_it_says_it_is() -> None:
     assert TELEGRAM_WIRE_MODULE.is_file(), f"{TELEGRAM_WIRE_MODULE} is not there"
 
 
-def test_the_channel_starts_exactly_one_thread_and_only_in_the_adapter() -> None:
-    """The reader's thread is the adapter's own, and stays that way.
+def test_telegram_threads_stay_in_the_adapter_and_shared_wire() -> None:
+    """The adapter owns polling; the wire owns shared request workers (#359).
 
     It exists for a measured reason — a poll parked on `asyncio.to_thread` holds
     `asyncio.run` open past the engine that let go of it — and machinery kept
-    for a measured reason spreads if nothing watches. The wire may not start
-    threads, and neither may the settings or the null implementation.
+    for a measured reason spreads if nothing watches. Binding and normal sends
+    share the wire's daemon worker; settings and the null implementation remain
+    thread-free.
     """
-    allowed = COMPANION_CHANNEL / "telegram" / "adapter.py"
+    allowed = {COMPANION_CHANNEL / "telegram" / "adapter.py", TELEGRAM_WIRE_MODULE}
     offences = [
         f"{path.relative_to(PACKAGE)} imports {module}"
         for path in _sources(COMPANION_CHANNEL)
-        if path != allowed
+        if path not in allowed
         for module in _imported_modules(path.read_text(encoding="utf-8"))
         if module.split(".")[0] == "threading"
     ]
     named = "; ".join(offences)
-    assert not offences, f"the channel's one thread belongs in {allowed.name} alone: {named}"
+    assert not offences, f"Telegram threads belong in its adapter and wire alone: {named}"
 
 
 def _code_without_documentation(path: Path) -> str:

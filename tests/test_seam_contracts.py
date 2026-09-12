@@ -47,7 +47,6 @@ from gpt_voicecoding.seams.call import (
     HANDOVER_BUDGET_BYTES,
     MAX_HANDOVER_ITEMS,
     WIRE_INITIAL_ITEMS_TOKEN_CAP,
-    WIRE_LINE_OVERHEAD_BYTES,
     CallAdapter,
     CallDropped,
     CallEnded,
@@ -489,7 +488,12 @@ class TestTheDial:
             Dial(voice="speak plainly", agent="")
 
     def test_a_dial_names_its_audiences_and_never_a_wire_slot(self) -> None:
-        assert {field.name for field in fields(Dial)} == {"voice", "agent", "hand_over"}
+        assert {field.name for field in fields(Dial)} == {
+            "voice",
+            "agent",
+            "hand_over",
+            "user_opened",
+        }
 
     def test_a_spoken_brief_carries_the_session_briefs_own_fields(self) -> None:
         assert {field.name for field in fields(SpokenBrief)} == {
@@ -519,7 +523,7 @@ class TestTheDial:
         twenty-five once `WIRE_LINE_OVERHEAD_BYTES` is charged on it, and an
         off-by-one in the comparison would slip through that.
         """
-        text = "x" * (HANDOVER_BUDGET_BYTES - 2 * WIRE_LINE_OVERHEAD_BYTES + 1)
+        text = "x" * (HANDOVER_BUDGET_BYTES - SpokenRosterBrief(counts="").size_in_bytes + 1)
 
         with pytest.raises(ValueError):
             Dial(
@@ -543,7 +547,7 @@ class TestTheDial:
 
     def test_a_hand_over_of_exactly_the_budget_is_accepted_here(self) -> None:
         """The ceiling is inclusive, at the new figure as at the old one."""
-        text = "x" * (HANDOVER_BUDGET_BYTES - 2 * WIRE_LINE_OVERHEAD_BYTES)
+        text = "x" * (HANDOVER_BUDGET_BYTES - SpokenRosterBrief(counts="").size_in_bytes)
         dial = Dial(
             voice="speak plainly",
             agent=CALL_AGENT_INSTRUCTIONS,

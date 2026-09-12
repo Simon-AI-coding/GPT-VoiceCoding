@@ -109,10 +109,12 @@ class SessionName:
     """
 
     project: str
-    task: str
+    task: str = ""
 
     def __post_init__(self) -> None:
         for half, value in (("project", self.project), ("task", self.task)):
+            if half == "task" and value == "":
+                continue  # No task source yet; the project alone is the name.
             if not value.strip():
                 raise ValueError(f"a Session Name's {half} half may not be empty")
             if NAME_SEPARATOR.strip() in value:
@@ -121,12 +123,14 @@ class SessionName:
                 )
 
     def __str__(self) -> str:
-        return f"{self.project}{NAME_SEPARATOR}{self.task}"
+        return f"{self.project}{NAME_SEPARATOR}{self.task}" if self.task else self.project
 
     @classmethod
     def parse(cls, text: str) -> SessionName:
         """Read back a rendered name, refusing anything that is not exactly one."""
         halves = text.split(NAME_SEPARATOR.strip())
+        if len(halves) == 1:
+            return cls(project=text.strip())
         if len(halves) != 2:
             raise ValueError(f"not a Session Name: {text!r}")
         return cls(project=halves[0].strip(), task=halves[1].strip())

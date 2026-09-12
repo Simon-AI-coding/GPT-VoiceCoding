@@ -53,3 +53,11 @@ On 2026-09-09 seven crew workers were first named by the floor — `306-306-ed` 
 
 The first-words rung's validation gains one refusal beside no-words, more-than-one-line and carries-the-separator: **a candidate whose first character is `/` or `~` is refused** as "a task that is an absolute path", logged like every refusal, and the ladder falls to the next rung. A relative path is kept — `crewtask/21` is the task the user handed the driver and says so. Taking a path's last component was refused as inventing a name nobody can recognise; holding the notice for a better rung was unnecessary, the floor having been in place from the first stop.
 
+## Amendment 2026-09-12: the project is the name before a task exists (#359)
+
+The address fallback above is superseded by #341 / #358 / #359: before a task
+source exists, the observed project alone is the Session Name; a task source
+extends it to `<project> · <task>`. When even the project has not been observed,
+surfaces use the generic label `Session`, not a fabricated project, socket
+address, or pid as a name. An address still travels separately for targeting.
+The task-source ladder and its validation otherwise remain unchanged.

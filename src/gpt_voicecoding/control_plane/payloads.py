@@ -21,8 +21,10 @@ and the switch it would flip on is the master.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from typing import Any
 
+from gpt_voicecoding import __version__
 from gpt_voicecoding.core import briefing
 from gpt_voicecoding.core.bridge import Status
 from gpt_voicecoding.core.briefing import Decision, RosterBrief, SessionBrief
@@ -275,6 +277,8 @@ def status_document(
     progress_for: Callable[[ProgressObservation], Mapping[str, Any]],
 ) -> dict[str, Any]:
     return {
+        "engine_version": __version__,
+        **({"call_agent": asdict(status.call_agent)} if status.call_agent is not None else {}),
         "switches": status.switches.as_mapping(),
         "sessions": [
             session_document(
@@ -324,6 +328,10 @@ def roster_brief_document(brief: RosterBrief) -> dict[str, Any]:
                 "state": str(row.state),
                 "awaited": row.awaited,
                 "focus": row.focus,
+                "newest": row.newest,
+                "last_activity_at": (
+                    row.last_activity_at.isoformat() if row.last_activity_at is not None else None
+                ),
             }
             for row in brief.rows
         ],

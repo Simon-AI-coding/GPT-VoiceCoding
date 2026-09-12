@@ -40,6 +40,9 @@ class TestTheActionSet:
             "sessions",
             "config",
             "assistant",
+            "models",
+            "forget_call_agent",
+            "bind_telegram",
         }
 
     def test_the_reader_mark_moved_the_protocol_to_ten(self) -> None:
@@ -62,7 +65,13 @@ class TestTheActionSet:
         act on. Same rule as the two above, applied to a value set rather than
         to an action set or a field.
         """
-        assert PROTOCOL_VERSION == 11
+        assert PROTOCOL_VERSION >= 11
+
+    def test_the_redesigned_shell_contract_moves_to_twelve(self) -> None:
+        assert PROTOCOL_VERSION == 12
+        assert USAGE[Action.MODELS] == "models"
+        assert USAGE[Action.FORGET_CALL_AGENT] == "forget_call_agent"
+        assert USAGE[Action.BIND_TELEGRAM] == "bind_telegram [<token>|--cancel]"
 
     def test_the_three_menu_verbs_moved_the_protocol_to_nine(self) -> None:
         """A v8 surface would send `sessions` and be answered `unknown_action`.

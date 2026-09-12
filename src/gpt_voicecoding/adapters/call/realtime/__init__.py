@@ -66,6 +66,7 @@ __all__ = [
 def realtime_call(
     *,
     delegated_turn_model: str,
+    delegated_turn_effort: str | None = None,
     sink: Any = None,
     settings: dict[str, Any] | None = None,
     transport_factory: TransportFactory | None = None,
@@ -83,6 +84,7 @@ def realtime_call(
     audio, cues = (transport_factory, None) if transport_factory else _audio_from(read)
     return RealtimeCallAdapter(
         delegated_turn_model=delegated_turn_model,
+        delegated_turn_effort=delegated_turn_effort,
         sink=sink,
         settings=read,
         transport_factory=audio,

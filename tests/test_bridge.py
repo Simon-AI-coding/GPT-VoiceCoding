@@ -230,7 +230,7 @@ class TestTheStopNoticePipelineEndToEnd:
         hub.emit(SessionStopped(target=stranger))
 
         (notice,) = hub.channel.sent
-        assert notice.startswith("claude:stranger:999 — finished")
+        assert notice.startswith("Session — claude:stranger:999 — finished")
 
     def test_a_failed_stop_read_does_not_replace_a_readable_roster_observation(self) -> None:
         hub = Hub()
@@ -445,8 +445,8 @@ class TestTheStopNoticePipelineEndToEnd:
         assert "  newest: the newest entry is too large to carry" in notice
         assert "nothing said yet" not in notice
 
-    def test_a_stop_for_a_session_the_roster_never_saw_is_briefed_from_its_address(self) -> None:
-        """No row to brief, so the stand-in carries the address and nothing invented."""
+    def test_a_stop_for_an_unobserved_session_keeps_name_and_address_apart(self) -> None:
+        """No observed project: use a generic label, not the address as its name."""
         hub = Hub(voice=False)
         stranger = SessionTarget(agent=AgentKind.CODEX, session_id="not-in-the-roster")
 
@@ -458,7 +458,7 @@ class TestTheStopNoticePipelineEndToEnd:
         )
 
         assert hub.channel.sent == [
-            "codex:not-in-the-roster — waiting for your decision\n"
+            "Session — codex:not-in-the-roster — waiting for your decision\n"
             "  newest: not read\n"
             "  asked: Which base?\n"
             "  answer: at the terminal\n"
@@ -3136,14 +3136,14 @@ class TestEveryNoticeNamesTheSessionItIsAbout:
         called = "GPT-VoiceCoding · port the log"
         assert announcement.startswith(called) and stop_notice.startswith(called)
 
-    def test_a_session_the_roster_does_not_hold_is_named_by_its_address(self) -> None:
-        """The floor a brief's header falls back to — never "a session"."""
+    def test_an_unobserved_session_has_a_generic_name_before_its_address(self) -> None:
+        """The address remains a target, not a substitute Session Name (#359)."""
         hub = Hub(voice=False)
 
         hub.emit(SessionStopped(target=self.STRANGER, waiting_for=self.permission()))
 
         (announcement,) = hub.channel.sent
-        assert announcement.startswith("codex:not-in-the-roster")
+        assert announcement.startswith("Session — codex:not-in-the-roster — ")
 
     def test_the_detail_still_travels_beside_the_tool(self) -> None:
         hub = Hub(voice=False)

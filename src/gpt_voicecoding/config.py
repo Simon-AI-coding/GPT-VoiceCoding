@@ -167,6 +167,7 @@ class EngineConfig:
     state_path: Path
     policy: CorePolicy
     log: LogConfig
+    delegated_turn_effort: str | None = None
 
 
 def load(path: Path) -> EngineConfig:
@@ -200,9 +201,14 @@ def of(document: dict[str, Any], *, source: Path | None = None) -> EngineConfig:
             "lever and the engine has no default for it"
         )
 
+    effort = delegate.get("effort")
+    if effort is not None and (not isinstance(effort, str) or not effort.strip()):
+        raise ConfigError(f"[delegate] effort{where} must be a reasoning effort name")
+
     return EngineConfig(
         adapters=adapters,
         delegated_turn_model=model.strip(),
+        delegated_turn_effort=effort.strip() if effort is not None else None,
         control_plane_cli=_optional_path(delegate, "cli", where),
         socket_path=_path(engine, "socket_path", default_socket_path(), where),
         state_path=_path(engine, "state_path", default_state_path(), where),

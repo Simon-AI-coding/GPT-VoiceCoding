@@ -1286,7 +1286,6 @@ def handover_at_the_ceiling() -> tuple[list[dict[str, str]], dict[str, int]]:
     roster = SpokenRosterBrief(
         counts="其他会话：6 个在等你做决定",
         rows=("会话 0 — codex — 等你做决定", "会话 1 — codex — 等你做决定"),
-        focus="会话 0 — codex — 等你做决定",
     )
     carried = [reason, roster, *(_chinese_brief(index, HANDOVER_FILLER * 6) for index in range(5))]
     texts = [_item_text(item) for item in carried]

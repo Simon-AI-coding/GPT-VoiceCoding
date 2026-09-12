@@ -72,8 +72,14 @@ class ServerOwningAgent(FakeAgent):
     app_server = "the one app-server this engine spawns"
 
 
-def call_that_rides(*, delegated_turn_model: str, sink: object = None) -> RidingCall:
-    return RidingCall(sink=sink, delegated_turn_model=delegated_turn_model)
+def call_that_rides(
+    *, delegated_turn_model: str, delegated_turn_effort: str | None = None, sink: object = None
+) -> RidingCall:
+    return RidingCall(
+        sink=sink,
+        delegated_turn_model=delegated_turn_model,
+        delegated_turn_effort=delegated_turn_effort,
+    )
 
 
 def agent_that_owns_one(*, progress_capture: object, sink: object = None) -> ServerOwningAgent:
@@ -791,8 +797,14 @@ class HangingCall(FakeCall):
         raise AssertionError("unreachable: the wait above never returns")
 
 
-def call_that_hangs(*, delegated_turn_model: str, sink: object = None) -> HangingCall:
-    return HangingCall(sink=sink, delegated_turn_model=delegated_turn_model)
+def call_that_hangs(
+    *, delegated_turn_model: str, delegated_turn_effort: str | None = None, sink: object = None
+) -> HangingCall:
+    return HangingCall(
+        sink=sink,
+        delegated_turn_model=delegated_turn_model,
+        delegated_turn_effort=delegated_turn_effort,
+    )
 
 
 class TestShutdownWithATurnInFlight:

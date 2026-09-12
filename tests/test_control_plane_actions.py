@@ -835,6 +835,56 @@ class TestHistory:
 class TestBrief:
     """The Briefing verb on the wire — one address, or none at all."""
 
+    def test_project_names_a_session_before_its_task_arrives(self) -> None:
+        surface = Surface()
+        row = SessionInspection(target=CODEX, workspace=WORKSPACE, project_name="Project")
+        surface.state.sessions.observe(AgentKind.CODEX, LaneDiscovery(rows=(row,)), now=0.0)
+        assert surface.ask(Action.BRIEF).data["roster"]["rows"][0]["name"] == "Project"
+        row = SessionInspection(
+            target=CODEX, workspace=WORKSPACE, project_name="Project", thread_name="Build the panel"
+        )
+        surface.state.sessions.observe(AgentKind.CODEX, LaneDiscovery(rows=(row,)), now=1.0)
+        assert (
+            surface.ask(Action.BRIEF).data["roster"]["rows"][0]["name"]
+            == "Project · Build the panel"
+        )
+
+    def test_roster_activity_order_and_message_start_ignore_focus(self) -> None:
+        surface = Surface()
+        surface.state.sessions.register(
+            Session(target=CODEX, workspace=WORKSPACE, first_seen=0.0, name=NAME)
+        )
+        surface.state.sessions.register(
+            Session(
+                target=SECOND_CODEX,
+                workspace=WORKSPACE,
+                first_seen=1.0,
+                name=NAME,
+                last_activity=READ_AT,
+                progress=ProgressObservation.readable(
+                    has_history=True,
+                    recent=(
+                        ProgressEntry(
+                            ordinal=0,
+                            role=ProgressRole.ASSISTANT,
+                            text="The newest message\nFurther detail",
+                        ),
+                    ),
+                    read_at=READ_AT,
+                ),
+            )
+        )
+        surface.open_window()
+        surface.ask(Action.RELAY, target=CODEX_ADDRESS, text="carry on")
+
+        rows = surface.ask(Action.BRIEF).data["roster"]["rows"]
+
+        assert [row["target"]["session_id"] for row in rows] == ["def", "abc"]
+        assert rows[0]["newest"] == "The newest message"
+        assert rows[0]["last_activity_at"] == READ_AT.isoformat()
+        assert rows[1]["newest"] is None
+        assert rows[1]["last_activity_at"] is None
+
     def stopped_on_a_question(self) -> LaneDiscovery:
         return LaneDiscovery(
             rows=(
@@ -1601,7 +1651,7 @@ class TestTheFocusSession:
 
         assert surface.state.sessions.focus is None
 
-    def test_the_focus_session_is_spoken_first_and_the_counts_are_the_others(self) -> None:
+    def test_focus_metadata_does_not_remove_a_session_from_the_counts(self) -> None:
         surface = Surface()
         surface.register()
         surface.register(SECOND_CODEX)
@@ -1612,7 +1662,7 @@ class TestTheFocusSession:
 
         assert roster["focus"] == CODEX_ADDRESS
         assert roster["rows"][0]["focus"] is True
-        assert sum(roster["counts"].values()) == 1
+        assert sum(roster["counts"].values()) == 2
 
 
 class TestTheMenuScreens:
@@ -1666,3 +1716,120 @@ class TestTheMenuScreens:
         assert reply.error is not None
         assert reply.error.code is ErrorCode.REFUSED
         assert reply.error.message == ASSISTANT_UNAVAILABLE_HINT
+
+
+class TestTelegramBinding:
+    @pytest.mark.parametrize("outcome", ["success", "cancel", "credentials", "network"])
+    def test_binding_releases_the_existing_poll_and_resumes_afterwards(self, outcome: str) -> None:
+        import threading
+
+        from gpt_voicecoding.adapters.companion_channel.telegram.api import (
+            FailureLayer,
+            TelegramBinding,
+            TelegramError,
+        )
+        from test_companion_channel import FakeTelegram, channel, until
+
+        async def scenario() -> None:
+            wire = FakeTelegram()
+            polling_slot = threading.Lock()
+            conflicts: list[str] = []
+
+            def transport(method, payload, *, timeout_seconds):
+                if method != "getUpdates":
+                    return wire(method, payload, timeout_seconds=timeout_seconds)
+                if not polling_slot.acquire(blocking=False):
+                    conflicts.append(method)
+                    raise TelegramError(FailureLayer.API, "another consumer is polling")
+                try:
+                    return wire(method, payload, timeout_seconds=timeout_seconds)
+                finally:
+                    polling_slot.release()
+
+            configured_channel = channel(transport)
+            await configured_channel.connect()
+            try:
+                await until(lambda: polling_slot.locked(), what="existing long poll")
+                binding = TelegramBinding(
+                    transport_for=lambda token: transport,
+                    confirmation="Binding confirmed.",
+                    pause=configured_channel.pause_polling,
+                    resume=configured_channel.connect,
+                )
+                plane = ControlPlane(Surface().core, telegram_binding=binding)
+                if outcome in {"credentials", "network"}:
+                    wire.refuse("getMe", TelegramError(FailureLayer(outcome), "test refusal"))
+                begun = await plane.handle(Request(Action.BIND_TELEGRAM, {"token": "same-token"}))
+                if outcome in {"credentials", "network"}:
+                    assert not begun.ok
+                    assert begun.error.code == f"telegram_{outcome}"
+                else:
+                    assert begun.ok
+                    polls = len(wire.method_calls("getUpdates"))
+                    # An empty binding poll is the only reader while Start is pending.
+                    assert (await plane.handle(Request(Action.BIND_TELEGRAM))).ok
+                    assert len(wire.method_calls("getUpdates")) == polls + 1
+                    if outcome == "cancel":
+                        assert (
+                            await plane.handle(Request(Action.BIND_TELEGRAM, {"cancel": True}))
+                        ).ok
+                        assert not wire.sent()
+                    else:
+                        wire.deliver(
+                            {
+                                "update_id": 1,
+                                "message": {
+                                    "text": "/start",
+                                    "chat": {"id": 42, "type": "private"},
+                                },
+                            }
+                        )
+                        assert (await plane.handle(Request(Action.BIND_TELEGRAM))).data[
+                            "chat_id"
+                        ] == "42"
+                        assert wire.sent() == ["Binding confirmed."]
+                polls = len(wire.method_calls("getUpdates"))
+                await until(
+                    lambda: len(wire.method_calls("getUpdates")) > polls, what="resumed polling"
+                )
+                assert not conflicts
+            finally:
+                await configured_channel.aclose()
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize("chat_type", ["private", "group"])
+    def test_binding_while_unbound_confirms_one_start(self, chat_type: str) -> None:
+        from gpt_voicecoding.adapters.companion_channel.null import NullCompanionChannel
+        from gpt_voicecoding.adapters.companion_channel.telegram.api import TelegramBinding
+        from test_companion_channel import FakeTelegram
+
+        async def scenario() -> None:
+            wire = FakeTelegram()
+            surface = Surface()
+            core = BridgeCore(
+                state=surface.state, call=surface.call, channel=NullCompanionChannel(), agents={}
+            )
+            binding = TelegramBinding(
+                transport_for=lambda token: wire, confirmation="Binding confirmed."
+            )
+            plane = ControlPlane(core, telegram_binding=binding)
+            begun = await plane.handle(Request(Action.BIND_TELEGRAM, {"token": "test-token"}))
+            assert begun.ok
+            assert begun.data["bot_name"] == "fake_bot"
+            assert begun.data["chat_id"] is None
+            wire.deliver(
+                {
+                    "update_id": 1,
+                    "message": {"text": "/start", "chat": {"id": 42, "type": chat_type}},
+                }
+            )
+            bound = await plane.handle(Request(Action.BIND_TELEGRAM))
+            assert bound.ok
+            assert bound.data["chat_id"] == "42"
+            assert bound.data["chat_type"] == chat_type
+            assert wire.sent() == ["Binding confirmed."]
+            assert not (await plane.handle(Request(Action.BIND_TELEGRAM))).ok
+            assert wire.sent() == ["Binding confirmed."]
+
+        asyncio.run(scenario())

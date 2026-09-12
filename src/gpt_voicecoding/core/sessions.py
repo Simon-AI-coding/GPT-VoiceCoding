@@ -73,6 +73,9 @@ from gpt_voicecoding.seams.identity import AgentKind, SessionName, SessionTarget
 
 _log = logging.getLogger(__name__)
 
+# A missing project is not a license to use a transport address as a name (#359).
+UNNAMED_SESSION = "Session"
+
 
 @dataclass(frozen=True, slots=True)
 class Session:
@@ -284,7 +287,7 @@ class Session:
             _log.debug("refused Session Name candidate for %s: %s", target, reason)
         choice = result.choice
         if choice is None:
-            return None, None
+            return compose(row.project_name or ""), None
         if previous is not None and choice.task == previous.task:
             return self.name, choice.rung
         name = compose(row.project_name, choice.task) if row.project_name is not None else None
@@ -934,16 +937,7 @@ def stand_in(target: SessionTarget, *, first_seen: float) -> Session:
 
 
 def spoken_name(session: Session) -> str:
-    """What to call one Session out loud: its Session Name, else its address.
-
-    One answer for saying and showing. When no source has supplied a name,
-    the address remains the honest floor; no name is invented (ADR 0024).
-    """
+    """The known name, or a plain Session when even its project is unobserved."""
     if session.name is not None:
         return str(session.name)
-    return spoken_target(session.target)
-
-
-def spoken_target(target: SessionTarget) -> str:
-    """One identity, said out loud. The floor under every name."""
-    return f"{target.agent} {target.session_id or f'pid {target.pid}'}"
+    return UNNAMED_SESSION

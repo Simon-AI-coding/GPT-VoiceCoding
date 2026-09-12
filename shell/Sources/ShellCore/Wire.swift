@@ -7,7 +7,7 @@ public let maxRequestBytes = 65536
 
 /// The control-plane protocol this shell can interpret. Held to the engine's
 /// declaration by the cross-language agreement test in `tests/test_app_bundle.py`.
-public let controlPlaneProtocolVersion = 11
+public let controlPlaneProtocolVersion = 12
 
 /// Whether an Agent's authoritative progress source was read and answered.
 public enum ProgressAvailability: String, Sendable, CaseIterable {
@@ -66,6 +66,9 @@ public enum Action: String, Sendable, CaseIterable {
     case sessions
     case config
     case assistant
+    case models
+    case forgetCallAgent = "forget_call_agent"
+    case bindTelegram = "bind_telegram"
 }
 
 public struct Request: Sendable {

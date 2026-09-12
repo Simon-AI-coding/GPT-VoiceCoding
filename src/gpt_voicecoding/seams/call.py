@@ -187,26 +187,19 @@ MAX_HANDOVER_ITEMS: Final = 128
 class SpokenRosterBrief:
     """How many Sessions are in each state, and one header row for each.
 
-    The Roster Brief as the call carries it: `counts` and `focus` are already
+    The Roster Brief as the call carries it: `counts` is already
     the words Briefing chose, and `rows` are its header lines in its own order.
     A running Session appears here and nowhere else in a hand-over, which is what
     "running Sessions get header rows only" means.
     """
 
-    #: The whole counts line, heading included, because the heading is a *fact*
-    #: and not a label: with a Focus Session the counts are **the others**, since
-    #: that Session is spoken first and by name and counting it again would tell
-    #: the user about it twice (#165 Q6). An adapter that wrote the heading would
-    #: be deciding that, so Briefing writes it.
+    #: All addressable Sessions, including Focus, with Briefing's heading.
     counts: str
     rows: tuple[str, ...] = ()
-    #: The Focus Session's header row, when there is one. Kept apart from `rows`
-    #: because it is spoken first and by name, and the counts are *the others*.
-    focus: str | None = None
 
     @property
     def size_in_bytes(self) -> int:
-        return _bytes_of(self.counts, self.focus or "", *self.rows)
+        return _bytes_of(self.counts, *self.rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +214,7 @@ class SpokenBrief:
 
     """
 
-    #: The identity seam's name, or the address when none is known.
+    #: The identity seam's name, or a generic Session label when none is known.
     name: SessionName | str
     agent: str
     state: str
@@ -276,6 +269,7 @@ class Dial:
     voice: str
     agent: str
     hand_over: tuple[HandoverItem, ...] = ()
+    user_opened: bool = False
 
     def __post_init__(self) -> None:
         if not self.voice.strip():
@@ -459,6 +453,36 @@ class CallDropped(Event):
 CallEvent = UserSpeech | UserSpeaking | VoiceSpeech | CallStarted | CallEnded | CallDropped
 
 
+@dataclass(frozen=True, slots=True)
+class ModelChoice:
+    """One available Call Agent model and the efforts its catalog permits."""
+
+    model: str
+    efforts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """The four counts exposed to a control-plane reader."""
+
+    input: int
+    output: int
+    reasoning: int
+    cached: int
+
+
+@dataclass(frozen=True, slots=True)
+class CallAgent:
+    """The current Call Agent, with the last usage notification it supplied."""
+
+    model: str
+    effort: str | None
+    context_window: int | None = None
+    context_percent: int | None = None
+    total: TokenUsage | None = None
+    last: TokenUsage | None = None
+
+
 @runtime_checkable
 class CallAdapter(Protocol):
     """The one voice surface. Holds the call; holds no policy about it."""
@@ -489,6 +513,19 @@ class CallAdapter(Protocol):
         A brief and not a sentence: the Voice words what it is given, and this
         seam hands it the thing to be worded (`CONTEXT.md`, *Stop Notice*).
         """
+        ...
+
+    async def models(self) -> tuple[ModelChoice, ...]:
+        """Read once at engine startup, then answer from that cache."""
+        ...
+
+    @property
+    def call_agent(self) -> CallAgent | None:
+        """Absent until a call brings an agent; retained between calls."""
+        ...
+
+    def forget_call_agent(self) -> None:
+        """Forget the retained agent after Core has established there is no call."""
         ...
 
     async def open_conversation(self, *, model: str, instructions: str) -> str:

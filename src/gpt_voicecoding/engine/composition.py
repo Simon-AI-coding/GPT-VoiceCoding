@@ -46,12 +46,15 @@ from pathlib import Path
 from typing import Any
 
 from gpt_voicecoding import __version__
+from gpt_voicecoding.adapters.companion_channel.telegram import TelegramCompanionChannel
+from gpt_voicecoding.adapters.companion_channel.telegram.api import TelegramBinding
 from gpt_voicecoding.config import ConfigError, EngineConfig
 from gpt_voicecoding.control_plane.actions import ControlPlane
 from gpt_voicecoding.control_plane.commands import CommandError, build_request, render
 from gpt_voicecoding.control_plane.progress_publication import ProgressPublication
 from gpt_voicecoding.control_plane.server import ControlPlaneServer
 from gpt_voicecoding.core.bridge import BridgeCore, ControlAnswer
+from gpt_voicecoding.core.briefing import TELEGRAM_BINDING_CONFIRMATION
 from gpt_voicecoding.core.errors import BridgeCoreError
 from gpt_voicecoding.core.events import EventQueue
 from gpt_voicecoding.core.instructions import ControlPlaneCli, InstructionContext
@@ -261,7 +264,18 @@ class Engine:
             instruction_context=_instruction_context(config),
         )
         hub["core"] = core
-        plane = ControlPlane(core, progress_publication=progress_publication)
+        telegram = (
+            adapters.channel if isinstance(adapters.channel, TelegramCompanionChannel) else None
+        )
+        plane = ControlPlane(
+            core,
+            progress_publication=progress_publication,
+            telegram_binding=TelegramBinding(
+                confirmation=TELEGRAM_BINDING_CONFIRMATION,
+                pause=telegram.pause_polling if telegram is not None else None,
+                resume=telegram.connect if telegram is not None else None,
+            ),
+        )
         held["plane"] = plane
 
         return cls(
@@ -301,6 +315,7 @@ class Engine:
             for adapter in self.adapters.connectable():
                 await adapter.connect()
                 opened.append(adapter)
+            await self.core.models()
             await self._server.start()
         except BaseException:
             await self._closing(opened)
@@ -497,6 +512,7 @@ def _adapters(
             arguments["progress_capture"] = progress_capture
         if seam == "call":
             arguments["delegated_turn_model"] = config.delegated_turn_model
+            arguments["delegated_turn_effort"] = config.delegated_turn_effort
         if settings is not None:
             arguments["settings"] = settings
         try:

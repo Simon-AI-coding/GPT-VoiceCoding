@@ -11,6 +11,9 @@ Bridge Core (ADR 0001), so a surface that knew which of the five pipelines owned
 which decision would be a surface that has to change when the hub rearranges
 itself — and one that could reach a pipeline the hub would have guarded.
 
+Telegram binding is the explicit #359 exception: configuration uses the existing
+Telegram wire directly, without teaching a null Companion Channel about Telegram.
+
 **ADR 0002 is honoured by omission.** Nothing in this file consults switch
 state, and there is no branch that could. The reference implementation gated
 seven actions — the Session roster and six more — behind the Duty Switch, so a user
@@ -30,6 +33,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from gpt_voicecoding.adapters.companion_channel.telegram.api import TelegramBinding, TelegramError
 from gpt_voicecoding.control_plane import payloads
 from gpt_voicecoding.control_plane.payloads import InvalidPayload, NothingPending
 from gpt_voicecoding.control_plane.progress_publication import (
@@ -77,11 +81,16 @@ class ControlPlane:
         core: BridgeCore,
         *,
         progress_publication: ProgressPublication | None = None,
+        telegram_binding: TelegramBinding | None = None,
     ) -> None:
         self._core = core
+        self._telegram_binding = telegram_binding
         self._progress_publication = progress_publication or ProgressPublication()
         self.handlers: dict[Action, Handler] = {
             Action.STATUS: self._status,
+            Action.MODELS: self._models,
+            Action.FORGET_CALL_AGENT: self._forget_call_agent,
+            Action.BIND_TELEGRAM: self._bind_telegram,
             Action.SWITCH: self._switch,
             Action.BRIEF: self._brief,
             Action.HISTORY: self._history,
@@ -128,6 +137,12 @@ class ControlPlane:
             reply = Reply.refused(request.action, ErrorCode.UNKNOWN_PENDING, str(gone))
         except BridgeCoreError as refusal:
             reply = Reply.refused(request.action, code_for(refusal), str(refusal))
+        except TelegramError as refusal:
+            if request.action is not Action.BIND_TELEGRAM:
+                raise
+            reply = Reply.refused(
+                request.action, ErrorCode(f"telegram_{refusal.layer}"), refusal.detail
+            )
         return self._progress_publication.final(reply)
 
     # ------------------------------------------------------------------
@@ -138,6 +153,31 @@ class ControlPlane:
         self, payload: Mapping[str, Any], reader: Reader | None = None
     ) -> dict[str, Any]:
         return self._progress_publication.status_document(self._core.status())
+
+    async def _bind_telegram(
+        self, payload: Mapping[str, Any], reader: Reader | None = None
+    ) -> dict[str, Any]:
+        if self._telegram_binding is None:
+            raise BridgeCoreError("Telegram binding is not configured on this control plane")
+        token = payloads.read_text(payload, "token") if "token" in payload else None
+        cancel = payloads.read_flag(payload, "cancel") if "cancel" in payload else False
+        return await self._telegram_binding.step(token=token, cancel=cancel)
+
+    async def _forget_call_agent(
+        self, payload: Mapping[str, Any], reader: Reader | None = None
+    ) -> dict[str, Any]:
+        await self._core.forget_call_agent()
+        return {}
+
+    async def _models(
+        self, payload: Mapping[str, Any], reader: Reader | None = None
+    ) -> dict[str, Any]:
+        return {
+            "models": [
+                {"model": item.model, "efforts": list(item.efforts)}
+                for item in await self._core.models()
+            ]
+        }
 
     async def _brief(
         self, payload: Mapping[str, Any], reader: Reader | None = None

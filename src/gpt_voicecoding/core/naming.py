@@ -128,9 +128,9 @@ def _refusal(task: str) -> str | None:
     return None
 
 
-def compose(project_name: str, task: str) -> SessionName | None:
-    """Compose the same two halves as before, without logging or raising."""
+def compose(project_name: str, task: str = "") -> SessionName | None:
+    """Compose a known project, with a task when one exists (#359)."""
     project, wanted = project_name.strip(), task.strip()
-    if not project or NAME_SEPARATOR.strip() in project or _refusal(wanted):
+    if not project or NAME_SEPARATOR.strip() in project or (task and _refusal(wanted)):
         return None
     return SessionName(project=project, task=wanted)

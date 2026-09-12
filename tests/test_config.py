@@ -54,6 +54,17 @@ def written(tmp_path: Path, text: str) -> Path:
 
 
 class TestACompleteConfiguration:
+    def test_effort_is_optional_and_shared_with_the_delegate_model(self, tmp_path: Path) -> None:
+        assert load(written(tmp_path, COMPLETE)).delegated_turn_effort is None
+        text = COMPLETE.replace("[delegate]", '[delegate]\neffort = " high "')
+        assert load(written(tmp_path, text)).delegated_turn_effort == "high"
+
+    @pytest.mark.parametrize("value", ['""', '" "', "false", "2"])
+    def test_an_unusable_effort_is_refused(self, tmp_path: Path, value: str) -> None:
+        text = COMPLETE.replace("[delegate]", f"[delegate]\neffort = {value}")
+        with pytest.raises(ConfigError, match="reasoning effort name"):
+            load(written(tmp_path, text))
+
     def test_it_loads(self, tmp_path: Path) -> None:
         config = load(written(tmp_path, COMPLETE))
 

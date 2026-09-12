@@ -89,6 +89,7 @@ DEFAULT_VOICE_PLAYOUT_WAIT_SECONDS = 180.0
 #: Granted by the far side, so it can expire again: re-run the probe in #35 and
 #: re-derive it.
 DEFAULT_REALTIME_MODEL = "gpt-live-1-codex"
+DEFAULT_VOICE = "cove"
 
 
 class SettingsError(Exception):
@@ -117,6 +118,7 @@ class RealtimeCallSettings:
     #: Which realtime model the call asks for. Defaulted, not pinned: see the
     #: module docstring for why this one key is the operator's to state.
     realtime_model: str = DEFAULT_REALTIME_MODEL
+    voice: str = DEFAULT_VOICE
     #: Which audio devices to open, by the index the host audio library uses.
     #: `None` means the machine's own default, which is what a laptop wants.
     input_device: int | None = None
@@ -137,6 +139,8 @@ class RealtimeCallSettings:
                 raise SettingsError(f"{name} must be a positive number of seconds")
         if not self.realtime_model.strip():
             raise SettingsError("realtime_model must be a model name")
+        if not self.voice.strip():
+            raise SettingsError("voice must be a voice name")
         for name in ("input_device", "output_device"):
             device = getattr(self, name)
             if device is not None and device < 0:
@@ -168,9 +172,10 @@ def _typed(key: str, value: Any) -> Any:
         if not isinstance(value, str) or not value.strip():
             raise SettingsError(f"{key} must be a directory path")
         return Path(value.strip()).expanduser()
-    if key == "realtime_model":
+    if key in ("realtime_model", "voice"):
         if not isinstance(value, str) or not value.strip():
-            raise SettingsError(f"{key} must be a model name")
+            kind = "voice" if key == "voice" else "model"
+            raise SettingsError(f"{key} must be a {kind} name")
         return value.strip()
     if key in ("input_device", "output_device"):
         if isinstance(value, bool) or not isinstance(value, int):

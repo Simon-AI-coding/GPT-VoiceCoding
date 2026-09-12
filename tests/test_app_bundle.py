@@ -429,7 +429,12 @@ class TestTheThingsThatMustAgree:
         body = re.search(r"public enum Action: String.*?\n\}", swift, re.DOTALL)
 
         assert body is not None, "Wire.swift no longer declares the action set as one enum"
-        named = set(re.findall(r"^\s*case `?(?P<name>\w+)`?\s*$", body[0], re.MULTILINE))
+        named = {
+            wire_name or name
+            for name, wire_name in re.findall(
+                r'^\s*case `?(\w+)`?(?:\s*=\s*"([^"]+)")?\s*$', body[0], re.MULTILINE
+            )
+        }
         assert named == {str(action) for action in Action}
 
     @pytest.mark.parametrize(

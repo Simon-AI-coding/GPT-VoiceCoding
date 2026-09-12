@@ -64,7 +64,7 @@ from enum import StrEnum
 from typing import Final
 
 from gpt_voicecoding.core.call_keeper import Occasion
-from gpt_voicecoding.core.sessions import Session, spoken_name
+from gpt_voicecoding.core.sessions import UNNAMED_SESSION, Session, spoken_name
 from gpt_voicecoding.seams.agent import (
     ProgressAvailability,
     ProgressObservation,
@@ -337,6 +337,9 @@ ASSISTANT_OPENING_LINE = (
 #: `PLACEHOLDER_LIMIT`.
 ASSISTANT_REPLY_PLACEHOLDER = "your words for the assistant"
 
+#: Binding confirms reach; saving configuration and restarting belong to the surface.
+TELEGRAM_BINDING_CONFIRMATION = "Telegram is ready to connect to GPT-VoiceCoding."
+
 #: The same, for the `Say to <name>:` prompt (#264). The heading already names
 #: the Session, so the bar says only what it is waiting for.
 SAY_TO_PLACEHOLDER = "your words for that session"
@@ -455,15 +458,15 @@ class RosterRow:
     awaited: str | None = None
     #: Whether this is the Focus Session. Exactly one row may carry it.
     focus: bool = False
+    newest: str | None = None
+    last_activity_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RosterBrief:
     """How many Sessions are in each state, and one header row for each.
 
-    `counts` is **the others** whenever there is a Focus Session (#165 Q6): the
-    Focus Session is spoken first and by name, so counting it again would be the
-    same Session told twice.
+    Focus is call-side metadata; neither the counts nor row order depend on it.
     """
 
     counts: Mapping[BriefState, int]
@@ -477,7 +480,7 @@ class RosterBrief:
 
 
 def roster(sessions: Sequence[Session], focus: SessionTarget | None) -> RosterBrief:
-    """Counts per state and one header row per live Session, Focus first.
+    """Counts per state and one header row per live Session, newest activity first.
 
     **Exited Sessions appear nowhere** (#165 Q7), and neither does a Child
     Process. Two reasons, and they are the same one: every row here is one the
@@ -500,11 +503,19 @@ def roster(sessions: Sequence[Session], focus: SessionTarget | None) -> RosterBr
         for session in sessions
         if session.is_addressable
     )
-    ordered = tuple(sorted(rows, key=lambda row: not row.focus))
+    ordered = tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row.last_activity_at.timestamp()
+                if row.last_activity_at is not None
+                else float("-inf")
+            ),
+            reverse=True,
+        )
+    )
     counts: dict[BriefState, int] = {}
     for row in ordered:
-        if row.focus:
-            continue
         counts[row.state] = counts.get(row.state, 0) + 1
     return RosterBrief(
         counts=counts,
@@ -534,8 +545,8 @@ def session(
     because this module is a function of what it is given; and read here rather
     than stored at the Stop, because a Session Name climbs (ADR 0024) and a name
     resolved minutes ago would be announced stale. An empty roster is the honest
-    default: the address the lane resolved stands in, the way it stands in for
-    every Session with no name yet.
+    default: an unknown peer gets the same generic label as a Session whose
+    project has not been observed, never its transport address.
     """
     state = _state(session)
     return SessionBrief(
@@ -610,11 +621,11 @@ def spoken(brief: SessionBrief) -> SpokenBrief:
 
     The address does not travel. A `SessionTarget` is how *this* process names a
     Session; the Voice names it the way the user does, which is the Session Name
-    where there is one and the address only where there is not
+    where there is one and a generic Session label where there is not
     (`core/sessions.py::spoken_name`, the same rule `_headline` follows).
     """
     return SpokenBrief(
-        name=brief.name if brief.name is not None else str(brief.target),
+        name=brief.name if brief.name is not None else UNNAMED_SESSION,
         agent=str(brief.agent),
         state=state_word(brief.state, brief.awaited),
         newest=brief.newest.words,
@@ -646,7 +657,7 @@ def notice(brief: SessionBrief) -> SessionNotice:
         state=brief.state,
         state_word=state_word(brief.state, brief.awaited),
         agent=str(brief.agent),
-        name=brief.name if brief.name is not None else str(brief.target),
+        name=brief.name if brief.name is not None else UNNAMED_SESSION,
         question=question,
         options=options,
         recommendation=recommendation,
@@ -660,9 +671,7 @@ def notice(brief: SessionBrief) -> SessionNotice:
 def roster_notice(brief: RosterBrief) -> RosterNotice:
     """The Roster Brief as the Companion Channel seam carries it — `text`'s rows, as data.
 
-    Rows in `text`'s own order, the Focus Session first, and the counts line
-    whole for the reason `SpokenRosterBrief` gives: *the others* is a fact, and
-    an adapter that wrote the heading would be deciding it.
+    Rows in `text`'s activity order, and the same counts line on every surface.
     """
     return RosterNotice(
         rows=tuple(
@@ -670,7 +679,7 @@ def roster_notice(brief: RosterBrief) -> RosterNotice:
                 state=row.state,
                 state_word=state_word(row.state, row.awaited),
                 agent=str(row.agent),
-                name=row.name if row.name is not None else str(row.target),
+                name=row.name if row.name is not None else UNNAMED_SESSION,
             )
             for row in brief.rows
         ),
@@ -709,6 +718,8 @@ def for_call(
         for row in summary.rows
         if row.target in by_target and earns_a_brief(by_target[row.target])
     ]
+    # Focus decides who is spoken to first, never the roster's row order (#359).
+    briefs.sort(key=lambda brief: brief.target != focus)
     if not briefs:
         return ()
     if occasion is Occasion.MID_CALL:
@@ -740,6 +751,7 @@ def text(brief: SessionBrief | RosterBrief) -> str:
 
 
 def _row(session: Session, *, focus: bool, peers: Sequence[Session] = ()) -> RosterRow:
+    newest = _newest(session.progress).text
     return RosterRow(
         target=session.target,
         name=session.name,
@@ -747,6 +759,8 @@ def _row(session: Session, *, focus: bool, peers: Sequence[Session] = ()) -> Ros
         state=_state(session),
         awaited=_awaited(session, peers),
         focus=focus,
+        newest=newest.split("\n", 1)[0] if newest is not None else None,
+        last_activity_at=session.last_activity,
     )
 
 
@@ -759,9 +773,8 @@ def _awaited(session: Session, peers: Sequence[Session]) -> str | None:
     or a child's own name. This turns the first into the Session Name the user
     calls that Session, by finding it on the roster it was handed.
 
-    A peer the roster does not hold is announced by the address the lane
-    resolved — the honest floor under every name (`core/sessions.py`,
-    ADR 0024), and the same answer this gives a Session that has no name yet.
+    A peer the roster does not hold gets a generic Session label, the same
+    answer this gives a Session whose project has not been observed (#359).
     A `WAITING_ON` with nothing at all to name is a child that has none, and
     `state_word` is where that becomes words.
     """
@@ -773,7 +786,7 @@ def _awaited(session: Session, peers: Sequence[Session]) -> str | None:
     if awaiting is None:
         return None
     named = next((peer for peer in peers if str(peer.target) == awaiting), None)
-    return spoken_name(named) if named is not None else awaiting
+    return spoken_name(named) if named is not None else UNNAMED_SESSION
 
 
 def _state(session: Session) -> BriefState:
@@ -1061,7 +1074,7 @@ def _fitted(
 def _one_row_less(rows: list[RosterRow], briefs: list[SessionBrief]) -> bool:
     """Give up one header row, the ones a brief already names first.
 
-    From the back within each group, so the Focus Session's row is the last to
+    From the back within each group, so the most recent row is the last to
     go — and a row whose Session is briefed goes before any row whose Session is
     not, because the brief says everything the row does and more.
     """
@@ -1111,12 +1124,9 @@ def _one_body_less(briefs: list[SessionBrief]) -> bool:
 
 def _spoken_roster(brief: RosterBrief, rows: list[RosterRow]) -> SpokenRosterBrief:
     """The Roster Brief as the Call seam carries it — the same words `text` prints."""
-    listed = [row for row in rows if not row.focus]
-    focus = next((row for row in rows if row.focus), None)
     return SpokenRosterBrief(
         counts=_counts_line(brief),
-        rows=tuple(_row_line(row) for row in listed),
-        focus=_row_line(focus) if focus is not None else None,
+        rows=tuple(_row_line(row) for row in rows),
     )
 
 
@@ -1232,14 +1242,7 @@ def _is_permission(brief: SessionBrief) -> bool:
 
 
 def _roster_lines(brief: RosterBrief) -> list[str]:
-    lines: list[str] = []
-    rows = list(brief.rows)
-    if rows and rows[0].focus:
-        lines.append(f"focus: {_row_line(rows[0])}")
-        rows = rows[1:]
-    lines.append(_counts_line(brief))
-    lines.extend(f"  {_row_line(row)}" for row in rows)
-    return lines
+    return [_counts_line(brief), *(f"  {_row_line(row)}" for row in brief.rows)]
 
 
 def greeting(session: Session, peers: Sequence[Session] = ()) -> str:
@@ -1261,17 +1264,9 @@ def _headline(
     state: BriefState,
     awaited: str | None = None,
 ) -> str:
-    """`<name> — <address> — <state>`, and the name is dropped when there is none.
-
-    A Session with no Session Name is announced by its address
-    (`core/sessions.py::spoken_name`), so writing the address where the name
-    goes as well would say one thing twice. The agent is not a field of its own
-    here either: it is the first half of the address, and a line that spelled it
-    out beside it would be the same fact printed twice — the structured brief
-    carries `agent` for a consumer that wants it apart.
-    """
-    named = f"{name} — " if name is not None else ""
-    return f"{named}{target} — {state_word(state, awaited)}"
+    """The name and the address to ask about it by are distinct fields."""
+    named = str(name) if name is not None else UNNAMED_SESSION
+    return f"{named} — {target} — {state_word(state, awaited)}"
 
 
 def _row_line(row: RosterRow) -> str:
@@ -1279,14 +1274,8 @@ def _row_line(row: RosterRow) -> str:
 
 
 def _counts_line(brief: RosterBrief) -> str:
-    """The counts, under the heading that says which Sessions they are.
-
-    **The others**, whenever there is a Focus Session (#165 Q6). One function, so
-    the rendered roster and the one the Live Call is handed cannot disagree about
-    whether the Focus Session was counted.
-    """
-    heading = "the others" if brief.focus is not None else "sessions"
-    return f"{heading}: {_counts(brief.counts)}"
+    """Count every roster row on every surface, whether Focus or not (#359)."""
+    return f"sessions: {_counts(brief.counts)}"
 
 
 def _counts(counts: Mapping[BriefState, int]) -> str:

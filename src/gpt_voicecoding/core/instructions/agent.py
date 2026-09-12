@@ -85,6 +85,9 @@ AGENT_ACTIONS: tuple[Action, ...] = (
 #: way of offering the user choices to press, and the acting half of a call has
 #: `brief` for the roster and no screen to press anything on.
 WITHHELD_ACTIONS: tuple[Action, ...] = (
+    Action.MODELS,
+    Action.FORGET_CALL_AGENT,
+    Action.BIND_TELEGRAM,
     Action.STATUS,
     Action.SWITCH,
     Action.VERIFY,

@@ -76,6 +76,8 @@ def _payload(action: Action, arguments: list[str]) -> dict[str, object]:
     match action:
         case (
             Action.STATUS
+            | Action.MODELS
+            | Action.FORGET_CALL_AGENT
             | Action.LIVE
             | Action.VERIFY
             | Action.SESSIONS
@@ -88,6 +90,11 @@ def _payload(action: Action, arguments: list[str]) -> dict[str, object]:
             return {}
         case Action.BRIEF:
             return _brief(arguments)
+        case Action.BIND_TELEGRAM:
+            if not arguments:
+                return {}
+            (value,) = _exactly(action, arguments, 1)
+            return {"cancel": True} if value == "--cancel" else {"token": value}
         case Action.SWITCH:
             name, state = _exactly(action, arguments, 2)
             return {"name": name, "on": _state(state)}
@@ -247,6 +254,20 @@ def render(reply: Reply) -> str:
     match reply.action:
         case Action.STATUS:
             return "\n".join(_status_lines(data))
+        case Action.MODELS:
+            return "\n".join(
+                f"{row['model']}: {', '.join(row['efforts'])}" for row in data["models"]
+            )
+        case Action.FORGET_CALL_AGENT:
+            return "The next call starts fresh."
+        case Action.BIND_TELEGRAM:
+            if data.get("cancelled"):
+                return "Telegram binding cancelled."
+            return f"{data['bot_name']} (@{data['username']}): " + (
+                f"{data['chat_type']} chat {data['chat_id']}"
+                if data.get("chat_id")
+                else "waiting for Start in Telegram"
+            )
         case Action.BRIEF:
             # The engine's own rendering, printed unchanged. `briefing.text` is
             # the only renderer of Session state there is (#166 B6), and this
@@ -314,6 +335,21 @@ def _status_lines(data: dict[str, object]) -> list[str]:
     lines = [
         "switches: " + ", ".join(f"{name} {'on' if on else 'off'}" for name, on in switches.items())
     ]
+    if "engine_version" in data:
+        lines.append(f"engine: {data['engine_version']}")
+    agent = data.get("call_agent")
+    if isinstance(agent, dict):
+        lines.append(f"call agent: {agent['model']} (effort {agent['effort'] or 'default'})")
+        if agent["context_window"] is not None:
+            lines.append(
+                f"context: {agent['context_percent']}% of {agent['context_window']} tokens"
+            )
+        for period in ("total", "last"):
+            usage = agent[period]
+            if usage is not None:
+                lines.append(
+                    f"{period}: " + ", ".join(f"{key} {count}" for key, count in usage.items())
+                )
     call_id = data["call_id"]
     lines.append(f"call: {call_id}" if call_id else f"call: none{_cool_down(data)}")
     lines.extend(_status_roster_lines(data["sessions"]))

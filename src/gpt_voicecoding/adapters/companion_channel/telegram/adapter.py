@@ -101,6 +101,7 @@ import threading
 from gpt_voicecoding.adapters.companion_channel.telegram.api import (
     TelegramError,
     Transport,
+    on_daemon,
 )
 from gpt_voicecoding.adapters.companion_channel.telegram.layout import (
     lay_out,
@@ -255,6 +256,16 @@ class TelegramCompanionChannel:
             target=self._polling, name="telegram-companion-channel", daemon=True
         )
         self._reader.start()
+
+    async def pause_polling(self) -> bool:
+        """Release Telegram's one-consumer slot for a binding, including an in-flight poll."""
+        reader = self._reader
+        if reader is None:
+            return False
+        self._stop.set()
+        await on_daemon(reader.join, name="telegram-pause")
+        self._reader = None
+        return True
 
     async def aclose(self) -> None:
         """Stop listening. Idempotent, and never waits out a poll that is still open.
@@ -800,21 +811,10 @@ class TelegramCompanionChannel:
         whatever grace it was given. A daemon thread is abandoned instead, and
         the caller awaiting this is cancelled with the rest of the shutdown.
         """
-        loop = asyncio.get_running_loop()
-        answer: asyncio.Future[object] = loop.create_future()
-
-        def call() -> None:
-            try:
-                outcome: object = self._transport(method, payload, timeout_seconds=timeout_seconds)
-            except BaseException as raised:  # noqa: BLE001 - handed back whole, judged there
-                outcome = raised
-            try:
-                loop.call_soon_threadsafe(_settle, answer, outcome)
-            except RuntimeError:
-                pass  # the loop has gone; there is nobody left to tell
-
-        threading.Thread(target=call, name=f"telegram-{method}", daemon=True).start()
-        return await answer
+        return await on_daemon(
+            lambda: self._transport(method, payload, timeout_seconds=timeout_seconds),
+            name=f"telegram-{method}",
+        )
 
 
 #: What an edit sends for a message that is to draw no buttons. An edit says
@@ -909,19 +909,3 @@ def _replied_to(message: dict) -> str:
 def _message_id_on_the_wire(message_id: str) -> int | str:
     """Give an id back to the API in the shape it came: its ids are integers."""
     return int(message_id) if message_id.lstrip("-").isdigit() else message_id
-
-
-def _settle(answer: asyncio.Future[object], outcome: object) -> None:
-    """Hand one call's result back, unless nobody is waiting for it any more.
-
-    Runs on the event loop, put there by the worker. A future that was already
-    cancelled is the ordinary shutdown case rather than an error: the engine let
-    go of this call, and setting a result on it would raise where nothing is
-    listening.
-    """
-    if answer.done():
-        return
-    if isinstance(outcome, BaseException):
-        answer.set_exception(outcome)
-    else:
-        answer.set_result(outcome)

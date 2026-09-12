@@ -51,9 +51,10 @@ class TestSessionName:
         with pytest.raises(ValueError):
             SessionName("GPT-VoiceCoding", "   ")
 
-    def test_text_without_the_separator_does_not_parse(self) -> None:
-        with pytest.raises(ValueError):
-            SessionName.parse("GPT-VoiceCoding")
+    def test_a_project_only_name_round_trips_before_a_task_exists(self) -> None:
+        name = SessionName("GPT-VoiceCoding")
+        assert str(name) == "GPT-VoiceCoding"
+        assert SessionName.parse(str(name)) == name
 
     def test_text_with_two_separators_does_not_parse(self) -> None:
         with pytest.raises(ValueError):

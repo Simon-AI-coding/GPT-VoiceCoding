@@ -200,8 +200,8 @@ class RosterNotice:
     """The Roster Brief as this seam carries it — rows in Briefing's order, counts whole.
 
     `counts` is the whole counts line, heading included, for the reason
-    `SpokenRosterBrief` gives: with a Focus Session the counts are *the others*,
-    and that is a fact Briefing states, not a label an adapter writes.
+    `SpokenRosterBrief` gives: all addressable Sessions are counted, including
+    Focus, and that is a fact Briefing states, not a label an adapter writes.
     """
 
     rows: tuple[RosterRowNotice, ...]

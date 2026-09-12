@@ -33,6 +33,9 @@ from gpt_voicecoding.seams.control_plane import Action
 
 #: What each action is for, in one line. Total over `Action` — see the test.
 ACTION_GIST: dict[Action, str] = {
+    Action.MODELS: "the cached Call Agent model catalog and each model's supported efforts",
+    Action.FORGET_CALL_AGENT: "forget the current Call Agent between calls",
+    Action.BIND_TELEGRAM: "bind Telegram with a user-supplied token; never invent or log a token",
     Action.STATUS: "everything the engine knows right now: switches, sessions, call, pending work",
     Action.SWITCH: "flip one switch on or off",
     Action.BRIEF: (

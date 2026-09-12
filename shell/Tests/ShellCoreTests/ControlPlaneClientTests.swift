@@ -8,7 +8,7 @@ import Testing
     @Test func oneRequestGetsOneReply() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": true, "action": "live", "protocol": 11, "data": {"state": "up", "call_id": "call-1"}}"#
+                #"{"ok": true, "action": "live", "protocol": 12, "data": {"state": "up", "call_id": "call-1"}}"#
             ))
         defer { engine.stop() }
 
@@ -22,7 +22,7 @@ import Testing
     @Test func aRefusalIsAnAnswer() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .answer(
-                #"{"ok": false, "action": "switch", "protocol": 11, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
+                #"{"ok": false, "action": "switch", "protocol": 12, "error": {"code": "unknown_switch", "message": "unknown switch: 'sound'"}}"#
             ))
         defer { engine.stop() }
 
@@ -76,7 +76,20 @@ import Testing
         let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
 
         #expect(failure == .protocolMismatch(received: 10, supported: controlPlaneProtocolVersion))
-        #expect(controlPlaneProtocolVersion == 11)
+        #expect(controlPlaneProtocolVersion >= 11)
+    }
+
+    @Test func theProtocolBeforeTheRedesignIsAMismatch() async throws {
+        let engine = try FakeEngineSocket(
+            behaviour: .answer(
+                #"{"ok": true, "action": "status", "protocol": 11, "data": {}}"#
+            ))
+        defer { engine.stop() }
+
+        let failure = await failure(of: UnixSocketControlPlane(path: engine.path))
+
+        #expect(failure == .protocolMismatch(received: 11, supported: controlPlaneProtocolVersion))
+        #expect(controlPlaneProtocolVersion == 12)
     }
 
     @Test func aMissingProtocolVersionKeepsTheAbsentDistinction() async throws {

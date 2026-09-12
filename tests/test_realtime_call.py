@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 
 from codex_fake import FakeAppServer, FakeRemoteError
+from fakes import FakeCompanionChannel, instruction_context
 from gpt_voicecoding.adapters.call.realtime import (
     APPROVAL_POLICY,
     CODEX_RESPONSE_ITEM_PREFIX,
@@ -57,6 +58,12 @@ from gpt_voicecoding.adapters.call.realtime.adapter import _item_text
 from gpt_voicecoding.adapters.codex_app_server.process import AppServerError, attach
 from gpt_voicecoding.adapters.codex_app_server.settings import CodexSettings
 from gpt_voicecoding.adapters.codex_app_server.wire import RemoteError
+from gpt_voicecoding.control_plane.actions import ControlPlane
+from gpt_voicecoding.core.bridge import BridgeCore
+from gpt_voicecoding.core.relay_queue import RelayQueue
+from gpt_voicecoding.core.sessions import SessionRegistry
+from gpt_voicecoding.core.state import BridgeState
+from gpt_voicecoding.core.switches import Switchboard
 from gpt_voicecoding.seams.call import (
     CALL_AGENT_REMARK_ALLOWANCE_BYTES,
     CODEX_BYTES_PER_TOKEN,
@@ -75,6 +82,7 @@ from gpt_voicecoding.seams.call import (
     UserSpeech,
     VoiceSpeech,
 )
+from gpt_voicecoding.seams.control_plane import Action, Request
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyOutcome
@@ -121,9 +129,12 @@ def brief(newest: str) -> SpokenBrief:
 #: these through `_item_text` and measure the result against what it was charged.
 HANDOVER_ITEM_EXAMPLES = (
     SpokenRosterBrief(
-        counts="the others: 2 running, 1 finished",
-        rows=("build — codex:abc — running", "docs — claude:def:12 — finished"),
-        focus="voicecoding · the dial — codex:ghi — waiting for your decision",
+        counts="sessions: 1 waiting for your decision, 1 running, 1 finished",
+        rows=(
+            "build — codex:abc — running",
+            "docs — claude:def:12 — finished",
+            "voicecoding · the dial — codex:ghi — waiting for your decision",
+        ),
     ),
     brief("it stopped on a question"),
     SpokenBrief(
@@ -191,11 +202,13 @@ async def riding(
     settings: RealtimeCallSettings | None = None,
     cue_player: FakeCueOutput | None = None,
     delegated_turn_model: str = DELEGATED_MODEL,
+    delegated_turn_effort: str | None = None,
 ) -> tuple[RealtimeCallAdapter, FakeTransport]:
     """An adapter wired to a scripted app-server, exactly as the root wires it."""
     audio = transport or FakeTransport()
     adapter = RealtimeCallAdapter(
         delegated_turn_model=delegated_turn_model,
+        delegated_turn_effort=delegated_turn_effort,
         sink=sink,
         settings=settings or quick(),
         transport_factory=lambda: audio,
@@ -269,6 +282,287 @@ def _sounddevice(streams: _Streams) -> Iterator[None]:
 
 
 class TestBringingACallUp:
+    def test_a_project_only_name_carries_no_empty_task_line(self, socket_path: Path) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(server, Sink())
+                await adapter.ensure_call(dial(replace(brief("done"), name=SessionName("Project"))))
+                text = server.calls_to("thread/realtime/start")[0]["initialItems"][0]["text"]
+                assert "  project: Project" in text
+                assert "  task:" not in text
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_running_engine_refreshes_catalog_and_forgets_agent_after_restart(
+        self, socket_path: Path
+    ) -> None:
+        from fakes import FakeAgent
+        from gpt_voicecoding.config import load
+        from gpt_voicecoding.control_plane.client import ask
+        from gpt_voicecoding.engine.composition import Engine
+        from gpt_voicecoding.seams.agent import SessionStopped
+        from test_engine import CODEX, configured
+
+        async def scenario() -> None:
+            config = load(configured(socket_path.parent))
+            async with FakeAppServer(socket_path) as server:
+                for generation, catalog in enumerate(
+                    (
+                        [],
+                        [
+                            {
+                                "model": "new-model",
+                                "hidden": False,
+                                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                            }
+                        ],
+                    )
+                ):
+                    server.answers("model/list", {"data": catalog})
+                    realtime_script(server, thread_id=f"call-{generation}")
+                    shared = SharedAppServer(connection=None)
+                    connection = await attach(
+                        server.path,
+                        version="0",
+                        settings=CodexSettings(request_timeout_seconds=2.0),
+                        on_notification=shared.heard,
+                        experimental=True,
+                    )
+                    shared.connection = connection
+
+                    def agent_factory(shared=shared, **arguments):
+                        agent = FakeAgent(**arguments)
+                        agent.app_server = shared
+                        return agent
+
+                    def call_factory(**arguments):
+                        return RealtimeCallAdapter(
+                            **arguments,
+                            settings=quick(),
+                            transport_factory=FakeTransport,
+                            cue_player=FakeCueOutput(),
+                        )
+
+                    factories = {
+                        "fakes:FakeCall": call_factory,
+                        "fakes:FakeAgent": agent_factory,
+                        "fakes:FakeCompanionChannel": FakeCompanionChannel,
+                    }
+                    engine = Engine.assemble(config, factory_of=factories.__getitem__)
+                    await engine.start()
+                    try:
+                        assert len(server.calls_to("model/list")) == generation + 1
+                        for _ in range(2):
+                            models = await ask(Request(Action.MODELS), path=engine.socket_path)
+                            assert models.data["models"] == (
+                                [{"model": "new-model", "efforts": ["high"]}] if generation else []
+                            )
+                        assert len(server.calls_to("model/list")) == generation + 1
+                        assert (
+                            "call_agent"
+                            not in (await ask(Request(Action.STATUS), path=engine.socket_path)).data
+                        )
+                        for name in ("duty", "voice"):
+                            assert (
+                                await ask(
+                                    Request(Action.SWITCH, {"name": name, "on": True}),
+                                    path=engine.socket_path,
+                                )
+                            ).ok
+                        await engine.core.dispatch(SessionStopped(target=CODEX))
+                        status = await ask(Request(Action.STATUS), path=engine.socket_path)
+                        assert status.data["call_id"]
+                        assert status.data["call_agent"]["model"] == "gpt-5"
+                        assert (
+                            server.calls_to("thread/realtime/start")[-1]["threadId"]
+                            == f"call-{generation}"
+                        )
+                        assert len(server.calls_to("thread/start")) == generation + 1
+                    finally:
+                        await engine.aclose()
+                        await connection.aclose()
+
+        asyncio.run(scenario())
+
+    def test_user_dial_replaces_agent_system_dial_continues_and_forget_is_between_calls(
+        self, socket_path: Path
+    ) -> None:
+        from gpt_voicecoding.seams.agent import SessionStopped
+        from test_engine import CODEX
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, audio = await riding(server, Sink())
+                now = [0.0]
+                core = BridgeCore(
+                    state=BridgeState(
+                        switches=Switchboard(), sessions=SessionRegistry(), relays=RelayQueue()
+                    ),
+                    call=adapter,
+                    channel=FakeCompanionChannel(),
+                    agents={},
+                    clock=lambda: now[0],
+                    instruction_context=instruction_context(),
+                )
+                plane = ControlPlane(core)
+                assert (await plane.handle(Request(Action.LIVE))).ok
+                refusal = await plane.handle(Request(Action.FORGET_CALL_AGENT))
+                assert not refusal.ok
+                assert (await plane.handle(Request(Action.LIVE))).ok
+                audio.closed = False
+                now[0] += core.status().cool_down_remaining
+                for name in ("duty", "voice"):
+                    assert (
+                        await plane.handle(Request(Action.SWITCH, {"name": name, "on": True}))
+                    ).ok
+                await core.dispatch(SessionStopped(target=CODEX))
+                assert (await plane.handle(Request(Action.STATUS))).data["call_id"]
+                assert len(server.calls_to("thread/start")) == 1
+                assert (await plane.handle(Request(Action.LIVE))).ok
+                audio.closed = False
+                assert (await plane.handle(Request(Action.LIVE))).ok
+                assert len(server.calls_to("thread/start")) == 2
+                assert (await plane.handle(Request(Action.LIVE))).ok
+                assert (await plane.handle(Request(Action.FORGET_CALL_AGENT))).ok
+                assert "call_agent" not in (await plane.handle(Request(Action.STATUS))).data
+                audio.closed = False
+                now[0] += core.status().cool_down_remaining
+                await core.dispatch(SessionStopped(target=CODEX))
+                assert (await plane.handle(Request(Action.STATUS))).data["call_id"]
+                assert len(server.calls_to("thread/start")) == 3
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_status_carries_live_call_agent_usage(self, socket_path: Path) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(server, Sink(), delegated_turn_effort="high")
+                core = BridgeCore(
+                    state=BridgeState(
+                        switches=Switchboard(), sessions=SessionRegistry(), relays=RelayQueue()
+                    ),
+                    call=adapter,
+                    channel=FakeCompanionChannel(),
+                    agents={},
+                    instruction_context=instruction_context(),
+                )
+                plane = ControlPlane(core)
+                assert "call_agent" not in (await plane.handle(Request(Action.STATUS))).data
+                await plane.handle(Request(Action.LIVE))
+                usage = {
+                    "totalTokens": 36000,
+                    "inputTokens": 30000,
+                    "outputTokens": 6000,
+                    "reasoningOutputTokens": 2000,
+                    "cachedInputTokens": 12000,
+                }
+                await server.notify_all(
+                    "thread/tokenUsage/updated",
+                    {
+                        "threadId": "thread-1",
+                        "tokenUsage": {"total": usage, "last": usage, "modelContextWindow": 60000},
+                    },
+                )
+                # A reply on the same connection follows the notification in wire order.
+                server.answers("model/list", {"data": []})
+                await core.models()
+                reply = await plane.handle(Request(Action.STATUS))
+                agent = reply.data["call_agent"]
+                assert agent["effort"] == "high"
+                assert agent["context_percent"] == 50
+                assert agent["total"] == {
+                    "input": 30000,
+                    "output": 6000,
+                    "reasoning": 2000,
+                    "cached": 12000,
+                }
+                assert agent["last"] == agent["total"]
+                assert reply.data["engine_version"]
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_control_plane_dial_uses_voice_model_and_shared_effort(self, socket_path: Path) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(
+                    server,
+                    Sink(),
+                    settings=quick(voice="ember", realtime_model="configured-realtime"),
+                    delegated_turn_effort="high",
+                )
+                core = BridgeCore(
+                    state=BridgeState(
+                        switches=Switchboard(), sessions=SessionRegistry(), relays=RelayQueue()
+                    ),
+                    call=adapter,
+                    channel=FakeCompanionChannel(),
+                    agents={},
+                    instruction_context=instruction_context(),
+                )
+                reply = await ControlPlane(core).handle(Request(Action.LIVE))
+                assert reply.ok
+                assert (
+                    server.calls_to("thread/start")[0]["config"]["model_reasoning_effort"] == "high"
+                )
+                dial = server.calls_to("thread/realtime/start")[0]
+                assert dial["voice"] == "ember"
+                assert dial["model"] == "configured-realtime"
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+    def test_model_catalog_is_cached_at_startup(self, socket_path: Path) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                server.answers(
+                    "model/list",
+                    {
+                        "data": [
+                            {
+                                "model": "chosen-model",
+                                "hidden": False,
+                                "supportedReasoningEfforts": [
+                                    {"reasoningEffort": "low"},
+                                    {"reasoningEffort": "high"},
+                                ],
+                            },
+                            {
+                                "model": "hidden-model",
+                                "hidden": True,
+                                "supportedReasoningEfforts": [],
+                            },
+                        ]
+                    },
+                )
+                adapter, _ = await riding(server, Sink())
+                core = BridgeCore(
+                    state=BridgeState(
+                        switches=Switchboard(), sessions=SessionRegistry(), relays=RelayQueue()
+                    ),
+                    call=adapter,
+                    channel=FakeCompanionChannel(),
+                    agents={},
+                    instruction_context=instruction_context(),
+                )
+                await core.models()
+                plane = ControlPlane(core)
+                for _ in range(2):
+                    reply = await plane.handle(Request(Action.MODELS))
+                    assert reply.data == {
+                        "models": [{"model": "chosen-model", "efforts": ["low", "high"]}]
+                    }
+                assert len(server.calls_to("model/list")) == 1
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
     def test_the_handshake_is_the_route_the_prototype_proved(self, socket_path: Path) -> None:
         """Thread, offer, realtime start, SDP answer, started, audio up."""
 
@@ -308,9 +602,11 @@ class TestBringingACallUp:
                 await adapter.ensure_call(
                     dial(
                         SpokenRosterBrief(
-                            counts="the others: 1 running",
-                            rows=("build — codex:abc — running",),
-                            focus="voicecoding · the dial — codex:def — finished",
+                            counts="sessions: 1 finished, 1 running",
+                            rows=(
+                                "build — codex:abc — running",
+                                "voicecoding · the dial — codex:def — finished",
+                            ),
                         ),
                         brief("it finished"),
                     )
@@ -324,9 +620,9 @@ class TestBringingACallUp:
                     "developer",
                 ]
                 assert start["initialItems"][0]["text"] == (
-                    "focus: voicecoding · the dial — codex:def — finished\n"
-                    "the others: 1 running\n"
-                    "  build — codex:abc — running"
+                    "sessions: 1 finished, 1 running\n"
+                    "  build — codex:abc — running\n"
+                    "  voicecoding · the dial — codex:def — finished"
                 )
                 assert start["initialItems"][1]["text"].endswith("  last activity: not read")
                 await adapter.aclose()
@@ -1890,7 +2186,7 @@ class TestTheDelegatedTurn:
         async def scenario() -> None:
             async with FakeAppServer(socket_path) as server:
                 delegated_script(server, model="claude-sonnet-5", says="the diff is small")
-                adapter, _ = await riding(server, Sink())
+                adapter, _ = await riding(server, Sink(), delegated_turn_effort="high")
 
                 reply = await adapter.delegate(
                     "summarise the diff",
@@ -1901,6 +2197,7 @@ class TestTheDelegatedTurn:
 
                 started = server.calls_to("thread/start")[0]
                 assert started["model"] == "claude-sonnet-5"
+                assert started["config"]["model_reasoning_effort"] == "high"
                 assert started["developerInstructions"] == DELEGATED_RULES
                 assert started["approvalPolicy"] == APPROVAL_POLICY
                 assert started["sandbox"] == SANDBOX
@@ -2470,6 +2767,12 @@ class TestTheTransportItIsLent:
 
 
 class TestWhatThisSpokeMayBeTold:
+    def test_voice_defaults_to_cove_and_accepts_a_configured_name(self) -> None:
+        assert RealtimeCallSettings.of(None).voice == "cove"
+        assert RealtimeCallSettings.of({"voice": " ember "}).voice == "ember"
+        with pytest.raises(SettingsError, match="voice name"):
+            RealtimeCallSettings.of({"voice": " "})
+
     def test_an_unknown_setting_refuses_to_start(self) -> None:
         with pytest.raises(SettingsError) as refusal:
             RealtimeCallSettings.of({"conect_timeout_seconds": 1.0})

@@ -528,12 +528,11 @@ class TestWaitingOnSomebody:
         assert briefing.session(ruled, peers=both).state is BriefState.WAITING_ON
         assert briefing.session(ruled, peers=both).awaited == "gpt-voicecoding · a task"
 
-    def test_a_peer_the_roster_does_not_hold_is_named_by_its_address(self) -> None:
-        """The honest floor under every name, and the answer for a Session with none."""
+    def test_a_peer_with_no_known_project_does_not_use_an_address_as_its_name(self) -> None:
         brief = briefing.session(self.waiting_row(), peers=())
 
         assert brief.state is BriefState.WAITING_ON
-        assert briefing.spoken(brief).state == f"waiting on {PEER}"
+        assert briefing.spoken(brief).state == "waiting on Session"
 
     def test_a_child_wait_is_named_by_the_childs_own_name(self) -> None:
         """Story 3: a subagent or teammate the tracking has a name for."""
@@ -630,8 +629,7 @@ class TestNewest:
 
 
 class TestTheRosterBrief:
-    def test_the_focus_session_comes_first_and_the_counts_are_the_others(self) -> None:
-        """Q6: the Roster Brief says how many are running, and counts the others."""
+    def test_focus_neither_reorders_equal_activity_nor_changes_the_counts(self) -> None:
         focus = row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION)
         others = (
             row(CLAUDE, state=SessionState.RUNNING),
@@ -642,9 +640,13 @@ class TestTheRosterBrief:
             ),
         )
         brief = briefing.roster((*others, focus), focus=CODEX)
-        assert [one.target for one in brief.rows] == [CODEX, CLAUDE, others[1].target]
-        assert brief.rows[0].focus is True
-        assert brief.counts == {BriefState.RUNNING: 1, BriefState.PERMISSION: 1}
+        assert [one.target for one in brief.rows] == [CLAUDE, others[1].target, CODEX]
+        assert brief.rows[-1].focus is True
+        assert brief.counts == {
+            BriefState.RUNNING: 1,
+            BriefState.PERMISSION: 1,
+            BriefState.DECISION: 1,
+        }
 
     def test_with_no_focus_the_counts_are_every_live_session(self) -> None:
         brief = briefing.roster((row(), row(CODEX, state=SessionState.RUNNING)), focus=None)
@@ -689,9 +691,9 @@ class TestText:
         assert "main" in rendered
         assert READ_AT.isoformat() in rendered
 
-    def test_a_session_with_no_name_is_rendered_by_its_address(self) -> None:
-        rendered = briefing.text(briefing.session(row(name=None)))
-        assert "claude:abc:1234" in rendered
+    def test_an_unknown_project_keeps_the_generic_name_apart_from_its_address(self) -> None:
+        rendered = briefing.text(briefing.session(replace(row(), name=None)))
+        assert rendered.startswith("Session — claude:abc:1234 — ")
 
     def test_the_roster_brief_renders_the_counts_and_every_header_row(self) -> None:
         rendered = briefing.text(
@@ -756,11 +758,10 @@ class TestTheSpokenBrief:
         assert spoken.answerable_here == "from here"
         assert spoken.last_activity_at == READ_AT.isoformat()
 
-    def test_a_session_with_no_name_is_carried_by_its_address(self) -> None:
-        """The rule `_headline` follows: the address only where there is no name."""
+    def test_a_session_with_no_known_project_has_no_address_as_its_spoken_name(self) -> None:
         spoken = briefing.spoken(briefing.session(replace(row(), name=None)))
 
-        assert spoken.name == str(CLAUDE)
+        assert spoken.name == "Session"
 
     def test_an_omitted_newest_carries_the_reason_and_not_a_blank(self) -> None:
         brief = briefing.omitting_newest(briefing.session(row(progress=said("a long answer"))))
@@ -975,7 +976,7 @@ class TestTheHandover:
 
         summary = items[0]
         assert isinstance(summary, SpokenRosterBrief)
-        assert summary.counts == "the others: 200 waiting for your decision"
+        assert summary.counts == "sessions: 200 waiting for your decision, 1 requesting permission"
         briefs = [item for item in items if isinstance(item, SpokenBrief)]
         assert briefs[0].state == "requesting permission"
         assert len(items) <= MAX_HANDOVER_ITEMS
@@ -1073,10 +1074,10 @@ class TestTheChannelNotice:
         assert notice.options == ()
         assert notice.newest == "All green."
 
-    def test_a_session_with_no_name_is_carried_by_its_address(self) -> None:
+    def test_a_session_with_no_known_project_has_no_address_as_its_notice_name(self) -> None:
         notice = briefing.notice(briefing.session(replace(row(), name=None)))
 
-        assert notice.name == str(CLAUDE)
+        assert notice.name == "Session"
 
     def test_an_absent_newest_carries_the_omission_words(self) -> None:
         brief = briefing.omitting_newest(briefing.session(row(progress=said("a long answer"))))
@@ -1091,7 +1092,7 @@ class TestTheChannelNotice:
         assert notice.answerable_here is False
         assert notice.answer_wording == "answer at the terminal"
 
-    def test_a_roster_notice_carries_one_row_per_session_focus_first(self) -> None:
+    def test_a_roster_notice_keeps_activity_order_and_counts_all_sessions(self) -> None:
         summary = briefing.roster(
             [
                 replace(row(CODEX, state=SessionState.WAITING, waiting_for=QUESTION), name=None),
@@ -1103,15 +1104,15 @@ class TestTheChannelNotice:
         notice = briefing.roster_notice(summary)
 
         assert [(r.state, r.name, r.agent, r.state_word) for r in notice.rows] == [
+            (BriefState.DECISION, "Session", "codex", "waiting for your decision"),
             (
                 BriefState.RUNNING,
                 SessionName(project="gpt-voicecoding", task="a task"),
                 "claude",
                 "running",
             ),
-            (BriefState.DECISION, str(CODEX), "codex", "waiting for your decision"),
         ]
-        assert notice.counts == "the others: 1 waiting for your decision"
+        assert notice.counts == "sessions: 1 waiting for your decision, 1 running"
 
     def test_a_roster_notice_without_a_focus_counts_every_session(self) -> None:
         summary = briefing.roster([row(CLAUDE, state=SessionState.RUNNING)], None)

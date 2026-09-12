@@ -124,12 +124,15 @@ from gpt_voicecoding.seams.agent import (
 )
 from gpt_voicecoding.seams.call import (
     CallAdapter,
+    CallAgent,
     CallDropped,
     CallEnded,
     CallSnapshot,
     CallStarted,
+    CallState,
     Dial,
     HandoverItem,
+    ModelChoice,
     UserSpeaking,
     UserSpeech,
     VoiceSpeech,
@@ -370,6 +373,7 @@ class Status:
     #: Reply Window levels include the lane's live question-route fact, which is
     #: deliberately not copied onto the roster row.
     reply_windows: Mapping[SessionTarget, ReplyWindow] = field(default_factory=dict)
+    call_agent: CallAgent | None = None
 
 
 class RosterBriefer:
@@ -542,6 +546,7 @@ class BridgeCore:
             lanes=self._state.sessions.lane_errors(),
             degraded_lanes=self._state.sessions.lane_degradations(),
             call_id=keeping.call_id,
+            call_agent=self._call.call_agent,
             cool_down_remaining=keeping.cool_down_remaining,
             dial_owed=keeping.dial_owed,
             pending_relays=self._state.relays.pending(),
@@ -729,6 +734,16 @@ class BridgeCore:
         if opened:
             await self._an_outlet_opened(voice=Outlet.VOICE in opened)
         return previous
+
+    async def models(self) -> tuple[ModelChoice, ...]:
+        """The startup catalog, available with every switch off."""
+        return await self._call.models()
+
+    async def forget_call_agent(self) -> None:
+        """A fresh agent may be requested between calls, never during one."""
+        if (await self._call.call_state()).state is not CallState.DOWN:
+            raise BridgeCoreError("end the call before forgetting its Call Agent")
+        self._call.forget_call_agent()
 
     async def live_toggle(self) -> CallSnapshot:
         """The one action: end the call the system owns, or start one if none is up.

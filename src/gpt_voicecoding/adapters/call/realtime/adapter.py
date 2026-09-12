@@ -98,6 +98,7 @@ from gpt_voicecoding.adapters.codex_app_server.wire import (
 )
 from gpt_voicecoding.seams.call import (
     CODEX_RESPONSE_ITEM_PREFIX,
+    CallAgent,
     CallDropped,
     CallEnded,
     CallSnapshot,
@@ -108,9 +109,11 @@ from gpt_voicecoding.seams.call import (
     DelegatedTurnError,
     Dial,
     HandoverItem,
+    ModelChoice,
     SpokenBrief,
     SpokenRosterBrief,
     ThreadGoneError,
+    TokenUsage,
     UserSpeaking,
     UserSpeech,
     VoiceSpeech,
@@ -134,6 +137,9 @@ REALTIME_VERSION = "v3"
 
 #: A voice call is audio out. `text` is the same route with the point removed.
 OUTPUT_MODALITY = "audio"
+
+#: codex's fixed context-meter baseline, not a configurable token allowance (#359).
+CONTEXT_BASELINE_TOKENS = 12_000
 
 #: Which side of a realtime transcript is the user speaking.
 USER_ROLE = "user"
@@ -305,6 +311,7 @@ class RealtimeCallAdapter:
         self,
         *,
         delegated_turn_model: str,
+        delegated_turn_effort: str | None = None,
         sink: EventSink | None = None,
         settings: RealtimeCallSettings | None = None,
         transport_factory: TransportFactory,
@@ -321,6 +328,7 @@ class RealtimeCallAdapter:
         #: `~/.codex/config.toml` happens to say, which is how seventeen turns
         #: on this machine were refused by the backend with nobody the wiser.
         self._delegated_turn_model = delegated_turn_model
+        self._delegated_turn_effort = delegated_turn_effort
         self._new_transport = transport_factory
         #: Where cues go. One per adapter and not one per call, because `ENDED`
         #: plays after the call's own audio has closed. Handed in only by tests,
@@ -336,11 +344,10 @@ class RealtimeCallAdapter:
         self._cue_worker_lock = threading.Lock()
         self._server: OwnedAppServer | None = None
         self._call: _LiveCall | None = None
-        #: Which thread the most recent call ran on, kept after that call is
-        #: gone so a turn that ends late still has a name (#270). One string,
-        #: overwritten per call, and deliberately not a ledger: what it exists
-        #: to tell apart is *this call's* late completion from every other
-        #: thread's, and a second call is a second answer to that question.
+        self._models: tuple[ModelChoice, ...] | None = None
+        self._call_agent: CallAgent | None = None
+        #: The current Call Agent's thread, retained between system calls and
+        #: for late completions (#270). User dials, forget, and restart clear it.
         self._last_call_thread: str | None = None
         self._state = CallState.DOWN
         self._delegating: dict[str, _DelegatedTurn] = {}
@@ -393,6 +400,8 @@ class RealtimeCallAdapter:
         await self.end_call()
         for thread_id in list(self._delegating):
             await self._retire(thread_id)
+        self.forget_call_agent()
+        self._models = None
 
     # -- the seam ---------------------------------------------------------
 
@@ -455,6 +464,39 @@ class RealtimeCallAdapter:
         if was_up and live.thread_id is not None:
             self._emit(CallEnded(call_id=live.thread_id, detail=detail))
         return CallSnapshot(state=CallState.DOWN)
+
+    @property
+    def call_agent(self) -> CallAgent | None:
+        return self._call_agent
+
+    def forget_call_agent(self) -> None:
+        self._last_call_thread = None
+        self._call_agent = None
+
+    async def models(self) -> tuple[ModelChoice, ...]:
+        """Use the startup catalog for this engine's lifetime, including an empty answer."""
+        if self._models is None:
+            self._models = ()
+            try:
+                catalog = await self._request(
+                    "model/list",
+                    {"includeHidden": False},
+                    timeout=self._settings.request_timeout_seconds,
+                )
+            except (WireError, AppServerError) as unavailable:
+                _log.warning("the model catalog is unavailable: %s", unavailable)
+            else:
+                self._models = tuple(
+                    ModelChoice(
+                        model=row["model"],
+                        efforts=tuple(
+                            option["reasoningEffort"] for option in row["supportedReasoningEfforts"]
+                        ),
+                    )
+                    for row in catalog.get("data", ())
+                    if not row["hidden"]
+                )
+        return self._models
 
     async def call_state(self) -> CallSnapshot:
         """What this adapter's own connection state says, right now."""
@@ -759,15 +801,20 @@ class RealtimeCallAdapter:
         """The whole handshake. Anything that goes wrong leaves nothing running."""
         deadline = self._settings.connect_timeout_seconds
         try:
-            started = await self._request(
-                "thread/start",
-                self._thread_parameters(model=self._delegated_turn_model),
-                timeout=self._settings.request_timeout_seconds,
-            )
-            # Recorded before the abandonment check, so a hang-up that raced
-            # `thread/start` still has a thread to name when it cleans up.
-            live.thread_id = _thread_id_in(started)
-            self._last_call_thread = live.thread_id
+            if dial.user_opened:
+                self.forget_call_agent()
+            if self._last_call_thread is None:
+                started = await self._request(
+                    "thread/start",
+                    self._thread_parameters(model=self._delegated_turn_model),
+                    timeout=self._settings.request_timeout_seconds,
+                )
+                self._last_call_thread = _thread_id_in(started)
+                self._call_agent = CallAgent(
+                    model=started.get("model", self._delegated_turn_model),
+                    effort=started.get("reasoningEffort", self._delegated_turn_effort),
+                )
+            live.thread_id = self._last_call_thread
             self._still_wanted(live)
 
             offer = await live.transport.offer()
@@ -952,6 +999,20 @@ class RealtimeCallAdapter:
         if not isinstance(params, dict):
             return
         thread_id = params.get("threadId")
+
+        if method == "thread/tokenUsage/updated" and thread_id == self._last_call_thread:
+            agent = self._call_agent
+            if agent is not None:
+                usage = params["tokenUsage"]
+                window = usage["modelContextWindow"]
+                self._call_agent = CallAgent(
+                    model=agent.model,
+                    effort=agent.effort,
+                    context_window=window,
+                    context_percent=_context_percent(window, usage["total"]["totalTokens"]),
+                    total=_token_usage(usage["total"]),
+                    last=_token_usage(usage["last"]),
+                )
 
         live = self._call
         matched = False
@@ -1334,6 +1395,7 @@ class RealtimeCallAdapter:
             # Top level, beside the version — not nested in a `session`
             # object. codex overrides its own default with this (#35).
             "model": self._settings.realtime_model,
+            "voice": self._settings.voice,
             "outputModality": OUTPUT_MODALITY,
             "transport": {"type": "webrtc", "sdp": offer},
             "prompt": dial.voice,
@@ -1356,6 +1418,8 @@ class RealtimeCallAdapter:
         }
         if model is not None:
             parameters["model"] = model
+        if self._delegated_turn_effort is not None:
+            parameters["config"] = {"model_reasoning_effort": self._delegated_turn_effort}
         if developer_instructions is not None:
             parameters["developerInstructions"] = developer_instructions
         return parameters
@@ -1385,6 +1449,25 @@ class RealtimeCallAdapter:
             self._sink.emit(event)
 
 
+def _context_percent(window: int | None, used: int) -> int | None:
+    """codex's used-context meter, excluding its 12,000-token baseline."""
+    if window is None:
+        return None
+    if window <= CONTEXT_BASELINE_TOKENS:
+        return 100
+    remaining = max(0, min(1, (window - used) / (window - CONTEXT_BASELINE_TOKENS)))
+    return 100 - int(remaining * 100 + 0.5)
+
+
+def _token_usage(usage: Message) -> TokenUsage:
+    return TokenUsage(
+        input=usage["inputTokens"],
+        output=usage["outputTokens"],
+        reasoning=usage["reasoningOutputTokens"],
+        cached=usage["cachedInputTokens"],
+    )
+
+
 def _wire_item(item: HandoverItem) -> Message:
     """One hand-over item as one `initialItems` entry, under the developer role.
 
@@ -1406,17 +1489,16 @@ def _item_text(item: HandoverItem) -> str:
 
 
 def _roster_text(summary: SpokenRosterBrief) -> list[str]:
-    lines = [] if summary.focus is None else [f"focus: {summary.focus}"]
-    lines.append(summary.counts)
-    lines.extend(f"  {row}" for row in summary.rows)
-    return lines
+    return [summary.counts, *(f"  {row}" for row in summary.rows)]
 
 
 def _brief_text(brief: SpokenBrief) -> str:
     """One Session Brief as one block of text, in the order its fields are named."""
     lines = [f"{brief.name} — {brief.agent} — {brief.state}"]
     if isinstance(brief.name, SessionName):
-        lines.extend((f"  project: {brief.name.project}", f"  task: {brief.name.task}"))
+        lines.append(f"  project: {brief.name.project}")
+        if brief.name.task:
+            lines.append(f"  task: {brief.name.task}")
     lines.append(f"  newest: {brief.newest}")
     lines.extend(f"  {line}" for line in brief.decision)
     lines.append(f"  answer: {brief.answerable_here}")

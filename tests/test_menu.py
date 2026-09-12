@@ -41,13 +41,13 @@ class TestTheRosterScreen:
 
         assert screen.text == briefing.text(brief)
         assert screen.options == (
-            "GPT-VoiceCoding · build the shell",
             "GPT-VoiceCoding · port the log",
+            "GPT-VoiceCoding · build the shell",
         )
         assert screen.anchor is not None
         assert screen.anchor.kind is AnchorKind.MENU
         assert screen.anchor.target is Screen.ROSTER
-        assert screen.anchor.picks == (CLAUDE, CODEX)
+        assert screen.anchor.picks == (CODEX, CLAUDE)
 
     def test_the_brief_beside_the_text_carries_the_same_labels(self) -> None:
         brief = briefing.roster([session(CODEX)], None)

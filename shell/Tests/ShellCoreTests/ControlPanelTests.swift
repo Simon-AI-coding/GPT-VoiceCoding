@@ -25,6 +25,10 @@ final class ScriptedControlPlane: ControlPlaneDialing, @unchecked Sendable {
     }
 
     func requests() -> [String] { lock.withLock { asked } }
+
+    func answer(_ action: Action, with result: Result<String, ControlPlaneFailure>) {
+        lock.withLock { answers[action] = result }
+    }
 }
 
 /// The version these fixtures declare, read from the shell's own constant rather
@@ -42,6 +46,49 @@ private let allSwitchesOff = """
 
 @MainActor
 @Suite struct ControlPanelTests {
+    @Test func losingTheEngineDoesNotTurnDutyOff() async {
+        let engine = ScriptedControlPlane([
+            .status: .success(
+                allSwitchesOff.replacingOccurrences(of: "\"duty\": false", with: "\"duty\": true"))
+        ])
+        let panel = ControlPanel(client: engine)
+        await panel.refresh()
+        engine.answer(.status, with: .failure(.engineUnreachable("socket went away")))
+        await panel.refresh()
+
+        #expect(panel.dutyOn)
+        #expect(!panel.engineReachable)
+        #expect(panel.counts == SessionCounts())
+    }
+
+    @Test func oneCountRuleUsesCoreBriefStatesAndKeepsNonSessionsOutOfTheRows() async {
+        let document: [String: Any] = [
+            "switches": ["duty": true],
+            "sessions": [
+                ["lifecycle": "live", "state": "idle", "brief_state": "decision"],
+                ["lifecycle": "live", "brief_state": "permission"],
+                ["lifecycle": "live", "brief_state": "finished"],
+                ["lifecycle": "live", "brief_state": "waiting_on"],
+                ["lifecycle": "live", "brief_state": "running"],
+                ["lifecycle": "ended", "brief_state": "decision"],
+                ["lifecycle": "live", "brief_state": "decision", "child": ["kind": "child"]],
+                ["lifecycle": "live", "brief_state": "finished", "headless_run": true],
+            ],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: [
+            "ok": true, "action": "status", "protocol": wireProtocol, "data": document,
+        ])
+        let panel = ControlPanel(
+            client: ScriptedControlPlane([
+                .status: .success(String(decoding: data, as: UTF8.self))
+            ]))
+        await panel.refresh()
+
+        #expect(
+            panel.counts == SessionCounts(sessions: 5, waiting: 2, finished: 1, childProcesses: 2))
+        #expect(panel.dutyOn)
+    }
+
     @Test func itRendersWhatBridgeCoreHolds() async {
         let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(allSwitchesOff)]))
         await panel.refresh()
@@ -97,238 +144,10 @@ private let allSwitchesOff = """
         #expect(status.switches.map(\.name) == ["duty", "voice", "message", "auto_hangup"])
     }
 
-    @Test func aChildProcessFollowsItsParentAndAnUnknownChildIsLast() async {
-        let status = """
-            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
-              "switches": {"duty": true, "voice": true, "message": true},
-              "sessions": [
-                {
-                  "target": {"agent": "codex", "session_id": "ended-1", "pid": null},
-                  "name": "GPT-VoiceCoding · Already ended",
-                  "lifecycle": "ended",
-                  "state": "idle",
-                  "child": {"kind": "main", "parent": null}
-                },
-                {
-                  "target": {"agent": "codex", "session_id": "child-2", "pid": null},
-                  "name": null,
-                  "lifecycle": "live",
-                  "state": "idle",
-                  "child": {
-                    "kind": "child",
-                    "parent": {"agent": "codex", "session_id": "parent-1", "pid": null}
-                  }
-                },
-                {
-                  "target": {"agent": "codex", "session_id": "child-1", "pid": null},
-                  "name": null,
-                  "lifecycle": "live",
-                  "state": "running",
-                  "child": {
-                    "kind": "child",
-                    "parent": {"agent": "codex", "session_id": "parent-1", "pid": null}
-                  }
-                },
-                {
-                  "target": {"agent": "claude", "session_id": "orphan-1", "pid": 303},
-                  "name": null,
-                  "lifecycle": "live",
-                  "state": "idle",
-                  "child": {"kind": "child", "parent": null}
-                },
-                {
-                  "target": {"agent": "codex", "session_id": "parent-1", "pid": null},
-                  "name": "GPT-VoiceCoding · Control Panel roster",
-                  "lifecycle": "live",
-                  "state": "waiting",
-                  "child": {"kind": "main", "parent": null}
-                }
-              ],
-              "call_id": null, "pending_relays": []}}
-            """
-        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
-
-        await panel.refresh()
-
-        guard case .read(let reading) = panel.reading else {
-            Issue.record("expected a reading")
-            return
-        }
-        #expect(reading.sessions == 1)
-        #expect(reading.childProcesses == 3)
-        #expect(
-            reading.sessionRows.map(\.target.sessionID)
-                == ["parent-1", "child-2", "child-1", "orphan-1"])
-        #expect(reading.sessionRows.map(\.state) == ["waiting", "idle", "running", "idle"])
-        #expect(reading.sessionRows.map(\.isChild) == [false, true, true, true])
-        #expect(reading.sessionRows[0].title == "GPT-VoiceCoding · Control Panel roster")
-        #expect(reading.sessionRows[1].title == "Child Process")
-        #expect(reading.sessionRows[1].parent?.sessionID == "parent-1")
-        #expect(reading.sessionRows[3].parent == nil)
-    }
-
-    @Test func aHeadlessRunIsAVisibleRowAndNotACountedSession() async {
-        // A run with no controlling terminal stays on this wire — `status`
-        // lists every row the engine holds — so the panel has to exclude it by
-        // the fact it carries rather than by not receiving it. Before the key
-        // existed there was nothing to exclude it by, and the panel counted a
-        // `claude --print` launched detached as a Session the user was running.
-        let status = """
-            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
-              "switches": {"duty": true, "voice": true, "message": true},
-              "sessions": [
-                {
-                  "target": {"agent": "claude", "session_id": "witness-1", "pid": 4242},
-                  "name": null,
-                  "lifecycle": "live",
-                  "state": "idle",
-                  "child": {"kind": "main", "parent": null},
-                  "headless_run": true
-                },
-                {
-                  "target": {"agent": "codex", "session_id": "real-1", "pid": null},
-                  "name": "GPT-VoiceCoding · port the log",
-                  "lifecycle": "live",
-                  "state": "idle",
-                  "child": {"kind": "main", "parent": null},
-                  "headless_run": false
-                }
-              ],
-              "call_id": null, "pending_relays": []}}
-            """
-        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
-
-        await panel.refresh()
-
-        guard case .read(let reading) = panel.reading else {
-            Issue.record("expected a reading")
-            return
-        }
-        #expect(reading.sessions == 1)
-        #expect(reading.childProcesses == 0)
-        #expect(reading.sessionRows.map(\.isHeadlessRun) == [true, false])
-    }
-
-    @Test func aRowFromAnEngineThatDoesNotReportTheTierCountsAsItAlwaysDid() async {
-        // The key is additive, so its absence must read as false rather than as
-        // a missing answer: an older engine keeps the count it had.
-        let status = """
-            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
-              "switches": {"duty": true, "voice": true, "message": true},
-              "sessions": [
-                {
-                  "target": {"agent": "codex", "session_id": "real-1", "pid": null},
-                  "name": "GPT-VoiceCoding · port the log",
-                  "lifecycle": "live",
-                  "state": "idle",
-                  "child": {"kind": "main", "parent": null}
-                }
-              ],
-              "call_id": null, "pending_relays": []}}
-            """
-        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
-
-        await panel.refresh()
-
-        guard case .read(let reading) = panel.reading else {
-            Issue.record("expected a reading")
-            return
-        }
-        #expect(reading.sessions == 1)
-        #expect(reading.sessionRows.map(\.isHeadlessRun) == [false])
-    }
-
-    @Test func aWaitingRowCarriesWhatItWaitsForAndWhenItLastMoved() async {
-        let status = """
-            {"ok": true, "action": "status", "protocol": \(wireProtocol), "data": {
-              "switches": {"duty": true, "voice": true, "message": true},
-              "sessions": [
-                {
-                  "target": {"agent": "claude", "session_id": "session-1", "pid": 404},
-                  "name": "GPT-VoiceCoding · Pick a test seam",
-                  "lifecycle": "live",
-                  "state": "waiting",
-                  "last_activity": "1970-01-01T00:02:03+00:00",
-                  "waiting_for": {
-                    "kind": "question",
-                    "caught_up": true,
-                    "prompt": "Which seam?",
-                    "options": [
-                      {
-                        "text": "public behavior",
-                        "description": "Exercise the adapter event",
-                        "recommended": true
-                      }
-                    ]
-                  },
-                  "progress": {
-                    "availability": "readable",
-                    "has_history": true,
-                    "omission": "status_summary",
-                    "read_at": "1970-01-01T00:02:03+00:00",
-                    "recent": []
-                  },
-                  "child": {"kind": "main", "parent": null}
-                },
-                {
-                  "target": {"agent": "claude", "session_id": "session-2", "pid": 405},
-                  "name": "GPT-VoiceCoding · Approve a tool",
-                  "lifecycle": "live",
-                  "state": "waiting",
-                  "last_activity": "1970-01-01T00:02:03.500000+00:00",
-                  "waiting_for": {"kind": "permission"},
-                  "child": {"kind": "main", "parent": null}
-                }
-              ],
-              "call_id": null, "pending_relays": []}}
-            """
-        let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(status)]))
-
-        await panel.refresh()
-
-        guard case .read(let reading) = panel.reading else {
-            Issue.record("expected a reading")
-            return
-        }
-        #expect(reading.sessionRows[0].waitingKind == "question")
-        #expect(reading.sessionRows[0].waitingMessage == "Waiting for question")
-        #expect(reading.sessionRows[0].lastActivity == Date(timeIntervalSince1970: 123))
-        #expect(reading.sessionRows[1].waitingKind == "permission")
-        #expect(reading.sessionRows[1].waitingMessage == "Waiting for permission")
-        #expect(reading.sessionRows[1].lastActivity == Date(timeIntervalSince1970: 123.5))
-        // Protocol 8 retired `pending_approvals` from `status` (#191), and the
-        // reply above carries no such field: the permission row *is* what is
-        // pending, so the line counts these rows rather than a second list.
-        #expect(reading.pendingApprovals == 1)
-    }
-
-    @Test func anEmptyRosterSaysSoInWords() async {
+    @Test func anEmptyStatusHasNoCounts() async {
         let panel = ControlPanel(client: ScriptedControlPlane([.status: .success(allSwitchesOff)]))
-
         await panel.refresh()
-
-        guard case .read(let reading) = panel.reading else {
-            Issue.record("expected a reading")
-            return
-        }
-        #expect(reading.emptyRosterMessage == "No live Sessions")
-        #expect(reading.pendingApprovals == 0)
-    }
-
-    @Test func theRosterScrollsWithinItsSingleHeightBound() throws {
-        let sourceURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // ShellCoreTests
-            .deletingLastPathComponent()  // Tests
-            .deletingLastPathComponent()  // shell
-            .appendingPathComponent("Sources/GPTVoiceCodingShell/ControlPanelView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let rosterSource =
-            source.components(separatedBy: "private struct SessionRoster: View").last?
-            .components(separatedBy: "private struct SessionRosterRow: View").first ?? ""
-
-        #expect(source.contains("private let rosterMaxHeight: CGFloat = 220"))
-        #expect(rosterSource.contains("ScrollView"))
-        #expect(rosterSource.contains(".frame(maxHeight: rosterMaxHeight)"))
+        #expect(panel.counts == SessionCounts())
     }
 
     @Test func theControlPlaneIsNeverGated() async {

@@ -113,11 +113,11 @@ Status queries and switch flips, accepted from every surface and never gated by 
 _Avoid_: admin commands, management interface
 
 **Control Panel**:
-The at-computer window for seeing the system's current state — the Session roster included — and flipping switches, plus the shell-owned Companion Channel credential. Runtime state and that one write-only credential, not installation settings. One window with a home and a settings section; what is technical lives under settings, never on the home (ADR 0028). Opened from the Duty Card or the menu bar; the app shows in the Dock only while it is open.
+The one at-computer window for the system's current state and switches: Home, a Session Brief and Settings replace one another inside it, with technical details confined to Diagnostics (ADR 0028). Opened from the Duty Card or the menu bar; the app joins the Dock and app switcher only while the window is open.
 _Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, retired)
 
 **Duty Card**:
-The small always-on-top card that sits on the desktop while the Duty Switch is on and is gone while it is off — the one surface the user sees without clicking. It carries the Call Phase and the Roster Brief cut to its size: how many main Sessions wait on the user and how many have finished, and the first such Session's row — its agent, Session Name, state word and the start of its newest message. A click on it offers the Live Toggle and the doors into the Control Panel; a secondary click, Quit. It shows and does not reply (ADR 0028). It is not a third thing beside the Roster Brief and the Session Brief; it is where they show on the desktop.
+The always-on-top, non-activating desktop card present exactly while Duty is on, carrying the Call Phase and the same waiting and finished counts as Home: live main Sessions *waiting for your decision*, *requesting permission*, or *finished*, never a Session *waiting on* another, a Child Process or a Headless Run. It shows the most recently active counted Session's row; a click offers the Live Toggle, Home and Settings, and a secondary click offers Quit — it displays briefs and never takes a reply (ADR 0028).
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Diagnostics**:

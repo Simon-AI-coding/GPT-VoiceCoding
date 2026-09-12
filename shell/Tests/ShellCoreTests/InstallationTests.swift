@@ -8,6 +8,20 @@ import Testing
 /// is tested there — a second copy of it here would be the duplication this
 /// arrangement exists to avoid.
 @Suite(.serialized) struct InstallationTests {
+    @Test func structuredOutputIsSeparateFromWarningsWithoutLosingDiagnostics() async {
+        let report = await InstallationRunner(readPath: LoginShellPath.unasked).run(
+            EngineCommand(
+                executable: "/bin/sh",
+                arguments: [
+                    "-c",
+                    "printf '%s\\n' '{\"model\":\"chosen\"}'; printf '%s\\n' 'a warning' >&2",
+                ],
+                source: .developerPath), separateOutput: true)
+        #expect(report.ok)
+        #expect(report.standardOutput == ["{\"model\":\"chosen\"}"])
+        #expect(report.lines.contains("a warning"))
+    }
+
     private func withExecutable(_ names: [String], _ body: (URL) throws -> Void) rethrows {
         let directory = URL(fileURLWithPath: "/tmp/gvc-install-\(UUID().uuidString.prefix(8))")
         for name in names {

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -236,7 +237,16 @@ def assemble(plan: BuildPlan) -> None:
     plan.executable.parent.mkdir(parents=True)
     (plan.app / inputs.RESOURCES).mkdir(parents=True)
     shutil.copy2(built, plan.executable)
-    shutil.copy2(inputs.INFO_PLIST, plan.app / inputs.CONTENTS / "Info.plist")
+    resources = built.parent / f"{inputs.SHELL_PRODUCT}_{inputs.SHELL_PRODUCT}.bundle"
+    shutil.copytree(resources, plan.app / inputs.RESOURCES / resources.name)
+    identity = plistlib.loads(inputs.INFO_PLIST.read_bytes())
+    identity["CFBundleVersion"] = run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        why="reading the source revision",
+        cwd=inputs.REPO_ROOT,
+    ).stdout.strip()
+    identity["ShellResourceBundle"] = resources.name
+    (plan.app / inputs.CONTENTS / "Info.plist").write_bytes(plistlib.dumps(identity))
     shutil.copy2(
         inputs.REPO_ROOT / "app_bundle" / inputs.CONFIG_EXAMPLE,
         plan.app / inputs.RESOURCES / inputs.CONFIG_EXAMPLE,

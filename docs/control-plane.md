@@ -153,6 +153,22 @@ CLI equivalents are `bridgectl models`, `bridgectl forget_call_agent`, and
 Prefer the socket payload for tokens: entering a literal token in a shell command
 can leave it in shell history even though the engine never logs it.
 
+The desktop shell owns one shared poller (#360, maintainer clarification): with
+only the Duty Card visible, read both `status` and the roster `brief` every two
+seconds. With the Control Panel window open, read `status` every second and
+`brief` every two seconds, including the targeted brief while that screen is
+open. With neither surface visible, stop polling. The card needs `status` as
+well as `brief` because its counts, switches, and call state come from `status`.
+Both roster rows and targeted Session Briefs also carry `state_word`, rendered
+by Core's existing wording function. This additive field completes #359's
+desktop contract (#360, maintainer clarification): the shell displays it
+unchanged rather than parsing `text` or keeping a second wording table.
+Each Session in `status` also carries `brief_state`, the same Core-derived
+state code as its brief. The original lifecycle `state` is unchanged. Desktop
+counts use `brief_state` after excluding ended rows, Child Processes, and
+Headless Runs from the main Sessions, so prose questions are not miscounted as
+finished and the shell does not duplicate Core's question recognition.
+
 ## The actions
 
 Fourteen, and the set is closed. Adding one is a contract change. Protocol 12

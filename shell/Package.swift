@@ -7,6 +7,7 @@ import PackageDescription
 // executable in the .app the shell needs in order to be a menu-bar app at all.
 let package = Package(
     name: "GPTVoiceCodingShell",
+    defaultLocalization: "en",
     platforms: [.macOS("14.2")],
     products: [
         .executable(name: "GPTVoiceCodingShell", targets: ["GPTVoiceCodingShell"]),
@@ -18,7 +19,9 @@ let package = Package(
         // the views and nothing else, so the shell's actual behaviour is testable
         // without one.
         .target(name: "ShellCore"),
-        .executableTarget(name: "GPTVoiceCodingShell", dependencies: ["ShellCore"]),
+        .executableTarget(
+            name: "GPTVoiceCodingShell", dependencies: ["ShellCore"],
+            resources: [.process("Resources")]),
         .target(
             name: "ShellTestSupport",
             dependencies: ["ShellCore"],

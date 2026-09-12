@@ -13,6 +13,8 @@ final class FakeEngineSocket: @unchecked Sendable {
     enum Behaviour {
         /// Answer with this line (a newline is appended).
         case answer(String)
+        /// Answer each action with its own document.
+        case script([String: String])
         /// Accept, read, and never reply — the surface must time out.
         case silence
         /// Answer with one line longer than the wire allows.
@@ -85,9 +87,11 @@ final class FakeEngineSocket: @unchecked Sendable {
 
             switch behaviour {
             case .answer(let reply):
-                _ = Data((reply + "\n").utf8).withUnsafeBytes {
-                    write(connection, $0.baseAddress!, $0.count)
-                }
+                writeReply(reply, to: connection)
+            case .script(let replies):
+                let request = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
+                let reply = replies[request?["action"] as? String ?? ""] ?? "{}"
+                writeReply(reply, to: connection)
             case .flood:
                 let payload = Data((String(repeating: "x", count: maxRequestBytes + 16)).utf8)
                 _ = payload.withUnsafeBytes { write(connection, $0.baseAddress!, $0.count) }
@@ -100,6 +104,12 @@ final class FakeEngineSocket: @unchecked Sendable {
                 break
             }
             close(connection)
+        }
+    }
+
+    private func writeReply(_ reply: String, to connection: Int32) {
+        _ = Data((reply + "\n").utf8).withUnsafeBytes {
+            write(connection, $0.baseAddress!, $0.count)
         }
     }
 

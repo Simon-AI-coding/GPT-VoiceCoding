@@ -61,10 +61,13 @@ public enum Installation {
 public struct InstallationReport: Equatable, Sendable {
     public var ok: Bool
     public var lines: [String]
+    /// Present only when the caller requests stdout separately from diagnostics.
+    public var standardOutput: [String]?
 
-    public init(ok: Bool, lines: [String]) {
+    public init(ok: Bool, lines: [String], standardOutput: [String]? = nil) {
         self.ok = ok
         self.lines = lines
+        self.standardOutput = standardOutput
     }
 
     /// The first sentence worth showing a person, or `nil` when nothing is wrong.
@@ -184,7 +187,8 @@ public struct InstallationRunner: Sendable {
     /// `deadline` is a parameter for one reason: a test that proved the ceiling
     /// by waiting out the real one would take longer than the whole suite.
     public func run(
-        _ command: EngineCommand, deadline: TimeInterval = Installation.deadline
+        _ command: EngineCommand, deadline: TimeInterval = Installation.deadline,
+        separateOutput: Bool = false
     ) async -> InstallationReport {
         return await withCheckedContinuation { continuation in
             let thread = Thread {
@@ -196,7 +200,7 @@ public struct InstallationRunner: Sendable {
                 continuation.resume(
                     returning: Self.runBlocking(
                         command, environment: Self.environmentStatingLoginPath(path),
-                        deadline: deadline))
+                        deadline: deadline, separateOutput: separateOutput))
             }
             thread.name = "gpt-voicecoding.installation"
             thread.start()
@@ -223,7 +227,8 @@ public struct InstallationRunner: Sendable {
     }
 
     private static func runBlocking(
-        _ command: EngineCommand, environment: [String: String], deadline: TimeInterval
+        _ command: EngineCommand, environment: [String: String], deadline: TimeInterval,
+        separateOutput: Bool
     ) -> InstallationReport {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
@@ -237,8 +242,9 @@ public struct InstallationRunner: Sendable {
         process.environment = childEnvironment
 
         let output = Pipe()
+        let errors = separateOutput ? Pipe() : output
         process.standardOutput = output
-        process.standardError = output
+        process.standardError = errors
 
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
@@ -255,6 +261,7 @@ public struct InstallationRunner: Sendable {
         // closes it on some platform versions and not others, which is worse
         // than never closing it: it passes on the machine you wrote it on.
         try? output.fileHandleForWriting.close()
+        if separateOutput { try? errors.fileHandleForWriting.close() }
 
         // Drained from the start, on a thread of its own: a pipe nobody reads
         // fills, and a child blocked on a full pipe is a child that never exits.
@@ -262,14 +269,19 @@ public struct InstallationRunner: Sendable {
         // this read has no ceiling of its own, so it must not sit on a shared
         // worker while it waits.
         let collected = OutputBox()
-        let drained = DispatchSemaphore(value: 0)
-        let reading = output.fileHandleForReading
-        let reader = Thread {
-            collected.set(reading.readDataToEndOfFile())
-            drained.signal()
+        let diagnostic = OutputBox()
+        let drained = DispatchGroup()
+        let streams =
+            separateOutput ? [(output, collected), (errors, diagnostic)] : [(output, collected)]
+        for (pipe, box) in streams {
+            drained.enter()
+            let reader = Thread {
+                box.set(pipe.fileHandleForReading.readDataToEndOfFile())
+                drained.leave()
+            }
+            reader.name = "gpt-voicecoding.installation.read"
+            reader.start()
         }
-        reader.name = "gpt-voicecoding.installation.read"
-        reader.start()
 
         if exited.wait(timeout: .now() + deadline) == .timedOut {
             process.terminate()
@@ -283,10 +295,13 @@ public struct InstallationRunner: Sendable {
                 lines: [
                     "the installation reconcile did not finish within "
                         + "\(Int(deadline)) seconds and was stopped"
-                ] + collected.lines)
+                ] + collected.lines + diagnostic.lines)
         }
 
         _ = drained.wait(timeout: .now() + Installation.grace)
-        return InstallationReport(ok: process.terminationStatus == 0, lines: collected.lines)
+        return InstallationReport(
+            ok: process.terminationStatus == 0,
+            lines: collected.lines + diagnostic.lines,
+            standardOutput: separateOutput ? collected.lines : nil)
     }
 }

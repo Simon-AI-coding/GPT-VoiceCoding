@@ -25,70 +25,65 @@ public enum StatusReading: Equatable, Sendable {
     case failed(ActionFailure)
 }
 
-/// The `status` reply, as far as this dropdown renders it. Every fact is read
-/// from Bridge Core. The only projection is display order: a Child Process is
-/// placed under the parent address the wire carries, never classified here.
-public struct EngineStatus: Equatable, Sendable {
-    public var switches: [SwitchReading]
-    /// `null` when the system owns no call. The presence of the id is what the
-    /// reply says; "up" is not a conclusion this surface draws from elsewhere.
-    public var callID: String?
-    /// Live rows shown by the roster. Ended rows remain engine history, not
-    /// Sessions a person can see running now.
-    public var sessionRows: [SessionRow]
-    public var pendingRelays: Int
+private enum CountedState {
+    case waiting, finished
 
+    init?(_ state: String) {
+        switch state {
+        case "decision", "permission": self = .waiting
+        case "finished": self = .finished
+        default: return nil
+        }
+    }
+}
+
+/// The single counting rule shared by Home and the Duty Card.
+public struct SessionCounts: Equatable, Sendable {
+    public var sessions = 0
+    public var waiting = 0
+    public var finished = 0
+    public var childProcesses = 0
+
+    init(sessions: Int = 0, waiting: Int = 0, finished: Int = 0, childProcesses: Int = 0) {
+        self.sessions = sessions
+        self.waiting = waiting
+        self.finished = finished
+        self.childProcesses = childProcesses
+    }
+
+    init(rows: [JSONValue]) {
+        for row in rows where row["lifecycle"]?.string == "live" {
+            if row["child"]?["kind"]?.string == "child" || row["headless_run"]?.bool == true {
+                childProcesses += 1
+                continue
+            }
+            sessions += 1
+            switch CountedState(row["brief_state"]?.string ?? "") {
+            case .waiting: waiting += 1
+            case .finished: finished += 1
+            case nil: break
+            }
+        }
+    }
+}
+
+/// The status facts this desktop displays. Counts have one owner and one rule.
+public struct EngineStatus: Equatable, Sendable {
+    public let engineVersion: String?
+    public let callAgent: CallAgentReading?
+    public let switches: [SwitchReading]
+    public let callID: String?
+    public let counts: SessionCounts
     public var callIsUp: Bool { callID != nil }
-    /// Dialogs waiting on a person, counted off the roster rows themselves.
-    ///
-    /// Protocol 8 retired `pending_approvals`: a pending permission is one of
-    /// the three Session states, so the rows already say it and a second list
-    /// beside them was a second answer to one question. Counted here rather
-    /// than read, for the same reason ``sessions`` and ``childProcesses`` are.
-    public var pendingApprovals: Int {
-        sessionRows.count { $0.state == "waiting" && $0.waitingKind == "permission" }
-    }
-    /// Logical live main Sessions, not every visible roster row.
-    ///
-    /// Two tiers are excluded, because neither is a Session a person can see
-    /// running: a Child Process, and — since the engine began reporting it — a
-    /// Headless Run, a run with no controlling terminal that the engine keeps
-    /// as a row and never announces. An engine that does not report the second
-    /// leaves ``SessionRow/isHeadlessRun`` false and this count unchanged.
-    public var sessions: Int { sessionRows.count { !$0.isChild && !$0.isHeadlessRun } }
-    /// Visible subordinate rows, kept apart from the Session count.
-    public var childProcesses: Int { sessionRows.count { $0.isChild } }
-    public var emptyRosterMessage: String? {
-        sessionRows.isEmpty ? "No live Sessions" : nil
-    }
 
     public init(document: [String: JSONValue]) {
+        engineVersion = document["engine_version"]?.string
+        callAgent = document["call_agent"]?.object.map(CallAgentReading.init)
         switches = SwitchReading.canonicalOrder.compactMap { name in
             document["switches"]?[name]?.bool.map { SwitchReading(name: name, on: $0) }
         }
         callID = document["call_id"]?.string
-        let rows = (document["sessions"]?.array ?? []).map(SessionRow.init).filter {
-            $0.lifecycle == "live"
-        }
-        sessionRows = Self.parentsBeforeChildren(rows)
-        pendingRelays = document["pending_relays"]?.array?.count ?? 0
-    }
-
-    /// A stable hierarchy projection over the wire's order.
-    ///
-    /// Main Sessions keep their relative order; every known child follows its
-    /// parent and its siblings keep theirs. A Child Process whose parent is not
-    /// present remains visible at the end. Nothing is ordered by state.
-    private static func parentsBeforeChildren(_ rows: [SessionRow]) -> [SessionRow] {
-        let mainRows = rows.filter { !$0.isChild }
-        let mainTargets = Set(mainRows.map(\.target))
-        let nested = mainRows.flatMap { parent in
-            [parent] + rows.filter { $0.isChild && $0.parent == parent.target }
-        }
-        return nested
-            + rows.filter {
-                $0.isChild && $0.parent.map(mainTargets.contains) != true
-            }
+        counts = SessionCounts(rows: document["sessions"]?.array ?? [])
     }
 }
 
@@ -108,59 +103,67 @@ public struct SessionAddress: CustomStringConvertible, Equatable, Hashable, Send
         sessionID = value["session_id"]?.string
         pid = value["pid"]?.number.map(Int.init)
     }
+
+    var payload: JSONValue {
+        var fields: [String: JSONValue] = ["agent": .string(agent)]
+        if let sessionID { fields["session_id"] = .string(sessionID) }
+        if let pid { fields["pid"] = .number(Double(pid)) }
+        return .object(fields)
+    }
 }
 
-/// One Session roster row, carrying only facts Bridge Core already reported.
-public struct SessionRow: Equatable, Identifiable, Sendable {
-    public var target: SessionAddress
-    public var name: String?
-    public var lifecycle: String
-    public var state: String
-    public var lastActivity: Date?
-    public var waitingKind: String?
-    public var isChild: Bool
-    /// Whether this row is a run with no controlling terminal — one nobody can
-    /// type into, which the engine keeps and never announces. Read from the
-    /// wire rather than inferred: an absent key is false, so an older engine
-    /// reads exactly as it did before.
-    public var isHeadlessRun: Bool
-    public var parent: SessionAddress?
-
+/// Core's roster order and words, with no shell-side naming or classification.
+public struct BriefRow: Equatable, Identifiable, Sendable {
+    public let target: SessionAddress
+    public let name: String?
+    public let state: String
+    public let stateWord: String
+    public let newest: String
     public var id: SessionAddress { target }
-    public var title: String {
-        if isChild { return "Child Process" }
-        return name ?? target.description
-    }
-    public var waitingMessage: String? {
-        guard state == "waiting", let waitingKind else { return nil }
-        switch waitingKind {
-        case "question", "permission": return "Waiting for \(waitingKind)"
-        default: return nil
-        }
-    }
+    fileprivate var isCounted: Bool { CountedState(state) != nil }
 
     init(_ value: JSONValue) {
         target = SessionAddress(value["target"] ?? .null)
         name = value["name"]?.string
-        lifecycle = value["lifecycle"]?.string ?? ""
         state = value["state"]?.string ?? ""
-        lastActivity = Self.readDate(value["last_activity"]?.string)
-        waitingKind = value["waiting_for"]?["kind"]?.string
-        isChild = value["child"]?["kind"]?.string == "child"
-        isHeadlessRun = value["headless_run"]?.bool == true
-        if let parentValue = value["child"]?["parent"], !parentValue.isNull {
-            parent = SessionAddress(parentValue)
-        } else {
-            parent = nil
+        stateWord = value["state_word"]?.string ?? ""
+        newest = value["newest"]?.string ?? ""
+    }
+}
+
+public struct SessionBriefReading: Equatable, Sendable {
+    public let name: String?
+    public let stateWord: String
+    public let newest: String
+    public let prompt: String?
+    public let options: [String]
+
+    init(_ value: JSONValue) {
+        name = value["name"]?.string
+        stateWord = value["state_word"]?.string ?? ""
+        newest = value["newest"]?["text"]?.string ?? ""
+        prompt = value["decision"]?["prompt"]?.string
+        options = (value["decision"]?["options"]?.array ?? []).enumerated().map { index, option in
+            let description = option["description"]?.string ?? ""
+            return "\(index + 1). \(option["text"]?.string ?? "")"
+                + (description.isEmpty ? "" : " — \(description)")
         }
     }
+}
 
-    private static func readDate(_ text: String?) -> Date? {
-        guard let text else { return nil }
-        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) {
-            return date
-        }
-        return try? Date.ISO8601FormatStyle().parse(text)
+public struct CallAgentReading: Equatable, Sendable {
+    public let model: String
+    public let effort: String?
+    public let contextPercent: Int?
+    public let total: [String: Int]?
+    public let last: [String: Int]?
+
+    init(_ document: [String: JSONValue]) {
+        model = document["model"]?.string ?? ""
+        effort = document["effort"]?.string
+        contextPercent = document["context_percent"]?.number.map(Int.init)
+        total = document["total"]?.object.map { $0.compactMapValues { $0.number.map(Int.init) } }
+        last = document["last"]?.object.map { $0.compactMapValues { $0.number.map(Int.init) } }
     }
 }
 
@@ -202,21 +205,37 @@ public struct LiveReading: Equatable, Sendable {
     public var callID: String?
 }
 
-/// The Control Panel: in v0 this dropdown *is* it, beside `bridgectl`.
-///
-/// It holds no policy and no state of its own. Every value it shows is read from
-/// Bridge Core over the same JSON-over-UDS control plane every other surface
-/// speaks, and every action it offers is one the control plane already
-/// publishes — there is no private protocol here, and no second path to
-/// anything.
-///
-/// It reads on demand: when the dropdown opens, while it stays open, and after
-/// every action. No background timer — a poll nobody is reading is a permanent
-/// metronome in a bounded log whose value is measured in signal.
+public enum CallPhase: String, CaseIterable, Sendable {
+    case ready, calling, onCall, ending, couldNotConnect
+    public var resolving: Bool { self == .calling || self == .ending }
+}
+
+/// Control-plane readings and desktop presentation, behind the existing dialer.
+/// Core owns calls, words and roster order. This module owns the shared counts,
+/// transient Call Phases and Home's input-safety hold.
 @MainActor
 @Observable
 public final class ControlPanel {
-    public private(set) var reading: StatusReading = .notYetRead
+    public private(set) var sessionBrief: SessionBriefReading?
+    private var sessionTarget: SessionAddress?
+    public private(set) var sessionFailure: ActionFailure?
+    public private(set) var nextCallStartsFresh = false
+    public private(set) var phase: CallPhase = .ready
+    public private(set) var elapsed: Int?
+    private var phaseStarted: TimeInterval = 0
+    private let now: () -> TimeInterval
+    public private(set) var roster: [BriefRow] = []
+    private var heldRoster: [BriefRow]?
+    public var displayedRoster: [BriefRow] { heldRoster ?? roster }
+    public var firstCountedRow: BriefRow? { roster.first { $0.isCounted } }
+    public private(set) var status: EngineStatus?
+    private var statusFailure: ActionFailure?
+    public var reading: StatusReading {
+        if let statusFailure { return .failed(statusFailure) }
+        if let status { return .read(status) }
+        return .notYetRead
+    }
+    public var engineReachable: Bool { status != nil && statusFailure == nil }
     /// How the last thing the user asked for ended, or nil when it worked. Held
     /// apart from ``reading`` so the re-read that follows an action cannot erase
     /// the refusal that action earned.
@@ -227,6 +246,15 @@ public final class ControlPanel {
     public private(set) var seams: [SeamReading]?
     public private(set) var busy = false
 
+    public var counts: SessionCounts {
+        if case .read(let status) = reading { return status.counts }
+        return SessionCounts()
+    }
+
+    public var dutyOn: Bool {
+        status?.switches.first { $0.name == "duty" }?.on ?? false
+    }
+
     /// Whether the system owns a call, or nil when nothing has said.
     ///
     /// `status` wins whenever there is one, because every toggle is followed by a
@@ -235,9 +263,8 @@ public final class ControlPanel {
     /// holding call state — the thing that once let two toggles open two calls —
     /// and it would go stale silently, which is worse than being wrong loudly.
     ///
-    /// The Live Toggle's own reply is used only before any status has landed. Its
-    /// `state` is still rendered verbatim beside the button, which is where
-    /// `connecting` — a thing `call_id` cannot express — remains visible.
+    /// The Live Toggle's own reply is used when status is unavailable. The five
+    /// shell-timed phases describe the request, not a second call owner.
     public var callIsUp: Bool? {
         if case .read(let status) = reading { return status.callIsUp }
         if let live { return live.state == "up" }
@@ -246,22 +273,79 @@ public final class ControlPanel {
 
     private let client: ControlPlaneDialing
 
-    public init(client: ControlPlaneDialing) {
+    public init(
+        client: ControlPlaneDialing,
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) {
         self.client = client
+        self.now = now
     }
 
     /// Read `status`. Cheap, and never gated by any switch (ADR 0002) — the
-    /// dropdown works from a machine with Duty off, which is the whole point.
+    /// window works from a machine with Duty off, which is the whole point.
     public func refresh() async {
-        switch await ask(Request(action: .status), { EngineStatus(document: $0) }) {
-        case .answered(let status): reading = .read(status)
-        case .failed(let failure): reading = .failed(failure)
+        let outcome = await ask(Request(action: .status), { EngineStatus(document: $0) })
+        guard !Task.isCancelled else { return }
+        switch outcome {
+        case .answered(let status):
+            self.status = status
+            statusFailure = nil
+            reconcilePhase()
+        case .failed(let failure): statusFailure = failure
+        }
+    }
+
+    public func refreshRoster() async {
+        let outcome = await ask(Request(action: .brief)) {
+            ($0["roster"]?["rows"]?.array ?? []).map(BriefRow.init)
+        }
+        if !Task.isCancelled, let answer = outcome.answer { roster = answer }
+    }
+
+    public func setPointerInRoster(_ inside: Bool) {
+        if inside {
+            if heldRoster == nil { heldRoster = roster }
+        } else {
+            heldRoster = nil
+        }
+    }
+
+    public func refreshSession(_ target: SessionAddress) async {
+        sessionTarget = target
+        let outcome = await ask(Request(action: .brief, payload: ["target": target.payload])) {
+            SessionBriefReading($0["session"] ?? .null)
+        }
+        guard !Task.isCancelled, sessionTarget == target else { return }
+        sessionBrief = outcome.answer
+        sessionFailure = outcome.failure
+    }
+
+    public func clearSession() {
+        sessionTarget = nil
+        sessionBrief = nil
+        sessionFailure = nil
+    }
+
+    /// A caller asks for confirmation before entering here during a call.
+    public func newCallAgent() async {
+        if phase == .onCall {
+            await toggleLive()
+            if phase == .ready, lastFailure == nil { await toggleLive() }
+        } else {
+            busy = true
+            defer { busy = false }
+            let outcome = await ask(Request(action: .forgetCallAgent)) { $0 }
+            await refresh()
+            nextCallStartsFresh = outcome.failure == nil
+            lastFailure = outcome.failure
         }
     }
 
     /// Flip one switch, then re-read, so what is shown is what Bridge Core holds
     /// rather than what this surface just asked for.
     public func flip(_ name: String, on: Bool) async {
+        busy = true
+        defer { busy = false }
         let outcome = await ask(
             Request(action: .switch, payload: ["name": .string(name), "on": .bool(on)])
         ) { $0 }
@@ -274,16 +358,26 @@ public final class ControlPanel {
     /// The Live Toggle — one action, the same one `bridgectl live` calls.
     ///
     /// Bridge Core owns the policy: it ends the call the system owns, or starts
-    /// one if none is up. This surface holds no call state and never decides
-    /// which of the two is happening; a surface that did is how two toggles once
-    /// opened two calls.
+    /// one if none is up. This surface times the request and its displayed phase;
+    /// it never chooses a different engine action for dial and hang-up.
     public func toggleLive() async {
+        guard !phase.resolving else { return }
+        busy = true
+        defer { busy = false }
+        let ending = callIsUp == true
+        nextCallStartsFresh = false
+        setPhase(ending ? .ending : .calling)
         let outcome = await ask(Request(action: .live)) {
             LiveReading(state: $0["state"]?.string ?? "", callID: $0["call_id"]?.string)
         }
         // Only what the engine sent. A failed toggle leaves the last reading
         // alone rather than guessing which way the call went.
         if let answer = outcome.answer { live = answer }
+        if let answer = outcome.answer, answer.state == "up" {
+            setPhase(.onCall)
+        } else {
+            setPhase(ending ? .ready : .couldNotConnect)
+        }
         await refresh()
         lastFailure = outcome.failure
     }
@@ -291,6 +385,8 @@ public final class ControlPanel {
     /// What the engine actually loaded, per ADR 0003. Asked because a person
     /// asked.
     public func verify() async {
+        busy = true
+        defer { busy = false }
         let outcome = await ask(Request(action: .verify)) { document in
             (document["seams"]?.array ?? []).map(SeamReading.init)
         }
@@ -298,12 +394,30 @@ public final class ControlPanel {
         lastFailure = outcome.failure
     }
 
+    /// Presentation time only. Core still owns whether a call exists.
+    public func tick() {
+        reconcilePhase()
+        elapsed = phase == .calling || phase == .onCall ? Int(now() - phaseStarted) : nil
+    }
+
+    private func reconcilePhase() {
+        guard !phase.resolving else { return }
+        if phase == .couldNotConnect, now() - phaseStarted < 6 { return }
+        setPhase(callIsUp == true ? .onCall : .ready)
+    }
+
+    private func setPhase(_ phase: CallPhase) {
+        if self.phase != phase {
+            self.phase = phase
+            phaseStarted = now()
+        }
+        elapsed = phase == .calling || phase == .onCall ? Int(now() - phaseStarted) : nil
+    }
+
     /// One request, and the three ways it can end without an answer.
     private func ask<T>(
         _ request: Request, _ read: ([String: JSONValue]) -> T
     ) async -> Outcome<T> {
-        busy = true
-        defer { busy = false }
         do {
             let reply = try await client.ask(request)
             if let refusal = reply.refusal {

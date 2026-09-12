@@ -35,6 +35,11 @@ public struct EngineCommand: Equatable, Sendable {
     /// ADR 0012: a dragged `.app` has no install step, so first launch is one.
     public static let installationModule = "gpt_voicecoding.installation"
 
+    public static var codexVersion: EngineCommand {
+        EngineCommand(
+            executable: "/usr/bin/env", arguments: ["codex", "--version"], source: .developerPath)
+    }
+
     public static func resolve(
         resources: URL?,
         configPath: String,

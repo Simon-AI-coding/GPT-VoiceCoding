@@ -10,6 +10,7 @@ in what order.
 
 from __future__ import annotations
 
+import plistlib
 import re
 import subprocess
 import sys
@@ -28,6 +29,31 @@ from gpt_voicecoding.seams.control_plane import PROTOCOL_VERSION, Action
 
 #: What every binary in a current arm64 tree actually starts with.
 MACH_O = b"\xcf\xfa\xed\xfe"
+
+
+def test_shell_resources_and_source_revision_travel_in_the_bundle(tmp_path, monkeypatch):
+    built = tmp_path / "products"
+    built.mkdir()
+    (built / inputs.SHELL_PRODUCT).write_bytes(MACH_O)
+    resources = built / f"{inputs.SHELL_PRODUCT}_{inputs.SHELL_PRODUCT}.bundle"
+    resources.mkdir()
+    for name in ("app-icon", "menubar-icon", "claude-mono", "codex-mono"):
+        (resources / f"{name}.svg").write_text("<svg/>")
+
+    def command(argv, *, why, cwd=None):
+        output = "abc1234" if argv[0] == "git" else str(built)
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(bundle_run, "run", command)
+    plan = BuildPlan.resolve(build_root=tmp_path / "out", without_engine=True)
+    bundle_run.assemble(plan)
+    info = plistlib.loads((plan.app / "Contents/Info.plist").read_bytes())
+    assert info["CFBundleVersion"] == "abc1234"
+    assert info["ShellResourceBundle"] == resources.name
+    for mark in resources.glob("*.svg"):
+        assert (
+            plan.app / inputs.RESOURCES / resources.name / mark.name
+        ).read_bytes() == mark.read_bytes()
 
 
 def make_engine_tree(root: Path) -> None:

@@ -197,6 +197,7 @@ def session_document(
         "first_seen": session.first_seen,
         "lifecycle": str(session.lifecycle),
         "state": str(session.state),
+        "brief_state": str(briefing.session(session).state),
         "waiting_for": waiting_for_document(session.waiting_for),
         "progress": dict(progress),
         "last_activity": (
@@ -326,6 +327,7 @@ def roster_brief_document(brief: RosterBrief) -> dict[str, Any]:
                 "name": str(row.name) if row.name is not None else None,
                 "agent": str(row.agent),
                 "state": str(row.state),
+                "state_word": briefing.state_word(row.state, row.awaited),
                 "awaited": row.awaited,
                 "focus": row.focus,
                 "newest": row.newest,
@@ -344,6 +346,7 @@ def session_brief_document(brief: SessionBrief) -> dict[str, Any]:
         "name": str(brief.name) if brief.name is not None else None,
         "agent": str(brief.agent),
         "state": str(brief.state),
+        "state_word": briefing.state_word(brief.state, brief.awaited),
         # Who the `waiting_on` state word names, already in the words the user
         # reads (#320). `null` on every other state, and on a `waiting_on` whose
         # party has no name of its own — the rendered `text` beside this says

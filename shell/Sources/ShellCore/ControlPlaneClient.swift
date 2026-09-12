@@ -27,7 +27,8 @@ public struct UnixSocketControlPlane: ControlPlaneDialing {
     public func ask(_ request: Request) async throws -> Reply {
         let line = try request.terminatedLine()
         let path = self.path
-        let timeout = self.timeout
+        // A dial can take 45 seconds; status and the other reads stay cheap.
+        let timeout = request.action == .live ? max(45, self.timeout) : self.timeout
         return try await withCheckedThrowingContinuation { continuation in
             // Blocking sockets on a background queue rather than an event loop:
             // one request, one reply, one connection, and the timeouts are the

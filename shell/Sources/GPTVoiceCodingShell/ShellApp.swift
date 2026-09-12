@@ -2,25 +2,30 @@ import AppKit
 import ShellCore
 import SwiftUI
 
-/// The menu-bar shell.
-///
-/// `MenuBarExtra` in `.window` style rather than an `NSStatusItem` menu: the
-/// honest failure panels are multi-line — the engine's own stderr, verbatim — and
-/// an `NSMenu` renders those badly. What that costs is fine control over the
-/// status item, which this shell does not need.
-///
-/// `LSUIElement` is 1 in the bundle's `Info.plist`: menu bar only, no Dock icon.
+/// A static four-item menu. The card and normal window are AppKit-owned.
 @main
 struct ShellApp: App {
     @NSApplicationDelegateAdaptor(ShellDelegate.self) private var delegate
 
     var body: some Scene {
         MenuBarExtra {
-            ControlPanelView(shell: delegate.shell)
+            let shell = delegate.shell
+            Button(shell.text(.controlPanel)) { shell.open(.home) }
+            Button(shell.text(.settings)) { shell.open(.settings(.voice)) }
+            Toggle(
+                shell.text(.duty),
+                isOn: Binding(
+                    get: { shell.panel.dutyOn },
+                    set: { on in
+                        Task { await shell.setDuty(on) }
+                    })
+            )
+            .disabled(!shell.panel.engineReachable || shell.panel.busy)
+            Button(shell.text(.quit)) { shell.quit() }.keyboardShortcut("q")
         } label: {
-            Image(systemName: delegate.shell.symbol)
+            Image(nsImage: DesignMark.menu.image)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
     }
 }
 
@@ -31,11 +36,21 @@ struct ShellApp: App {
 @MainActor
 final class ShellDelegate: NSObject, NSApplicationDelegate {
     let shell: ShellModel
+    private var windows: DesktopWindows?
     override init() { shell = ShellModel() }
     init(shell: ShellModel) { self.shell = shell }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.applicationIconImage = DesignMark.app.image
+        windows = DesktopWindows(shell: shell)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !shell.stopping else { return .terminateNow }
+        if shell.panel.phase == .onCall {
+            shell.quit()
+            return .terminateCancel
+        }
         Task {
             await shell.stopEngine()
             NSApp.reply(toApplicationShouldTerminate: true)

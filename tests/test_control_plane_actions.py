@@ -835,6 +835,30 @@ class TestHistory:
 class TestBrief:
     """The Briefing verb on the wire — one address, or none at all."""
 
+    def test_state_words_travel_as_fields_on_both_briefs(self) -> None:
+        surface = Surface()
+        surface.register()
+        surface.agent.discovery = self.stopped_on_a_question()
+
+        detail = surface.ask(Action.BRIEF, target=CODEX_ADDRESS).data
+        roster = surface.ask(Action.BRIEF).data
+
+        assert detail["session"]["state_word"] == "waiting for your decision"
+        assert roster["roster"]["rows"][0]["state_word"] == "waiting for your decision"
+
+    def test_status_carries_the_same_brief_state_for_a_prose_question(self) -> None:
+        from test_briefing import row, said
+
+        surface = Surface()
+        surface.state.sessions.register(row(progress=said("Which base should I use?")))
+
+        status = surface.ask(Action.STATUS).data["sessions"][0]
+        brief = surface.ask(Action.BRIEF).data["roster"]["rows"][0]
+
+        assert status["state"] == "idle"
+        assert status["waiting_for"]["kind"] == "none"
+        assert status["brief_state"] == brief["state"] == "decision"
+
     def test_project_names_a_session_before_its_task_arrives(self) -> None:
         surface = Surface()
         row = SessionInspection(target=CODEX, workspace=WORKSPACE, project_name="Project")

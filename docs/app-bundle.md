@@ -31,6 +31,29 @@ checks every text file in the assembled `.app` and refuses the build if any one
 still names the source checkout. The real bundle build in CI runs that same
 check.
 
+## Desktop shell (#360)
+
+The existing `ControlPanel` owns control-plane readings and the facts the views
+display; `ShellModel` owns visibility and one shared poller. AppKit owns the
+non-activating Duty Card and the one normal window; Home, Session Brief, and
+Settings replace each other inside that window. Diagnostics is complete here;
+the other five Settings groups and first-launch setup belong to #361.
+
+The design tokens are carried into one named Swift palette, with system-driven
+dark and light colours. This is the maintainer-approved exception to #360's
+asset-catalog wording: the existing Command Line Tools-only build remains the
+contract, without `actool`, an Xcode dependency, or a custom asset loader.
+The four design marks are bundled resources. Tests use the existing scripted
+control-plane seam and socket double, and inspect panel configuration rather
+than driving the window server.
+
+Configuration is read through the existing Python configuration module in a
+one-shot subprocess, using the shell's existing command runner. The result
+contains only the display fields; Swift does not duplicate TOML validation or
+the engine's defaults, and the read never writes the user's file or starts an
+adapter. This is not an additional control-plane action. A failed read opens
+the fixed settings-unreadable page and leaves details under Diagnostics.
+
 ## What ends up inside
 
 ```

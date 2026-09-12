@@ -213,7 +213,7 @@ import Testing
         await model.panel.toggleLive()
         await model.advanceOnboarding()
         #expect(model.page == .home)
-        #expect(engine.times(for: "verify").isEmpty)
+        #expect(!engine.requests.contains("verify"))
         await model.stopEngine()
     }
 
@@ -596,34 +596,48 @@ import Testing
     @Test func onePollerFollowsVisibilityAndSharesTheTwoSecondBriefRead() async throws {
         let fixture = try TelegramCredentialFixture()
         let engine = DesktopControlPlane()
+        let clock = DesktopClock()
         let (_, model) = makeShell(
             fixture: fixture, launcher: RecordingEngineLauncher(),
-            panel: ControlPanel(client: engine))
+            panel: ControlPanel(client: engine),
+            now: { clock.time }, sleep: clock.sleep)
         model.open(.home)
-        #expect(await waitUntil { engine.requests.count == 5 })
+        // Let each visible read finish before advancing the existing test clock;
+        // request arrival alone precedes the poller's bookkeeping on another task.
+        #expect(await waitUntil { clock.waiting && engine.requests.count == 2 })
+        await model.readInFlight?.value
+        clock.advance()
+        #expect(await waitUntil { clock.waiting && engine.requests.count == 3 })
+        await model.readInFlight?.value
+        #expect(engine.requests.filter { $0 == "brief" }.count == 1)
+        clock.advance()
+        #expect(await waitUntil { clock.waiting && engine.requests.count == 5 })
+        await model.readInFlight?.value
         #expect(engine.requests.filter { $0 == "brief" }.count == 2)
         #expect(engine.requests.filter { $0 == "status" }.count == 3)
         model.closeWindow()
-        #expect(await waitUntil { engine.requests.count == 7 })
-        #expect(engine.requests.count == 7)
+        clock.advance()
+        #expect(await waitUntil { clock.waiting })
+        await model.readInFlight?.value
+        #expect(engine.requests.count == 5)
+        clock.advance()
+        #expect(await waitUntil { clock.waiting && engine.requests.count == 7 })
+        await model.readInFlight?.value
+        #expect(engine.requests.filter { $0 == "brief" }.count == 3)
+        #expect(engine.requests.filter { $0 == "status" }.count == 4)
         engine.duty = false
-        #expect(await waitUntil { !model.cardVisible })
-        let statusTimes = engine.times(for: "status")
-        let briefTimes = engine.times(for: "brief")
-        // Exercise the real timer at the dialer boundary; allow scheduler jitter,
-        // but distinguish one-second window reads from two-second card reads.
-        for interval in zip(statusTimes, statusTimes.dropFirst()).map({ $1 - $0 }).prefix(2) {
-            #expect((0.8..<1.8).contains(interval))
-        }
-        for interval in zip(statusTimes, statusTimes.dropFirst()).map({ $1 - $0 }).dropFirst(2) {
-            #expect((1.8..<2.8).contains(interval))
-        }
-        for interval in zip(briefTimes, briefTimes.dropFirst()).map({ $1 - $0 }) {
-            #expect((1.8..<2.8).contains(interval))
-        }
-        let count = engine.requests.count
-        try await Task.sleep(for: .seconds(2.2))
-        #expect(engine.requests.count == count)
+        clock.advance()
+        #expect(await waitUntil { clock.waiting })
+        await model.readInFlight?.value
+        #expect(engine.requests.count == 7)
+        clock.advance()
+        #expect(await waitUntil { !model.cardVisible && engine.requests.count == 9 })
+        await model.readInFlight?.value
+        // Cancellation does not resume the test clock's parked continuation.
+        clock.advance()
+        await Task.yield()
+        #expect(engine.requests.count == 9)
+        #expect(clock.delays == Array(repeating: .seconds(1), count: 7))
         await model.stopEngine()
     }
 
@@ -892,9 +906,11 @@ private func makeShell(
 @MainActor
 private final class DesktopClock {
     var time: TimeInterval = 0
+    private(set) var delays: [Duration] = []
     private var continuation: CheckedContinuation<Void, Never>?
     var waiting: Bool { continuation != nil }
     func sleep(_ duration: Duration) async throws {
+        delays.append(duration)
         await withCheckedContinuation { continuation = $0 }
     }
     func advance() {
@@ -907,17 +923,14 @@ private final class DesktopClock {
 
 private final class DesktopControlPlane: ControlPlaneDialing, @unchecked Sendable {
     private let lock = NSLock()
-    private var calls: [(Request, TimeInterval)] = []
+    private var calls: [Request] = []
     private var dutyOn = true
     private var callUp = false
-    var requests: [String] { lock.withLock { calls.map { $0.0.action.rawValue } } }
+    var requests: [String] { lock.withLock { calls.map { $0.action.rawValue } } }
     var briefTargets: [JSONValue] {
         lock.withLock {
-            calls.filter { $0.0.action == .brief }.compactMap { $0.0.payload?["target"] }
+            calls.filter { $0.action == .brief }.compactMap { $0.payload?["target"] }
         }
-    }
-    func times(for action: String) -> [TimeInterval] {
-        lock.withLock { calls.filter { $0.0.action.rawValue == action }.map { $0.1 } }
     }
     var duty: Bool {
         get { lock.withLock { dutyOn } }
@@ -925,7 +938,7 @@ private final class DesktopControlPlane: ControlPlaneDialing, @unchecked Sendabl
     }
     func ask(_ request: Request) async throws -> Reply {
         let up = lock.withLock {
-            calls.append((request, ProcessInfo.processInfo.systemUptime))
+            calls.append(request)
             if request.action == .live { callUp.toggle() }
             return callUp
         }

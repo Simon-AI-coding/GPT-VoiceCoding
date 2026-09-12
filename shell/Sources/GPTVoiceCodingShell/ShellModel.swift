@@ -83,7 +83,7 @@ final class ShellModel {
     private let now: () -> TimeInterval
     private let sleep: (Duration) async throws -> Void
     private var poller: Task<Void, Never>?
-    private var readInFlight: Task<Void, Never>?
+    private(set) var readInFlight: Task<Void, Never>?
     private var lastStatusRead: TimeInterval?
     private var lastBriefRead: TimeInterval?
     private var lastSessionRead: TimeInterval?

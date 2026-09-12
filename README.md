@@ -14,6 +14,29 @@ agents.
 > first-generation implementation lives at
 > [GPT-VoiceCoding-legacy](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy).
 
+## Install
+
+On an Apple Silicon Mac, run this in your terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/okqixiaobao727-design/GPT-VoiceCoding/main/scripts/install.sh | sh
+```
+
+You need Apple's Command Line Tools (`xcode-select --install`), Python **3.12 or
+newer** available as `python3` on your PATH, and HTTPS access to GitHub and PyPI.
+The script checks these in order and stops with a fix if one is missing; it
+does not install Homebrew or Python. It builds the full ad-hoc-signed app from
+source under `~/Library/Application Support/GPT-VoiceCoding/source`, quits a
+running copy, places the new bundle in `/Applications`, and opens it. There is
+no notarized download.
+
+**Upgrade by running the same command again.** Your existing `config.toml` and
+Telegram credential file stay in place. First launch creates a configuration
+only if none exists, then walks through Codex login, the installed helpers,
+Call Agent, optional Telegram, and a test call. Have Codex installed and log in
+with `codex login` when the guide asks. Later launches are silent. Settings that
+need an engine restart show one explicit **Restart now** action.
+
 ## What it is
 
 You are away from the keyboard. A Claude Code or Codex session stops and needs

@@ -40,6 +40,12 @@ public struct EngineCommand: Equatable, Sendable {
             executable: "/usr/bin/env", arguments: ["codex", "--version"], source: .developerPath)
     }
 
+    public static var codexLoginStatus: EngineCommand {
+        EngineCommand(
+            executable: "/usr/bin/env", arguments: ["codex", "login", "status"],
+            source: .developerPath)
+    }
+
     public static func resolve(
         resources: URL?,
         configPath: String,

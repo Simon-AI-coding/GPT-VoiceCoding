@@ -1,123 +1,32 @@
-# GPT-VoiceCoding — an example engine configuration.
-#
-# The bundle SHIPS this file and never writes one. The engine's configuration is
-# a file the user owns and the engine only reads, so an installer that authored
-# it would be claiming ownership of something that is not the installer's — and
-# this file names adapters by import reference, which means it runs with the
-# privileges of whoever wrote it. That is exactly as trusted as the engine, and
-# it is trusted because *you* wrote it.
-#
-# Copy it into place and edit it:
-#
-#   mkdir -p ~/Library/Application\ Support/GPT-VoiceCoding/engine
-#   cp /Applications/GPT-VoiceCoding.app/Contents/Resources/config.example.toml \
-#      ~/Library/Application\ Support/GPT-VoiceCoding/engine/config.toml
-#
-# Until it is there, the engine refuses to start and says so on the terminal that
-# started it (exit 2). That refusal is the design: an engine that silently loaded
-# nothing behind a seam looks exactly like a healthy one until it is needed.
-#
-# `docs/control-plane.md` is the canonical description of every key here.
+# GPT-VoiceCoding first-launch configuration.
+# The shell creates this only when config.toml is absent, then edits it in place.
+# The engine only reads it. See docs/control-plane.md for every supported key.
 
 [engine]
-# Both optional; the defaults are the ones documented in docs/control-plane.md.
-# The socket lives in a short runtime root because Darwin caps an AF_UNIX path
-# at 103 bytes, and it is per-uid so two accounts do not fight over one engine.
-# socket_path = "/tmp/gpt-voicecoding-501/control.sock"
-# state_path  = "~/Library/Application Support/GPT-VoiceCoding/engine/state.json"
+# The socket and state paths use the documented per-user defaults.
 
 [adapters]
-# Each is `module:attribute`, imported by the composition root and nothing else.
-call              = "gpt_voicecoding.adapters.call.realtime:realtime_call"
-companion_channel = "gpt_voicecoding.adapters.companion_channel.telegram:telegram_channel"
-
-# With no text reach at all, name the null channel instead — running without a
-# Companion Channel is legitimate, but it has to be said out loud:
-# companion_channel = "gpt_voicecoding.adapters.companion_channel:null_channel"
+call = "gpt_voicecoding.adapters.call.realtime:realtime_call"
+companion_channel = "gpt_voicecoding.adapters.companion_channel:null_channel"
 
 [adapters.agents]
 claude = "gpt_voicecoding.adapters.agent.claude:claude_agent"
-codex  = "gpt_voicecoding.adapters.agent.codex:codex_agent"
-
-[adapters.settings.companion_channel]
-# The token is named by variable and never written here: a configuration file is
-# a file that gets committed by accident, and this is the shape that cannot be.
-token_env = "GPTVOICECODING_TELEGRAM_TOKEN"
-chat_id   = "000000000"
-
-# One Telegram bot may have exactly one `getUpdates` consumer. If the
-# first-generation bridge is still running on this machine, give this engine a
-# DIFFERENT bot until that one is retired — otherwise the two steal each other's
-# inbound messages, `verify` still passes, and only inbound goes quiet.
+codex = "gpt_voicecoding.adapters.agent.codex:codex_agent"
 
 [adapters.settings.call]
-# Where the bridge's own threads run. A location, so it defaults to ~.
-# workspace = "~/code"
-
-# How the two speaking spans are derived. Neither is a measurement: the first is
-# how long the user's transcript may go quiet before the utterance is called
-# over, and the second bounds how long the Voice's stop edge waits for your
-# audio path to finish playing.
-# user_quiet_seconds         = 1.5
-# voice_playout_wait_seconds = 180
-
-# --- The external binaries, stated because this is a bundle ------------------
-#
-# The menu-bar shell reads your login shell's PATH and hands it to the engine,
-# so in the ordinary case these are found. State one anyway if your setup is
-# not ordinary — the resolution fails open, so a profile that errors or hangs
-# leaves the engine with launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin) and
-# nothing you installed on it. `which codex` in your own shell, and paste the
-# answer.
-#
-# You will know if you get it wrong: `bridgectl verify` fails naming the binary,
-# and the engine refuses to start rather than serving a seam it cannot use.
-
-# The dotted seam name has to be quoted, or TOML reads it as two nested tables.
-[adapters.settings."agent.codex"]
-executable = "/opt/homebrew/bin/codex"
+# Voice, realtime model and timing use the engine's defaults until changed.
+# Codex is resolved from the login PATH on each spawn, never stored here.
 
 [policy]
-# Optional; these are the locked defaults.
-# silence_end_seconds     = 60
-# cool_down_seconds       = 30
-# speech_settle_seconds   = 5
-# history_page_entries    = 5
-# first_prompt_characters = 40  # Maximum first-words length in a Session Name.
+# Silence and the two waits use the engine's defaults until changed.
 
 [log]
-# REQUIRED, all three. The engine owns its log and rotates it by rename
-# (ADR 0004), and these three numbers have no default in code on purpose: they
-# are what a 68 MB outage measured, and a compiled-in fallback would quietly
-# reinstate a value the measurement proved matters. The values below are a
-# sensible starting point, not a recommendation you are excused from reading.
-#
-# `max_bytes` binds EVERY generation, so the disk this can occupy is
-# max_bytes x (retained_files + 1) — 32 MiB as written.
+# Each generation is bounded; retained generations occupy at most 32 MiB total.
 max_bytes = 8388608
 retained_files = 3
-# Names starting with any of these are removed from the environment once, by
-# every process that spawns others. `Malloc` is here because `MallocStackLogging`
-# — inherited from whichever shell ran an installer, set by nobody — produced
-# 98.1% of that outage, one line of stderr per spawned process.
 stripped_environment_prefixes = ["Malloc"]
-# The log's path is a location rather than a decision, so it defaults beside the
-# state file:
-# path = "~/Library/Application Support/GPT-VoiceCoding/engine/engine.log"
 
 [delegate]
-# Required: the Delegated Turn's model is the cost lever, and a default here
-# would be a decision this project does not get to make for you.
-#
-# This is also the model the Call Agent runs on — the acting half of a Live
-# Call, which has no model field of its own and is simply what backs the call's
-# thread. Stated in one place so the two cannot diverge; left unstated, codex
-# fell back to whatever `~/.codex/config.toml` said and every hand-off on a call
-# was refused, in silence (#270).
-model = "the-model-you-chose"
-
-# Required *for the bundle*, and only for the bundle. Left out, the engine uses
-# the console script installed beside its own interpreter — which is right for a
-# `pip install`, and wrong here, because the bundle's interpreter is inside the
-# .app and so is its CLI. Point this at wherever the .app really is.
-cli = "/Applications/GPT-VoiceCoding.app/Contents/Resources/engine/bin/bridgectl"
+model = "gpt-5.6-terra"
+effort = "low"
+# The shell inserts cli here from the running bundle's actual location.

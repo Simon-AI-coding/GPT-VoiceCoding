@@ -30,6 +30,7 @@ enum Phosphor {
     static let body = Font.system(size: 13, design: .monospaced)
     static let small = Font.system(size: 12, design: .monospaced)
     static let title = Font.system(size: 22, weight: .medium, design: .monospaced)
+    static let display = Font.system(size: 28, weight: .medium, design: .monospaced)
     static let prose = Font.system(size: 13)
     static let label = Font.system(size: 11, weight: .medium, design: .monospaced)
     static let headline = Font.system(size: 15, weight: .medium, design: .monospaced)

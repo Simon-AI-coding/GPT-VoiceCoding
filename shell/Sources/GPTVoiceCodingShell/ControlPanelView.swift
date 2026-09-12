@@ -7,9 +7,9 @@ struct ControlPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if shell.page != .home {
+            if shell.page != .home, !isOnboarding {
                 Button {
-                    shell.open(.home)
+                    shell.goBack()
                 } label: {
                     Label(shell.text(.back), systemImage: "chevron.left")
                 }
@@ -18,6 +18,8 @@ struct ControlPanelView: View {
             case .home, nil: HomeView(shell: shell)
             case .session(let target): SessionBriefView(shell: shell, target: target)
             case .settings(let group): SettingsView(shell: shell, group: group)
+            case .onboarding(let step): OnboardingView(shell: shell, step: step)
+            case .codexCheck: CodexCheckView(shell: shell)
             case .unreadableSettings:
                 Text(shell.text(.somethingOff)).font(Phosphor.headline)
                 Text(shell.text(.unreadableSettings)).font(Phosphor.prose)
@@ -30,6 +32,11 @@ struct ControlPanelView: View {
         .font(Phosphor.body).foregroundStyle(Phosphor.primary)
         .background(Phosphor.window).tint(Phosphor.accent)
         .buttonStyle(ConsoleButton())
+    }
+
+    private var isOnboarding: Bool {
+        if case .onboarding = shell.page { return true }
+        return false
     }
 }
 
@@ -309,7 +316,7 @@ struct ConfirmationRow: View {
     }
 }
 
-private struct SettingsView: View {
+struct SettingsView: View {
     let shell: ShellModel
     let group: SettingsGroup
     var body: some View {
@@ -327,12 +334,15 @@ private struct SettingsView: View {
             Divider()
             VStack(alignment: .leading, spacing: 12) {
                 Text(shell.text(group.title)).font(Phosphor.headline)
-                if group == .diagnostics {
-                    DiagnosticsView(shell: shell)
-                } else {
-                    Text(shell.text(.placeholder)).font(Phosphor.prose).foregroundStyle(
-                        Phosphor.secondary)
+                switch group {
+                case .diagnostics: DiagnosticsView(shell: shell)
+                case .voice: VoiceSettingsView(shell: shell)
+                case .call: CallSettingsView(shell: shell)
+                case .general: GeneralSettingsView(shell: shell)
+                case .telegram: TelegramSettingsView(shell: shell)
+                case .agent: AgentSettingsView(shell: shell)
                 }
+                SettingsSaveStatus(shell: shell)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }

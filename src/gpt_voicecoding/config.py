@@ -158,7 +158,7 @@ class EngineConfig:
     """Everything the composition root needs, and nothing it does not."""
 
     adapters: AdapterSelection
-    #: The Delegated Turn's model — the cost lever, and the user's to set.
+    #: The user's model; empty only in the Settings reading, never at engine startup.
     delegated_turn_model: str
     #: Where the control-plane CLI really is, when this installation moved it.
     #: None means the engine derives it from its own interpreter's scripts.
@@ -171,7 +171,12 @@ class EngineConfig:
 
 
 def load(path: Path) -> EngineConfig:
-    """Read one configuration file, refusing anything it cannot start from."""
+    """Read the user's file; only Settings may read it before a model is chosen."""
+    return of(read_document(path), source=Path(path))
+
+
+def read_document(path: Path) -> dict[str, Any]:
+    """The one TOML parser, shared by the engine and its Settings projection."""
     try:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
@@ -184,10 +189,12 @@ def load(path: Path) -> EngineConfig:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"{path} is not readable as TOML: {error}") from None
 
-    return of(document, source=Path(path))
+    return document
 
 
-def of(document: dict[str, Any], *, source: Path | None = None) -> EngineConfig:
+def of(
+    document: dict[str, Any], *, source: Path | None = None, allow_unchosen_model: bool = False
+) -> EngineConfig:
     """Read an already-decoded document. `load` is this, plus the file."""
     where = f" in {source}" if source is not None else ""
     engine = _section(document, "engine", where)
@@ -195,7 +202,9 @@ def of(document: dict[str, Any], *, source: Path | None = None) -> EngineConfig:
     delegate = _section(document, "delegate", where)
 
     model = delegate.get("model")
-    if not isinstance(model, str) or not model.strip():
+    if model is None and allow_unchosen_model:
+        model = ""
+    elif not isinstance(model, str) or not model.strip():
         raise ConfigError(
             f"no delegated-turn model{where}: set [delegate] model — it is the cost "
             "lever and the engine has no default for it"

@@ -18,4 +18,6 @@ public enum BundleLayout {
     /// Where the bundled engine's interpreter sits under `Contents/Resources`.
     /// python-build-standalone's `install_only` layout puts it here.
     public static let engineInterpreterRelativePath = "engine/bin/python3"
+    /// The bundle pipeline places this beside the interpreter.
+    public static let engineCLIName = "bridgectl"
 }

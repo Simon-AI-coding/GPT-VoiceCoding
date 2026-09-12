@@ -126,7 +126,7 @@ _Avoid_: debug panel, advanced settings, developer mode
 
 **Installation**:
 Everything the system places in files the **user** owns so the coding agents can reach it, and takes back byte for byte when asked. Done at first launch and reconciled at every launch after (ADR 0012), never by hand and never by the Control Panel — which only triggers it and, on first launch, tells the user in plain words what was placed and that it can be taken back (#345).
-_Avoid_: setup, configuration (that is the user's own file, which the system only reads), provisioning
+_Avoid_: setup, configuration (the user's own file, which the engine only reads and the Control Panel edits in place, keeping every key and comment it does not know), provisioning
 
 ### Reach and sessions
 

@@ -429,6 +429,21 @@ class TestTheLock:
 
 
 class TestTheThingsThatMustAgree:
+    def test_the_shell_writes_the_adapter_references_python_actually_exports(self) -> None:
+        from gpt_voicecoding.adapters.companion_channel import NULL_REFERENCE
+        from gpt_voicecoding.adapters.companion_channel.null import TELEGRAM_REFERENCE
+
+        swift = (
+            inputs.SHELL_PACKAGE / "Sources/ShellCore/ShellConfigurationFile.swift"
+        ).read_text()
+        for name, reference in (
+            ("telegramAdapter", TELEGRAM_REFERENCE),
+            ("nullAdapter", NULL_REFERENCE),
+        ):
+            declared = re.search(rf'{name}\s*=\s*"(?P<reference>[^"]+)"', swift)
+            assert declared is not None
+            assert declared["reference"] == reference
+
     """Facts that exist in two languages, or in two files, held to each other."""
 
     def test_the_shell_and_the_engine_speak_the_same_protocol_version(self) -> None:
@@ -561,7 +576,7 @@ class TestTheThingsThatMustAgree:
     def test_the_example_config_is_one_the_engine_would_accept(self, tmp_path: Path) -> None:
         """The shipped example has to be a *working* file, not an illustration.
 
-        It is the first thing a new user copies into place, so a key it omits is
+        It is the template the shell places on first launch, so a key it omits is
         an engine that refuses to start on their first run with a message about
         a section they were never shown. `[log]`'s three numbers have no default
         in code (ADR 0004) and this example did omit them, which is how this test
@@ -574,20 +589,24 @@ class TestTheThingsThatMustAgree:
         placed = tmp_path / "config.toml"
         placed.write_text(example)
         read = config.load(placed)
-        assert read.delegated_turn_model
+        assert read.delegated_turn_model == "gpt-5.6-terra"
+        assert read.delegated_turn_effort == "low"
         assert read.log.max_bytes > 0
         assert set(read.adapters.as_mapping()) >= {"call", "companion_channel"}
+        assert read.adapters.companion_channel == (
+            "gpt_voicecoding.adapters.companion_channel:null_channel"
+        )
+        assert "executable" not in example
 
-    def test_the_example_config_points_at_the_cli_the_bundle_really_lays_out(self) -> None:
-        """`[delegate] cli` has to be true, or the instructions naming it are not.
-
-        Bridge Core puts this path into the instructions it generates, and the
-        engine's own check on it is only "is a runnable file" — so an example
-        that named the wrong place would produce instructions naming a CLI that
-        is not there, which is the invented detail those instructions forbid.
-        """
+    def test_the_shell_places_the_cli_from_the_actual_bundle_not_a_fixed_install_path(self) -> None:
+        """The first-launch writer fills cli from the interpreter's own directory."""
         example = (inputs.REPO_ROOT / "app_bundle" / inputs.CONFIG_EXAMPLE).read_text()
-        assert f"/Contents/{inputs.RESOURCES.name}/{inputs.ENGINE_CLI.as_posix()}" in example
+        assert "cli =" not in example
+        swift = (inputs.SHELL_PACKAGE / "Sources/ShellCore/BundleLayout.swift").read_text()
+        name = re.search(r'engineCLIName\s*=\s*"(?P<name>[^"]+)"', swift)
+        assert name is not None
+        assert name["name"] == inputs.ENGINE_CLI.name
+        assert inputs.ENGINE_CLI.parent == inputs.ENGINE_INTERPRETER.parent
 
 
 class TestTheProductDoesNotShipItsOwnBuildSystem:

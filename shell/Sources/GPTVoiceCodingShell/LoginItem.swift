@@ -14,22 +14,31 @@ final class LoginItem {
     private(set) var enabled: Bool
     /// The system's own words when it refuses. Not rephrased here.
     private(set) var failure: String?
+    private let read: () -> Bool
+    private let change: (Bool) throws -> Void
 
-    init() {
-        enabled = SMAppService.mainApp.status == .enabled
-    }
-
-    func set(_ wanted: Bool) {
-        do {
+    init(
+        read: @escaping () -> Bool = { SMAppService.mainApp.status == .enabled },
+        change: @escaping (Bool) throws -> Void = { wanted in
             if wanted {
                 try SMAppService.mainApp.register()
             } else {
                 try SMAppService.mainApp.unregister()
             }
+        }
+    ) {
+        self.read = read
+        self.change = change
+        enabled = read()
+    }
+
+    func set(_ wanted: Bool) {
+        do {
+            try change(wanted)
             failure = nil
         } catch {
             failure = error.localizedDescription
         }
-        enabled = SMAppService.mainApp.status == .enabled
+        enabled = read()
     }
 }

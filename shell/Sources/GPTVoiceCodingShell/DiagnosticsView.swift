@@ -43,7 +43,9 @@ extension ShellModel {
     var diagnosticErrors: [String] {
         var failures = [
             locationFailure, installationFailure, pathFailure, credentialState.failureDetail,
-            credentialSaveFailure, panel.lastFailure?.detail,
+            settingsFailure, loginItem.failure, panel.lastFailure?.detail,
+            panel.modelsFailure?.detail,
+            codexCheckFailure,
         ]
         if case .failed(let failure) = panel.reading { failures.append(failure.detail) }
         if case .cannotSpawn(let reason) = health { failures.append(reason.detail) }
@@ -75,6 +77,7 @@ struct DiagnosticsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(shell.diagnosticHealth)
                     .font(Phosphor.prose)
+                Button(shell.text(.codexCheckTitle)) { shell.open(.codexCheck) }
                 ForEach(shell.diagnosticRows) { row in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(shell.text(row.title)).font(Phosphor.label).foregroundStyle(

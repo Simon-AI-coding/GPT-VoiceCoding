@@ -74,6 +74,24 @@ public struct InstallationReport: Equatable, Sendable {
     public var failure: String? {
         ok ? nil : (lines.first ?? "the installation could not be reconciled")
     }
+
+    public enum Item: String, Sendable {
+        case claudeHooks = "claude-hooks"
+        case codexServer = "codex-launch-agent"
+    }
+
+    public enum ItemState: String, Sendable {
+        case current, absent, stale
+        case failed = "FAILED"
+    }
+
+    /// Read the existing per-item report, not the process-wide exit status.
+    public func state(of item: Item) -> ItemState? {
+        let prefix = item.rawValue + ": "
+        let word = lines.first { $0.hasPrefix(prefix) }?.dropFirst(prefix.count)
+            .split(separator: " ").first
+        return word.flatMap { ItemState(rawValue: String($0)) }
+    }
 }
 
 /// What one run collected, across the queue that collected it.

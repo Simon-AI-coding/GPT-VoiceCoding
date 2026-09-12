@@ -54,6 +54,50 @@ the engine's defaults, and the read never writes the user's file or starts an
 adapter. This is not an additional control-plane action. A failed read opens
 the fixed settings-unreadable page and leaves details under Diagnostics.
 
+### Settings and first launch (#361)
+
+The configuration file remains user-owned. The shell edits named values in
+place, preserving comments and keys it does not own; Python remains the one
+parser and validator. Settings and onboarding share the same controls and save
+path. Engine-setting saves wait for an explicit restart through the existing
+supervisor; runtime switches, the login item and language do not request one.
+
+Maintainer decision: an unchosen Call Agent model is a readable Settings state,
+not a reason to replace the whole page with the unreadable-file screen. The
+Settings reader permits an absent model and reports it as unchosen, without
+writing a default. Engine startup still requires a chosen model. Both readers
+share parsing and field validation; other invalid configuration still fails.
+
+Telegram's returned bot name is kept in `[shell.telegram] bot_name`, in the
+same configuration file and outside the adapter's settings. The token remains
+in the private environment file. Unbind removes both Telegram tables and the
+token file. The maintainer explicitly excluded old-binding migration and name
+fallbacks: implement the new binding flow, without a background name lookup.
+Maintainer decision: Unbind preserves handwritten standalone comments even when
+their former Telegram table is removed; do not infer which table owns a comment.
+
+When the user changes the Call Agent model, keep the chosen effort only if the
+new model supports it. Otherwise remove the effort key and display "not chosen"
+until the user picks; never choose the first offered effort on their behalf.
+
+First launch uses the bundled configuration example as its single template,
+with the actual bundled delegate CLI filled in. Only an absent file is created.
+The six-step flow stays in `ShellModel`; Call Agent and Telegram reuse Settings
+controls. The folder-access notice is visible in the Codex step, before moving
+to the installation report and starting the engine's first workspace sighting.
+The existing Installation subprocess's per-item outcome lines supply that
+report; the shell does not repeat installation or infer success from exit alone.
+
+Maintainer decision: the installer requires Python **3.12 or newer**, matching
+the existing build entry point. This supersedes #361's 3.10 prerequisite; no
+additional bootstrap interpreter or compatibility path is introduced.
+
+Tests exercise the shell model through the scripted control plane and existing
+process doubles, and the editor as pure text in/text out. Each setting's save
+and restart path is one sequence, using real temporary configuration files.
+Installation prerequisites and real calls belong to the manual checklist, not
+an automated run against the developer's machine.
+
 ## What ends up inside
 
 ```
@@ -62,7 +106,7 @@ GPT-VoiceCoding.app/
     ├── Info.plist                    the bundle's identity, copied from shell/Resources
     ├── MacOS/GPTVoiceCodingShell     the menu-bar shell, and nothing else
     └── Resources/
-        ├── config.example.toml       shipped, never installed for you
+        ├── config.example.toml       the shell's first-launch template
         └── engine/                   python-build-standalone, the locked wheels, the engine
             └── bin/
                 ├── python3 -> python3.12    what the shell spawns
@@ -108,7 +152,7 @@ produces a bundle that verifies clean and fails at the one moment it matters.
 | Every Python console script is relocated, without a name list | `pip` writes an **absolute** shebang. The interpreter relocates; its scripts do not. The pipeline examines every executable text file in `engine/bin/` and replaces only a shebang that names this build's bundled interpreter. `bridgectl`, `cffi-gen-src`, `pyav`, and any future locked dependency script therefore share one mechanism. |
 | The assembled bundle must not name its source checkout | A build-tree path works on the build machine and dies when that checkout or worktree is removed. The final pre-signing check scans the whole `.app`, and CI's real bundle build fails if any text file still carries the source root. Local-install provenance (`direct_url.json`) is removed because it would otherwise violate the same invariant even though the engine never reads it. |
 | The user's `PATH` is read from an **interactive** login shell, delimited by sentinels | launchd hands a Finder-launched `.app` `/usr/bin:/bin:/usr/sbin:/sbin`, and the engine inherits it — which is the `PATH` it resolves the agent binaries on (`shutil.which`). A Session is not in this picture: the user starts one in their own terminal, and it carries that terminal's `PATH`. The fix reads the user's own shell — but `-lc` was the wrong question: zsh sources `~/.zshrc` only when interactive, and `~/.zshrc` is where `nvm`'s installer and `brew shellenv` actually write. `-i` reaches that page of the ledger; the sentinels are what make an interactive shell's chatter (powerlevel10k's instant prompt) separable from the answer. Same shape VS Code's shell integration uses. `.zprofile` is a steadier home for a `PATH`, but a product that only works for users who already knew that is broken for the majority. |
-| `config.example.toml` is shipped, never installed | The configuration is a file the user owns and the engine only reads, and it names adapters by import reference, so it runs with the privileges of whoever wrote it. An installer that authored it would be claiming something that is not the installer's. |
+| `config.example.toml` is the first-launch template | The shell creates a config only when absent, with the approved defaults and actual bundle CLI. The file then belongs to the user; the shell edits known settings in place and the engine only reads it. The installer never replaces it. |
 
 ## Regenerating the lock
 
@@ -121,141 +165,81 @@ because a lock resolved by some other Python is a lock for some other set of
 wheels. It writes `app_bundle/locks/<triple>.lock`. Read the diff: it is the list
 of binaries the next build will sign.
 
-## The v0 acceptance
+## Manual acceptance (#358–361)
 
-> **This procedure predates v1.0's scope cut and has not been reshaped yet.**
-> Launching and closing Sessions are parked
-> ([#72](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/72));
-> `bridgectl launch` and `bridgectl close` no longer exist, so every step below
-> that runs one is unperformable as written. Read them as the record of the v0
-> run they are. The reshaped procedure — the harness starting Sessions through
-> the ordinary installed `claude` / `codex` path, the way a user does — is the
-> exit condition of
-> [#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67) and
-> is written there, not here. The findings in this section, including the
-> limitations below, are kept as measured.
+This is a **person's release checklist**, documented but never run by CI.
+Automated tests and an ad-hoc signature do not prove a real microphone, call,
+Telegram chat, or macOS permission prompt. Use a clean Apple Silicon Mac, with
+a bot no other engine is polling. Back up any existing configuration before
+testing first-launch or malformed-file cases.
 
-Everything above is machine-checked on every PR. What follows is not, and cannot
-be: it needs a microphone, a person to click a TCC prompt, a real Telegram bot
-and two real coding agents. Run it **once, in order, from a bundled build**, on a
-machine that is not the one that built it if you can — moving the `.app` is half
-of what is being tested.
+1. **Prerequisites.** Exercise each installer refusal separately: Intel or a
+   translated terminal, missing Command Line Tools, absent or older-than-3.12
+   `python3`, GitHub unreachable, and PyPI unreachable. Each stops before
+   cloning and gives one sentence with a fix. No Homebrew or Python is installed.
+2. **Install.** Run the README's one command. The source stays under Application
+   Support; the full app appears in Applications and opens Welcome. The generated
+   configuration has the real adapters, null Companion Channel, bounded log,
+   actual bundled delegate CLI, and `gpt-5.6-terra` / `low`, with no Codex path.
+3. **Six steps.** Follow Welcome → Codex check → What was placed → Call Agent →
+   Telegram → test call. Check the filled-square progress row. Exercise absent
+   Codex and logged-out Codex separately, their fixes, Re-check and Skip. Read the
+   folder-access notice before the first project sighting and Documents prompt.
+   The installation report must match what actually succeeded or was absent,
+   explain both helpers and reversibility, and offer Continue but no Skip.
+   Skip Telegram once and prove the engine and test call still work.
+4. **Permissions and first call.** Place the call from step 6. The microphone
+   prompt must name GPT-VoiceCoding and appear over the Control Panel; the phase
+   stays inside that step. No Verify is run. Test audio with a person, end the
+   call, and finish on Home. Reopen Codex check from Diagnostics and the model
+   and Telegram controls from Settings.
+5. **The desktop.** Start Claude Code and Codex sessions yourself in ordinary
+   terminals. Let one stop. Check the Duty Card, Home's counts and recency order,
+   and the whole Session Brief. Child Processes and Headless Runs contribute to
+   their count, never rows. Drag the card, change Spaces and enter a full-screen
+   app; verify visibility and its saved position. Duty off hides it, not a
+   separate hide preference. Check click, click-away and Quit behaviours.
+6. **Call phases.** On a real call check Ready, Calling…, On a call, Ending… and
+   Couldn't connect, including durations and the failure hold. Check the same
+   phase words on Home and the card, the Voice Switch, and a fresh Call Agent
+   versus a continued system-placed call. Check New Call Agent and Quit's
+   on-call confirmations. Do not turn a failed external service into a pass.
+7. **Settings and restart.** Change Voice, realtime model, Call Agent model and
+   effort, and each of the three timings. Inspect the expected TOML table while
+   comments and unknown keys remain unchanged. One restart line persists until
+   the replacement engine answers. Save during Calling…, On a call and Ending…:
+   Restart after the call is disabled and the edit is kept. The four switches
+   and login item stay live and raise no line. With Auto Hang-up off, silence
+   seconds are dimmed but retained. A model missing from the offered list is
+   kept and noted; no model means not chosen; engine down disables picking.
+   Switching to a model without the old effort clears it and waits for a choice.
+   Re-picking a value that is already selected changes nothing and raises no line.
+8. **Telegram.** Paste a valid token, see its bot name, use Open in Telegram and
+   press Start. Receive one confirmation before Save; neither file changes
+   before Save. Save writes the named environment variable privately (0600),
+   adapter reference, chat id and bot name, and waits for Restart now. The saved
+   token stays masked. Change to the **same token** and repeat without competing
+   pollers. Leave a waiting flow and re-enter it; ordinary polling resumes.
+   Exercise invalid token and network failure. Unbind removes both Telegram
+   tables and the token file and chooses the null channel, with a restart line.
+   With a bound bot, stop a Session and compare its state word and ordering on
+   Telegram beside the app; answer there and check delivery.
+9. **Language and appearance.** Run the complete settings and setup screens in
+   English and Chinese, in system light and dark modes. Check long names and
+   Chinese text fit without clipping. Language changes the preference now and
+   the displayed language only after app relaunch. No third language or theme
+   switch appears.
+10. **Upgrade and failures.** Run the same install command again. Confirm the
+    running app quits before replacement and reopens silently; the hand-written
+    configuration is untouched and onboarding is skipped. Test a malformed file:
+    the fixed unreadable-settings page opens, Diagnostics has the detail, and
+    the file is unchanged. Check engine-down Settings display saved values and
+    cannot bind Telegram or select a model. Copy diagnostics and inspect it for
+    completeness and absence of credentials.
 
-Before step 0, do the two cutover checks below: retire any first-generation
-codex skill, and make sure nothing else is polling this engine's bot. Both are
-preconditions rather than steps — get either wrong and the run produces results
-that cannot be attributed to this engine at all.
-
-**And before attributing any voice failure to this engine, re-verify the realtime
-contract with an engine-free probe:** a bare `codex app-server` client that sends
-the v3 realtime start and nothing else. The realtime methods are an alpha backend
-surface, absent from the official app-server docs and gated server-side, so the
-contract can move without anything here changing — the research that approved
-this route said to re-run the probe on every codex bump, and it was right. A
-probe that fails identically outside the engine has told you, in seconds, that
-the engine is not the subject. On the maintainer's machine this is
-`scripts/rt_prototype.py --silent` in the legacy checkout — thirty seconds, no
-microphone, no bundle, its own app-server child. The probe is not shipped here;
-what is portable is the instruction to run one, and the research resolution it
-came from defines its shape.
-
-**0. Configure it, and read *both* failures first.** Copy
-`Contents/Resources/config.example.toml` into
-`~/Library/Application Support/GPT-VoiceCoding/engine/config.toml`, and before
-filling it in properly, break it twice on purpose. The two breakages behave
-differently, and knowing which is which is the whole point of the step.
-
-*First, a configuration mistake* — comment out `[delegate] model`. The engine
-refuses **before it adopts its log**, so the sentence goes to stderr, the shell's
-Retry panel **shows it**, and no `engine.log` is created at all. This is the
-pleasant case.
-
-*Then, a missing credential* — put the model back and leave
-`~/Library/Application Support/GPT-VoiceCoding/engine/environment` absent. The
-shell stops **before spawn**: the Control Panel says `Telegram bot token: not
-set` and offers `Set…`, rather than spending five starts and presenting an empty
-Retry panel. Enter the token in the write-only field and save it; the shell
-creates the file privately and starts the engine with the variable named by
-`[adapters.settings.companion_channel] token_env`.
-
-The file is hand-editable strict UTF-8 `KEY=VALUE`: blank lines and `#` comment
-lines are allowed, the value is everything after the first `=`, and there is no
-shell or dotenv expansion. Variable names are environment identifiers and may
-appear only once. It must have no group or other permission bits (`chmod 600`
-is the documented mode); make it 0644 once and confirm the panel refuses to load
-it and says why, then restore 0600. Neither the token nor the file contents are
-displayed back or written to a log. If this preflight held the engine at launch,
-repairing the file by hand starts that engine exactly once; later hand edits do
-not reload or restart an engine that is already running. Saving through the panel
-still writes a new 0600 file, atomically replaces the old one, and restarts the
-engine in order.
-
-This adapts the first generation's proven file-to-environment preflight
-(`legacy@1d32845:bridge-serve:103-139`) and its `RunAtLoad` plus `KeepAlive`
-retry after every exit (`legacy@1d32845:scripts/launch-agent.py:12-15,53-70`).
-That launcher sourced shell syntax and had no menu-bar editor; this shell
-deliberately accepts only the strict format above and adds the write-only Control
-Panel path.
-
-**1. The microphone.** `python3 scripts/microphone_grant_proof.py --reset`, and
-follow it. The prompt must name the app.
-
-**2. One bot, one engine.** Check that nothing else is consuming `getUpdates` for
-the bot this engine is configured for; if something is, stop it or use a
-different bot — see the cutover note below. The `send` half of step 8 will pass
-either way; only inbound goes quiet, so this leg proves less than it appears to
-if you skip this. On the reference machine there is no contender: the
-first-generation bridge's `companionChannel` is empty and it never spoke to
-Telegram at all. The constraint is Telegram's and still real; that one bridge is
-simply not what would violate it.
-
-**3. Launch a Session.** Twice, by both routes that exist: headless with
-`bridgectl launch`, and by voice inside a Live Call started from the menu bar —
-the shell deliberately has no launch control of its own, because launching
-belongs to the control plane and the call, not to the lifecycle owner. The voice
-leg may be performed when the first Live Call comes up and recorded against this
-step. Both must reach a real agent in a real workspace, and the headless leg is
-also what proves the `PATH` the shell hands the engine is your own and not
-launchd's.
-
-A cold launch can take the better part of a minute, and the client now waits up
-to 150 s for `launch` alone — a ceiling derived from the launch itself rather
-than the ordinary request deadline (#28). So a reported timeout no longer means
-"cold launch, be patient": it means the engine genuinely hung. Read the
-limitation below before you retry, because retrying the wrong way starts a
-second agent.
-
-**4. Let it stop.** Wait for the Session to finish a turn.
-
-**5. The Stop Notice.** With a Live Call up, it must be spoken into the call.
-
-**6. Answer Relay.** Speak an instruction; it must arrive in the Session as your
-own words.
-
-**7. Approval Relay.** Get the Session to ask for a permission it needs, and
-answer it by voice. One verdict, one request.
-
-Both steps are performed against a Session you started yourself, at your own
-terminal: v1.0 launches nothing (#67). Step 6 rides that Session's own inbox
-socket and step 7 the `PermissionRequest` hook, so each is performable only where
-its own carrier reached that Session — the hook installed in its config directory
-(ADR 0011) and its `SessionStart` registration received. A carrier that is not
-there is a blocked step rather than a failed one, and the receipt says which.
-
-**8. The Companion Channel.** A notice must reach Telegram, and a reply typed
-there must come back as inbound text. The two surfaces are independent since
-#195: a Stop Notice is pushed under the Message Switch whatever the call is
-doing, and the Call Keeper decides separately whether to dial. So this step
-passes with Voice on or off, and a call coming up beside the push is the product
-working rather than a failure of this step.
-
-**9. The switches.** Duty off: nothing is spoken and nothing is pushed, but
-events are still recorded and the control plane still answers. Voice off,
-Message on: text-only operation — this is the leg step 8's Telegram clause is
-exercised under. Then back.
-
-**10. Headless.** Every one of the above must be reachable through `bridgectl`
-from a terminal, against the same running engine.
+Record the build revision, machine, language and observed result for each step.
+A skipped or blocked physical check stays unverified; test-suite success never
+fills it in.
 
 ## Before a release: the microphone
 

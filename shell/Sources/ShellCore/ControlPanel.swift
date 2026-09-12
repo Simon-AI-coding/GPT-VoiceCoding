@@ -210,12 +210,23 @@ public enum CallPhase: String, CaseIterable, Sendable {
     public var resolving: Bool { self == .calling || self == .ending }
 }
 
+public struct CallAgentModel: Equatable, Sendable {
+    public let model: String
+    public let efforts: [String]
+    init(_ value: JSONValue) {
+        model = value["model"]?.string ?? ""
+        efforts = value["efforts"]?.array?.compactMap(\.string) ?? []
+    }
+}
+
 /// Control-plane readings and desktop presentation, behind the existing dialer.
 /// Core owns calls, words and roster order. This module owns the shared counts,
 /// transient Call Phases and Home's input-safety hold.
 @MainActor
 @Observable
 public final class ControlPanel {
+    public private(set) var models: [CallAgentModel] = []
+    public private(set) var modelsFailure: ActionFailure?
     public private(set) var sessionBrief: SessionBriefReading?
     private var sessionTarget: SessionAddress?
     public private(set) var sessionFailure: ActionFailure?
@@ -392,6 +403,25 @@ public final class ControlPanel {
         }
         if let answer = outcome.answer { seams = answer }
         lastFailure = outcome.failure
+    }
+
+    public func bindTelegram(_ payload: [String: JSONValue] = [:]) async -> TelegramBindingReading?
+    {
+        let outcome = await ask(
+            Request(action: .bindTelegram, payload: payload), TelegramBindingReading.init)
+        guard !Task.isCancelled else { return nil }
+        lastFailure = outcome.failure
+        return outcome.answer
+    }
+
+    public func refreshModels() async {
+        guard engineReachable else { return }
+        let outcome = await ask(Request(action: .models)) {
+            ($0["models"]?.array ?? []).map(CallAgentModel.init)
+        }
+        guard !Task.isCancelled else { return }
+        models = outcome.answer ?? []
+        modelsFailure = outcome.failure
     }
 
     /// Presentation time only. Core still owns whether a call exists.

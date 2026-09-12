@@ -81,6 +81,31 @@ enum Copy: String, CaseIterable {
     case controlPanel
     case model
     case effort
+    case voiceNote, settingsSaveFailed, restartRequired, restartNow, restartAfterCall
+    case autoHangup, silenceSeconds, coolDownSeconds, speechSettleSeconds, secondsUnit,
+        numberRequired
+    case launchAtLogin, language, languageNextLaunch
+    case agentModelsNote, agentModelGone, agentModelsUnavailable
+    case onboardingStep, welcomeTitle, welcomeBody, start, codexCheckTitle, codexReady,
+        codexNotInstalled, codexInstallFix, codexNotLoggedIn, codexLoginFix, recheck,
+        continueSetup, skipSetup, placedTitle, claudePlaced, claudeNotPlaced, codexPlaced,
+        codexNotPlaced, placementFailed, placementReversible, folderAccessNotice,
+        setupAgentBody, setupTelegramBody, testCallTitle, testCallBody, placeTestCall, doneSetup
+    case telegramToken, telegramTokenHelp, telegramValidate, telegramOpen, telegramNamed,
+        telegramWaiting, telegramConfirmed, telegramInvalidToken, telegramConnectionFailed,
+        telegramDestinationFailed, telegramMaskedNote, telegramChange, telegramUnbind,
+        telegramEngineDown, save, cancel
+}
+
+enum ShellLanguage: String, CaseIterable {
+    case english = "en"
+    case chinese = "zh-Hans"
+    var label: String {
+        switch self {
+        case .english: return "English"
+        case .chinese: return "中文"
+        }
+    }
 }
 
 struct ShellText {
@@ -100,7 +125,7 @@ struct ShellText {
 
     static func preferredLanguage(saved: String?, system: [String]) -> String {
         let language = saved ?? system.first ?? "en"
-        return language.hasPrefix("zh") ? "zh-Hans" : "en"
+        return (language.hasPrefix("zh") ? ShellLanguage.chinese : .english).rawValue
     }
 
     func callAsFunction(_ key: Copy, _ arguments: CVarArg...) -> String {

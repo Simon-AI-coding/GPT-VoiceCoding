@@ -14,6 +14,170 @@ import Foundation
 /// rather than guessing, because a misread here would hand the shell the wrong
 /// socket and it would report an engine missing that was running all along.
 enum MinimalTOML {
+    /// Edit only the named assignment. Parsing and validation remain in Python.
+    static func setting(
+        _ value: JSONValue, forKey key: String, inTable table: String, of text: String
+    ) throws -> String {
+        let rendered = try literal(value)
+        var lines = text.components(separatedBy: "\n")
+        let starts = statementStarts(in: lines)
+        var currentTable = ""
+        var insertion: Int?
+        for index in lines.indices {
+            guard starts.contains(index) else { continue }
+            let line = lines[index]
+            if let name = tableName(line) {
+                if currentTable == table { break }
+                currentTable = name
+                if name == table { insertion = index + 1 }
+                continue
+            }
+            guard currentTable == table,
+                let equal = line.firstIndex(of: "="),
+                line[..<equal].trimmingCharacters(in: .whitespaces) == key
+            else { continue }
+            let suffix = line[line.index(after: equal)...]
+            let comment = commentStart(in: suffix) ?? line.endIndex
+            let rawValue = line[line.index(after: equal)..<comment]
+            let start = rawValue.firstIndex { !$0.isWhitespace } ?? rawValue.startIndex
+            let end = rawValue.lastIndex { !$0.isWhitespace }.map { line.index(after: $0) } ?? start
+            lines[index].replaceSubrange(start..<end, with: rendered)
+            return lines.joined(separator: "\n")
+        }
+        let assignment = "\(key) = \(rendered)"
+        if let insertion {
+            lines.insert(assignment, at: insertion)
+            return lines.joined(separator: "\n")
+        }
+        let separator = text.isEmpty || text.hasSuffix("\n") ? "" : "\n"
+        return text + separator + "[\(table)]\n" + assignment + "\n"
+    }
+
+    private static func literal(_ value: JSONValue) throws -> String {
+        switch value {
+        case .string, .number:
+            let data = try JSONSerialization.data(
+                withJSONObject: value.raw, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        default:
+            throw ConfigurationFailure.unreadable("a setting must be a string or a number")
+        }
+    }
+
+    static func removing(table: String, from text: String) -> String {
+        var removing = false
+        let lines = text.components(separatedBy: "\n")
+        let starts = statementStarts(in: lines)
+        return lines.enumerated().compactMap { index, line in
+            if starts.contains(index), let name = tableName(line) {
+                removing = name == table || name.hasPrefix(table + ".")
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if starts.contains(index), trimmed.isEmpty || trimmed.hasPrefix("#") { return line }
+            if index == lines.count - 1, line.isEmpty { return line }
+            return removing ? nil : line
+        }.joined(separator: "\n")
+    }
+
+    static func removing(key: String, inTable table: String, from text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        let starts = statementStarts(in: lines)
+        var currentTable = ""
+        return lines.enumerated().compactMap { index, line in
+            guard starts.contains(index) else { return line }
+            if let name = tableName(line) {
+                currentTable = name
+                return line
+            }
+            guard currentTable == table, let equal = line.firstIndex(of: "="),
+                line[..<equal].trimmingCharacters(in: .whitespaces) == key
+            else { return line }
+            if let comment = commentStart(in: line[line.index(after: equal)...]) {
+                return String(line[comment...])
+            }
+            return nil
+        }.joined(separator: "\n")
+    }
+
+    /// Locate statements, not values: quoted text and multiline arrays may
+    /// contain lines that look like tables. They remain opaque to the editor.
+    private static func statementStarts(in lines: [String]) -> Set<Int> {
+        var starts = Set<Int>()
+        var quote: Character?
+        var multiline = false
+        var brackets = 0
+        for (number, line) in lines.enumerated() {
+            if quote == nil && brackets == 0 { starts.insert(number) }
+            let characters = Array(line)
+            var index = 0
+            while index < characters.count {
+                let character = characters[index]
+                if let closing = quote {
+                    if closing == "\"", character == "\\" {
+                        index += 2
+                        continue
+                    }
+                    if character == closing {
+                        var end = index + 1
+                        while end < characters.count && characters[end] == closing { end += 1 }
+                        if !multiline || end - index >= 3 {
+                            quote = nil
+                            index = multiline ? end : index + 1
+                            multiline = false
+                            continue
+                        }
+                    }
+                } else if character == "#" {
+                    break
+                } else if character == "\"" || character == "'" {
+                    quote = character
+                    multiline =
+                        index + 2 < characters.count
+                        && characters[index + 1] == character && characters[index + 2] == character
+                    index += multiline ? 3 : 1
+                    continue
+                } else if character == "[" || character == "{" {
+                    brackets += 1
+                } else if character == "]" || character == "}" {
+                    brackets -= 1
+                }
+                index += 1
+            }
+        }
+        return starts
+    }
+
+    private static func tableName(_ line: String) -> String? {
+        let line = line.trimmingCharacters(in: .whitespaces)
+        guard line.hasPrefix("["), let end = line.firstIndex(of: "]") else { return nil }
+        return String(line[line.index(after: line.startIndex)..<end])
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func commentStart(in text: Substring) -> String.Index? {
+        var quote: Character?
+        var escaped = false
+        for index in text.indices {
+            let character = text[index]
+            if escaped {
+                escaped = false
+                continue
+            }
+            if quote == "\"", character == "\\" {
+                escaped = true
+                continue
+            }
+            if let closing = quote {
+                if character == closing { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == "#" {
+                return index
+            }
+        }
+        return nil
+    }
+
     /// The raw text of `key` in `table`, or nil when the table or key is absent.
     static func string(forKey key: String, inTable table: String, of text: String) throws
         -> String?

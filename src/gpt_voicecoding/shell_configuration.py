@@ -12,21 +12,38 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from gpt_voicecoding.adapters.call.realtime.settings import RealtimeCallSettings, SettingsError
+from gpt_voicecoding.adapters.call.realtime.settings import (
+    DEFAULT_REALTIME_MODEL,
+    RealtimeCallSettings,
+    SettingsError,
+)
 from gpt_voicecoding.adapters.companion_channel.null import TELEGRAM_REFERENCE
-from gpt_voicecoding.config import ConfigError, load
+from gpt_voicecoding.config import ConfigError, of, read_document
+
+# The product's fixed picker, not an additional adapter validation rule (#361).
+VOICES = ("juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove")
 
 
 def read(path: Path) -> dict[str, Any]:
     """Only the facts the shell displays, from the same file the engine loads."""
-    config = load(path)
+    document = read_document(path)
+    config = of(document, source=path, allow_unchosen_model=True)
     call = RealtimeCallSettings.of(config.adapters.settings_for("call"))
     channel = config.adapters.settings_for("companion_channel") or {}
     return {
-        "model": config.delegated_turn_model,
+        "model": config.delegated_turn_model or None,
         "effort": config.delegated_turn_effort,
+        "voice": call.voice,
+        "voices": list(VOICES),
+        "realtime_models": [DEFAULT_REALTIME_MODEL],
+        "silence_end_seconds": config.policy.silence_end_seconds,
+        "cool_down_seconds": config.policy.cool_down_seconds,
+        "speech_settle_seconds": config.policy.speech_settle_seconds,
         "realtime_model": call.realtime_model,
         "log_path": str(config.log.path),
+        "telegram_name": document.get("shell", {}).get("telegram", {}).get("bot_name"),
+        "token_env": channel.get("token_env"),
+        "chat_id": str(channel["chat_id"]) if "chat_id" in channel else None,
         "telegram_bound": config.adapters.companion_channel == TELEGRAM_REFERENCE
         and bool(str(channel.get("chat_id", "")).strip()),
     }

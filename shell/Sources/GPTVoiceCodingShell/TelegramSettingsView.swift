@@ -33,10 +33,14 @@ struct TelegramSettingsView: View {
                         Text(binding.botName).foregroundStyle(Phosphor.bright)
                         if shell.telegramStage == .waiting {
                             note(.telegramNamed)
-                            if let url = binding.startURL {
-                                Link(shell.text(.telegramOpen), destination: url)
-                            }
+                            Text("@\(binding.username)").textSelection(.enabled)
                             note(.telegramWaiting)
+                            Button(shell.text(shell.checkingTelegram ? .checking : .telegramCheck))
+                            {
+                                Task { await shell.refreshTelegramBinding() }
+                            }
+                            .disabled(!shell.canCheckTelegram)
+                            if shell.telegramCheckFinished { note(.telegramNotFound) }
                         } else {
                             note(.telegramConfirmed)
                             Button(shell.text(.save)) { Task { await shell.saveTelegramBinding() } }

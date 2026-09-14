@@ -98,9 +98,10 @@
 "telegramToken" = "Paste the token from BotFather";
 "telegramTokenHelp" = "Make a bot with BotFather in Telegram, then paste the token it gives you.";
 "telegramValidate" = "Check token";
-"telegramOpen" = "Open Telegram Web";
-"telegramNamed" = "This token identifies the bot. Open Telegram Web to choose the account that receives its messages.";
-"telegramWaiting" = "Sign in on the web if needed, then press Start in the bot's chat. You do not need the desktop app or to type a message. Return here to save.";
+"telegramCheck" = "I've sent /start — check";
+"telegramNamed" = "The token identifies your bot, but not the chat that should receive its messages.";
+"telegramWaiting" = "In any Telegram app or browser you use, search for the username above. Open its chat and send /start (or press Start), then click the check button here.";
+"telegramNotFound" = "No new /start found yet. Send it to this bot after checking the token, then try again.";
 "telegramConfirmed" = "A message was sent to your chat. Save if you saw it.";
 "telegramInvalidToken" = "That token isn't valid. Check it and paste it again.";
 "telegramConnectionFailed" = "Telegram could not be reached. Check your connection and try again.";

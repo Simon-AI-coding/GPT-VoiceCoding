@@ -65,6 +65,7 @@ final class ShellModel {
     private(set) var telegramStage: TelegramStage = .idle
     private(set) var telegramBinding: TelegramBindingReading?
     private(set) var telegramFailure: ActionFailure?
+    private(set) var telegramCheckFinished = false
     private var pendingTelegramToken: String?
     private var telegramRequest: Task<TelegramBindingReading?, Never>?
     private var telegramCancellation: Task<Void, Never>?
@@ -497,7 +498,6 @@ final class ShellModel {
             if lastBriefRead.map({ time - $0 >= Self.briefInterval }) ?? true {
                 lastBriefRead = time
                 group.addTask { await self.panel.refreshRoster() }
-                group.addTask { await self.refreshTelegramBinding() }
             }
             if case .session(let target) = page,
                 lastSessionRead.map({ time - $0 >= Self.briefInterval }) ?? true
@@ -579,14 +579,22 @@ final class ShellModel {
         telegramToken = ""
         telegramStage = .validating
         telegramFailure = nil
+        telegramCheckFinished = false
         await requestTelegramBinding(["token": .string(pendingTelegramToken!)])
     }
 
+    var canCheckTelegram: Bool {
+        panel.engineReachable && telegramStage == .waiting
+            && telegramRequest == nil && telegramCancellation == nil
+    }
+
+    var checkingTelegram: Bool { telegramStage == .waiting && telegramRequest != nil }
+
     func refreshTelegramBinding() async {
-        guard telegramStage == .waiting, telegramRequest == nil, telegramCancellation == nil else {
-            return
-        }
+        guard canCheckTelegram else { return }
+        telegramCheckFinished = false
         await requestTelegramBinding([:])
+        telegramCheckFinished = telegramStage == .waiting
     }
 
     private func requestTelegramBinding(_ payload: [String: JSONValue]) async {
@@ -608,6 +616,7 @@ final class ShellModel {
         telegramBinding = nil
         telegramStage = .idle
         telegramFailure = nil
+        telegramCheckFinished = false
         guard needsCancel, telegramCancellation == nil else { return }
         let request = telegramRequest
         request?.cancel()

@@ -33,11 +33,24 @@ built_app="$source_directory/shell/.build/$bundle_name.app"
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$built_app/Contents/Info.plist")
 installed_app="/Applications/$bundle_name.app"
 
-if [ "$(osascript -e "application id \"$bundle_id\" is running")" = true ]; then
+app_is_running() {
+    # Query running processes, not Launch Services: a first install has no registered app.
+    running=$(osascript -l JavaScript -e '
+        ObjC.import("AppKit");
+        function run(argv) {
+            return $.NSRunningApplication.runningApplicationsWithBundleIdentifier(argv[0]).count > 0;
+        }
+    ' "$bundle_id") || fail 'Could not check the running app. Try the installation again.'
+    [ "$running" = true ]
+}
+
+printf '%s\n' 'Checking whether an earlier version is running…'
+if app_is_running; then
+    printf '%s\n' 'Closing the running app before upgrading…'
     osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 ||
         fail 'Quit GPT-VoiceCoding, then run this command again.'
     attempts=0
-    while [ "$(osascript -e "application id \"$bundle_id\" is running")" = true ]; do
+    while app_is_running; do
         attempts=$((attempts + 1))
         [ "$attempts" -lt 30 ] || fail 'Quit GPT-VoiceCoding, then run this command again.'
         sleep 1

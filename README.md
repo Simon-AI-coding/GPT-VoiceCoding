@@ -37,6 +37,16 @@ Call Agent, optional Telegram, and a test call. Have Codex installed and log in
 with `codex login` when the guide asks. Later launches are silent. Settings that
 need an engine restart show one explicit **Restart now** action.
 
+Telegram setup (in the guide or Settings) first checks the bot token. The token
+identifies the bot, not the receiving chat. Search for the displayed `@username`
+in whichever Telegram client you already use and send `/start` after the token
+check. Return to the app, click **I've sent /start — check**, and save after you
+see the confirmation message in that chat. The app does not open a Telegram
+client for you or check for that message until you click.
+
+The Duty Card starts at the top right of the available screen on a fresh
+installation; subsequent launches restore its saved position.
+
 ## What it is
 
 You are away from the keyboard. A Claude Code or Codex session stops and needs

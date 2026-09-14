@@ -424,6 +424,121 @@ import Testing
         #expect(await waitUntil { model.health == .running(pid: 2002) && !model.pendingRestart })
         await model.stopEngine()
     }
+
+    @Test(arguments: [ShellPage.settings(.telegram), .onboarding(.telegram)])
+    func telegramWaitsForTheUsersCheckInsteadOfPolling(page: ShellPage) async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = DesktopControlPlane()
+        let clock = DesktopClock()
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine), now: { clock.time }, sleep: clock.sleep)
+        model.open(page)
+        #expect(await waitUntil { clock.waiting && model.panel.engineReachable })
+        await model.readInFlight?.value
+        model.telegramToken = "a-test-token"
+        await model.validateTelegram()
+        for _ in 0..<2 {
+            clock.advance()
+            #expect(await waitUntil { clock.waiting })
+            await model.readInFlight?.value
+        }
+        #expect(model.telegramStage == .waiting)
+        #expect(engine.requests.filter { $0 == "bind_telegram" }.count == 1)
+        await model.refreshTelegramBinding()
+        #expect(model.telegramStage == .confirmed)
+        await model.stopEngine()
+        clock.advance()
+    }
+
+    @Test func aManualTelegramCheckWithoutAMessageCanBeRetriedWithoutSaving() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = DesktopControlPlane()
+        engine.telegramMessageAvailable = false
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        model.telegramToken = "a-test-token"
+        await model.validateTelegram()
+        #expect(!model.telegramCheckFinished)
+        await model.refreshTelegramBinding()
+        #expect(model.telegramStage == .waiting)
+        #expect(model.telegramCheckFinished)
+        #expect(model.canCheckTelegram)
+        await model.saveTelegramBinding()
+        #expect(!FileManager.default.fileExists(atPath: fixture.environmentPath))
+        #expect(!model.pendingRestart)
+        engine.telegramMessageAvailable = true
+        await model.refreshTelegramBinding()
+        #expect(model.telegramStage == .confirmed)
+        #expect(!model.telegramCheckFinished)
+        #expect(!model.canCheckTelegram)
+        model.cancelTelegramBinding()
+        #expect(!model.telegramCheckFinished)
+        await model.stopEngine()
+    }
+
+    @Test func anInflightManualTelegramCheckCannotDuplicateOrSurviveCancellation() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = HeldTelegramPlane(holdValidation: false)
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        model.telegramToken = "a-test-token"
+        await model.validateTelegram()
+        let checking = Task { await model.refreshTelegramBinding() }
+        #expect(await waitUntil { engine.checks.value == 1 })
+        #expect(model.checkingTelegram)
+        #expect(!model.canCheckTelegram)
+        await model.refreshTelegramBinding()
+        #expect(engine.checks.value == 1)
+        model.cancelTelegramBinding()
+        engine.reply.resolve()
+        await checking.value
+        #expect(await waitUntil { engine.cancellations.value == 1 })
+        #expect(model.telegramStage == .idle)
+        #expect(model.telegramBinding == nil)
+        #expect(!model.telegramCheckFinished)
+        #expect(!model.checkingTelegram)
+        #expect(!FileManager.default.fileExists(atPath: fixture.environmentPath))
+        await model.stopEngine()
+    }
+
+    @Test(arguments: [false, true])
+    func manualTelegramInstructionsRenderInBothLanguages(onboarding: Bool) async throws {
+        for language in ["en", "zh-Hans"] {
+            let fixture = try TelegramCredentialFixture()
+            let preferences = testPreferences()
+            preferences.set(language, forKey: ShellText.preferenceKey)
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(),
+                panel: ControlPanel(client: DesktopControlPlane()), preferences: preferences)
+            await model.panel.refresh()
+            model.open(onboarding ? .onboarding(.telegram) : .settings(.telegram))
+            model.telegramToken = "a-test-token"
+            await model.validateTelegram()
+            let view = NSHostingView(
+                rootView: ControlPanelView(shell: model).frame(width: Phosphor.windowWidth))
+            view.frame.size = view.fittingSize
+            view.layoutSubtreeIfNeeded()
+            await Task.yield()
+            view.frame.size = view.fittingSize
+            view.layoutSubtreeIfNeeded()
+            #expect(view.frame.width == Phosphor.windowWidth)
+            #expect(view.frame.height > 0)
+            if let directory = ProcessInfo.processInfo.environment["GPTVC_RENDER_OUTPUT"] {
+                let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                try png.write(
+                    to: URL(fileURLWithPath: directory)
+                        .appendingPathComponent("telegram-\(language)-\(onboarding).png"))
+            }
+            await model.stopEngine()
+        }
+    }
     @Test func generalChangesOnlyTheLoginItemAndNextLaunchLanguage() async throws {
         let fixture = try TelegramCredentialFixture()
         let before = try Data(contentsOf: URL(fileURLWithPath: fixture.configPath))
@@ -997,6 +1112,11 @@ private final class DesktopControlPlane: ControlPlaneDialing, @unchecked Sendabl
     private var calls: [Request] = []
     private var dutyOn = true
     private var callUp = false
+    private var messageAvailable = true
+    var telegramMessageAvailable: Bool {
+        get { lock.withLock { messageAvailable } }
+        set { lock.withLock { messageAvailable = newValue } }
+    }
     var requests: [String] { lock.withLock { calls.map { $0.action.rawValue } } }
     var briefTargets: [JSONValue] {
         lock.withLock {
@@ -1014,13 +1134,14 @@ private final class DesktopControlPlane: ControlPlaneDialing, @unchecked Sendabl
             return callUp
         }
         if request.action == .bindTelegram {
+            let confirmed = request.payload?["token"] == nil && telegramMessageAvailable
             let data: [String: Any] =
                 request.payload?["cancel"]?.bool == true
                 ? [:]
                 : [
                     "bot_name": "My bot", "username": "my_bot",
-                    "chat_id": request.payload?["token"] == nil ? "42" : NSNull(),
-                    "chat_type": request.payload?["token"] == nil ? "private" : NSNull(),
+                    "chat_id": confirmed ? "42" : NSNull(),
+                    "chat_type": confirmed ? "private" : NSNull(),
                 ]
             return try Reply.of(
                 JSONSerialization.data(withJSONObject: [
@@ -1086,13 +1207,21 @@ private struct RefusingTelegramPlane: ControlPlaneDialing {
 }
 
 private struct HeldTelegramPlane: ControlPlaneDialing {
+    var holdValidation = true
     let reply = OneShot<Void>()
     let tokens = LaunchCounter()
+    let checks = LaunchCounter()
     let cancellations = LaunchCounter()
     func ask(_ request: Request) async throws -> Reply {
         if request.payload?["token"] != nil {
             _ = tokens.increment()
-            await reply.value()
+            if holdValidation { await reply.value() }
+        }
+        if request.action == .bindTelegram, request.payload?["token"] == nil,
+            request.payload?["cancel"] == nil
+        {
+            _ = checks.increment()
+            if !holdValidation { await reply.value() }
         }
         if request.payload?["cancel"]?.bool == true { _ = cancellations.increment() }
         return try Reply.of(

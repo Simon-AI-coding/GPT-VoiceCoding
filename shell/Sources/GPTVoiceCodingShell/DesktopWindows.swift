@@ -4,8 +4,11 @@ import SwiftUI
 
 final class DutyPanel: NSPanel {
     static let autosaveName = "DutyCard"
+    private let savedFrameName: String
+    private var placed = false
 
-    init() {
+    init(savedFrameName: String = DutyPanel.autosaveName) {
+        self.savedFrameName = savedFrameName
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: Phosphor.cardWidth, height: 30),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
@@ -17,11 +20,20 @@ final class DutyPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        setFrameAutosaveName(Self.autosaveName)
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+
+    func place(in screen: NSRect) {
+        guard !placed else { return }
+        if !setFrameUsingName(savedFrameName) {
+            setFrame(Self.initialFrame(in: screen, height: frame.height), display: false)
+        }
+        // Hidden hosting-content measurements must not persist a provisional frame.
+        setFrameAutosaveName(savedFrameName)
+        placed = true
+    }
 
     static func initialFrame(in screen: NSRect, height: CGFloat) -> NSRect {
         NSRect(
@@ -39,7 +51,6 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         contentRect: NSRect(x: 0, y: 0, width: Phosphor.windowWidth, height: 1),
         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
         backing: .buffered, defer: true)
-    private var cardPlaced = false
     private var lastWindowRequest = 0
     private var localClick: Any?
     private var globalClick: Any?
@@ -101,14 +112,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             NSApp.setActivationPolicy(.accessory)
         }
         if shell.cardVisible {
-            if !cardPlaced {
-                if !card.setFrameUsingName(DutyPanel.autosaveName), let screen = NSScreen.main {
-                    card.setFrame(
-                        DutyPanel.initialFrame(in: screen.visibleFrame, height: card.frame.height),
-                        display: false)
-                }
-                cardPlaced = true
-            }
+            if let screen = NSScreen.main { card.place(in: screen.visibleFrame) }
             card.orderFrontRegardless()
             observeOutsideClicks()
         } else {

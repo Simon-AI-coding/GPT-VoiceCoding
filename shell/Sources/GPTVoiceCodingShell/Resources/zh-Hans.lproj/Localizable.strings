@@ -98,9 +98,10 @@
 "telegramToken" = "粘贴 BotFather 给你的 token";
 "telegramTokenHelp" = "在 Telegram 中找 BotFather 创建机器人，再粘贴它给你的 token。";
 "telegramValidate" = "检查 token";
-"telegramOpen" = "打开 Telegram 网页版";
-"telegramNamed" = "这个 token 确定了机器人。打开 Telegram 网页版，确定接收消息的账号。";
-"telegramWaiting" = "如未登录，先在网页上登录，再到机器人聊天里点击 Start。无需桌面客户端，也不用手打消息。完成后回到这里保存。";
+"telegramCheck" = "我已发送 /start，检查绑定";
+"telegramNamed" = "token 能确定机器人，但不能确定消息应该发到哪个聊天。";
+"telegramWaiting" = "在你常用的 Telegram 客户端或网页版中，搜索上方用户名。进入它的聊天，发送 /start（或点 Start），再回这里点检查绑定。";
+"telegramNotFound" = "还没收到新的 /start。请在验证 token 后发给这个机器人，再点检查绑定。";
 "telegramConfirmed" = "已向你的聊天发送消息。如果看到了，点击保存。";
 "telegramInvalidToken" = "这个 token 无效。请检查后重新粘贴。";
 "telegramConnectionFailed" = "未能连接 Telegram。请检查网络后重试。";

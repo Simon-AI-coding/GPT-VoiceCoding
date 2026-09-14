@@ -24,7 +24,9 @@ import Testing
     }
 
     @Test func theDutyPanelNeverActivatesAndKeepsItsPositionAcrossSpaces() {
-        let panel = DutyPanel()
+        let name = "DutyCard-test-\(UUID().uuidString)"
+        defer { NSWindow.removeFrame(usingName: name) }
+        let panel = DutyPanel(savedFrameName: name)
         #expect(panel.styleMask.contains(.nonactivatingPanel))
         #expect(panel.collectionBehavior.contains([.canJoinAllSpaces, .fullScreenAuxiliary]))
         #expect(panel.level == .floating)
@@ -32,12 +34,54 @@ import Testing
         #expect(!panel.canBecomeKey)
         #expect(!panel.canBecomeMain)
         #expect(panel.isMovableByWindowBackground)
-        #expect(panel.frameAutosaveName == DutyPanel.autosaveName)
         let screen = NSRect(x: 100, y: 40, width: 1200, height: 760)
         let frame = DutyPanel.initialFrame(in: screen, height: 70)
         #expect(frame.width == 352)
         #expect(frame.maxX == screen.maxX - 16)
         #expect(frame.maxY == screen.maxY - 8)
+    }
+
+    @Test func firstDutyCardLayoutDoesNotBecomeASavedBottomLeftPosition() throws {
+        let name = "DutyCard-test-\(UUID().uuidString)"
+        defer { NSWindow.removeFrame(usingName: name) }
+        let panel = DutyPanel(savedFrameName: name)
+        let screen = try #require(NSScreen.main).visibleFrame
+        // Hosting content can resize the hidden panel before Duty becomes visible.
+        var measured = panel.frame
+        measured.origin.y += measured.height - 70
+        measured.size.height = 70
+        panel.setFrame(measured, display: false)
+        panel.place(in: screen)
+        #expect(panel.frame.maxX == screen.maxX - 16)
+        #expect(panel.frame.maxY == screen.maxY - 8)
+        #expect(panel.frameAutosaveName == name)
+    }
+
+    @Test func dutyCardKeepsTheUsersPositionOnReshowAndRelaunch() throws {
+        let name = "DutyCard-test-\(UUID().uuidString)"
+        defer { NSWindow.removeFrame(usingName: name) }
+        let screen = try #require(NSScreen.main).visibleFrame
+        let moved = NSRect(x: screen.minX + 80, y: screen.minY + 100, width: 352, height: 70)
+        do {
+            let panel = DutyPanel(savedFrameName: name)
+            panel.place(in: screen)
+            panel.setFrame(moved, display: false)
+            panel.place(in: screen)
+            #expect(panel.frame == moved)
+            panel.saveFrame(usingName: name)
+            panel.setFrameAutosaveName("")
+        }
+        let saved = try #require(UserDefaults.standard.string(forKey: "NSWindow Frame \(name)"))
+        // Use native restoration as the oracle: AppKit can remap coordinates across displays.
+        let native = DutyPanel(savedFrameName: name)
+        let measured = NSRect(x: 0, y: 0, width: 352, height: 90)
+        native.setFrame(measured, display: false)
+        #expect(native.setFrameUsingName(name))
+        let relaunched = DutyPanel(savedFrameName: name)
+        relaunched.setFrame(measured, display: false)
+        #expect(UserDefaults.standard.string(forKey: "NSWindow Frame \(name)") == saved)
+        relaunched.place(in: screen)
+        #expect(relaunched.frame == native.frame)
     }
 
     @Test func allShellWordsHaveBothLanguagesAndThePreferenceAppliesOnRelaunch() throws {

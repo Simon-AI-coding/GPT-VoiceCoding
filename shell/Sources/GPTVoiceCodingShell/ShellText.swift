@@ -91,8 +91,9 @@ enum Copy: String, CaseIterable {
         continueSetup, skipSetup, placedTitle, claudePlaced, claudeNotPlaced, codexPlaced,
         codexNotPlaced, placementFailed, placementReversible, folderAccessNotice,
         setupAgentBody, setupTelegramBody, testCallTitle, testCallBody, placeTestCall, doneSetup
-    case telegramToken, telegramTokenHelp, telegramValidate, telegramOpen, telegramNamed,
-        telegramWaiting, telegramConfirmed, telegramInvalidToken, telegramConnectionFailed,
+    case telegramToken, telegramTokenHelp, telegramValidate, telegramCheck, telegramNamed,
+        telegramWaiting, telegramNotFound, telegramConfirmed, telegramInvalidToken,
+        telegramConnectionFailed,
         telegramDestinationFailed, telegramMaskedNote, telegramChange, telegramUnbind,
         telegramEngineDown, save, cancel
 }

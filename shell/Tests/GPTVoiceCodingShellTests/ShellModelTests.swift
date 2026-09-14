@@ -3,6 +3,7 @@ import Foundation
 import ObjectiveC
 import Observation
 import ShellTestSupport
+import SwiftUI
 import Testing
 
 @testable import GPTVoiceCodingShell
@@ -10,6 +11,50 @@ import Testing
 
 @MainActor
 @Suite struct ShellModelTests {
+    @Test(arguments: [false, true])
+    func homeRendersWithinTheDesignWidthInBothLanguages(populated: Bool) async throws {
+        for language in ["en", "zh-Hans"] {
+            let fixture = try TelegramCredentialFixture()
+            let preferences = testPreferences()
+            preferences.set(language, forKey: ShellText.preferenceKey)
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(),
+                panel: ControlPanel(client: RenderControlPlane(populated: populated)),
+                preferences: preferences)
+            await model.readConfiguration {
+                ShellConfiguration([
+                    "model": .string("gpt-5.6-terra"), "effort": .string("low"),
+                    "telegram_bound": .bool(populated),
+                ])
+            }
+            await model.panel.refresh()
+            await model.panel.refreshRoster()
+            model.open(.home)
+            for scheme in [ColorScheme.light, .dark] {
+                let view = NSHostingView(
+                    rootView: ControlPanelView(shell: model)
+                        .frame(width: Phosphor.windowWidth)
+                        .environment(\.colorScheme, scheme))
+                view.frame.size = view.fittingSize
+                view.layoutSubtreeIfNeeded()
+                await Task.yield()
+                view.frame.size = view.fittingSize
+                view.layoutSubtreeIfNeeded()
+                #expect(view.frame.width == Phosphor.windowWidth)
+                #expect(view.frame.height > 0)
+                if let directory = ProcessInfo.processInfo.environment["GPTVC_RENDER_OUTPUT"] {
+                    let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                    try png.write(
+                        to: URL(fileURLWithPath: directory)
+                            .appendingPathComponent("home-\(language)-\(scheme)-\(populated).png"))
+                }
+            }
+            await model.stopEngine()
+        }
+    }
+
     @Test func anUnknownAutoHangupIsNotOffAndDiagnosticsOwnsTheCheckReturn() async throws {
         let fixture = try TelegramCredentialFixture()
         let (_, model) = makeShell(
@@ -852,6 +897,32 @@ import Testing
         #expect(state == .missing)
     }
 
+}
+
+private struct RenderControlPlane: ControlPlaneDialing {
+    let populated: Bool
+    func ask(_ request: Request) async throws -> Reply {
+        let names = ["atlas · auth flow", "harbor · checkout", "lumen · docs site"]
+        let rows: [[String: Any]] =
+            populated
+            ? names.map { name in
+                [
+                    "target": ["agent": "codex", "session_id": name], "name": name,
+                    "state": "decision", "state_word": "waiting for your decision",
+                    "newest": "Should the old sessions keep working after the key rotates?",
+                ]
+            } : []
+        let data: [String: Any] = [
+            "switches": ["duty": true, "voice": true, "message": true],
+            "sessions": rows.map { _ in ["lifecycle": "live", "brief_state": "decision"] },
+            "roster": ["rows": rows],
+        ]
+        return try Reply.of(
+            JSONSerialization.data(withJSONObject: [
+                "ok": true, "action": request.action.rawValue,
+                "protocol": controlPlaneProtocolVersion, "data": data,
+            ]))
+    }
 }
 
 @MainActor

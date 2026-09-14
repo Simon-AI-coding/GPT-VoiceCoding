@@ -27,6 +27,10 @@ enum Phosphor {
     static let accentInk = colour(light: 0xffffff, dark: 0x000000)
     static let danger = colour(light: 0xc7362b, dark: 0xf0776a)
     static let rule = colour(light: 0x0d0d0d, dark: 0xffffff).opacity(0.14)
+    static let ruleStrong = colour(light: 0x0d0d0d, dark: 0xffffff).opacity(0.25)
+    static let switchWidth: CGFloat = 30
+    static let switchHeight: CGFloat = 16
+    static let switchKnob: CGFloat = 12
     static let body = Font.system(size: 13, design: .monospaced)
     static let small = Font.system(size: 12, design: .monospaced)
     static let title = Font.system(size: 22, weight: .medium, design: .monospaced)
@@ -84,22 +88,92 @@ struct AgentMark: View {
 
 struct ConsoleButton: ButtonStyle {
     var prominent = false
+    var destructive = false
+    @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(Phosphor.body)
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .foregroundStyle(prominent ? Phosphor.accentInk : Phosphor.primary)
+            .foregroundStyle(
+                !isEnabled
+                    ? Phosphor.muted
+                    : destructive
+                        ? Phosphor.danger
+                        : prominent ? Phosphor.accentInk : Phosphor.primary
+            )
             .background(
-                prominent ? Phosphor.accent : Phosphor.raised,
+                prominent && isEnabled ? Phosphor.accent : Phosphor.raised,
                 in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
             )
-            .overlay(RoundedRectangle(cornerRadius: Phosphor.controlRadius).stroke(Phosphor.rule))
+            .overlay(
+                RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                    .stroke(destructive ? Phosphor.danger : Phosphor.ruleStrong)
+            )
             .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+struct ConsoleToggle: ToggleStyle {
+    var compact = false
+    var hidesLabel = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                if !hidesLabel {
+                    Text("›")
+                        .foregroundStyle(
+                            configuration.isOn && isEnabled ? Phosphor.accent : Phosphor.muted)
+                    configuration.label
+                    if !compact { Spacer(minLength: 8) }
+                }
+                Capsule()
+                    .fill(configuration.isOn && isEnabled ? Phosphor.accent : Color.clear)
+                    .overlay(Capsule().stroke(isEnabled ? Phosphor.ruleStrong : Phosphor.rule))
+                    .overlay(alignment: configuration.isOn && isEnabled ? .trailing : .leading) {
+                        Circle()
+                            .fill(
+                                configuration.isOn && isEnabled
+                                    ? Phosphor.accentInk : Phosphor.tertiary
+                            )
+                            .frame(width: Phosphor.switchKnob, height: Phosphor.switchKnob)
+                            .padding(2)
+                    }
+                    .frame(width: Phosphor.switchWidth, height: Phosphor.switchHeight)
+            }
+            .frame(minHeight: 24)
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch)
+        }
+    }
+}
+
+struct ConsoleRule: View {
+    var body: some View {
+        Line().stroke(Phosphor.rule, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            .frame(height: 1)
+    }
+
+    private struct Line: Shape {
+        func path(in rect: CGRect) -> Path {
+            Path { path in
+                path.move(to: CGPoint(x: rect.minX, y: rect.midY))
+                path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            }
+        }
     }
 }
 
 extension View {
     func consoleCard() -> some View {
         padding(Phosphor.padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(Phosphor.card, in: RoundedRectangle(cornerRadius: Phosphor.cardRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: Phosphor.cardRadius)

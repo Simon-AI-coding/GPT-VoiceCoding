@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -240,6 +242,28 @@ def assemble(plan: BuildPlan) -> None:
     resources = built.parent / f"{inputs.SHELL_PRODUCT}_{inputs.SHELL_PRODUCT}.bundle"
     shutil.copytree(resources, plan.app / inputs.RESOURCES / resources.name)
     identity = plistlib.loads(inputs.INFO_PLIST.read_bytes())
+    with tempfile.TemporaryDirectory() as temporary:
+        iconset = Path(temporary) / "app.iconset"
+        run(
+            [
+                "swift",
+                str(inputs.REPO_ROOT / "scripts/render-app-icon.swift"),
+                str(resources / "app-icon.svg"),
+                str(iconset),
+            ],
+            why="rendering the app icon",
+        )
+        run(
+            [
+                "iconutil",
+                "--convert",
+                "icns",
+                str(iconset),
+                "--output",
+                str(plan.app / inputs.RESOURCES / identity["CFBundleIconFile"]),
+            ],
+            why="packaging the app icon",
+        )
     identity["CFBundleVersion"] = run(
         ["git", "rev-parse", "--short", "HEAD"],
         why="reading the source revision",
@@ -343,19 +367,42 @@ def verify_self_contained(app: Path, *, source_root: Path = inputs.REPO_ROOT) ->
 
 def build(plan: BuildPlan) -> Path:
     """One command's worth of work, in the only order that is correct."""
-    assemble(plan)
+    progress("Building the app", lambda: assemble(plan))
     if not plan.without_engine:
-        extract(fetch(plan.interpreter), into=plan.engine_root)
-        install(plan)
+        progress(
+            "Preparing the bundled Python runtime",
+            lambda: extract(fetch(plan.interpreter), into=plan.engine_root),
+        )
+        progress("Installing dependencies", lambda: install(plan))
         remove_install_provenance(plan)
         relocate_console_scripts(plan)
-        precompile(plan)
-    verify_self_contained(plan.app)
-    sign(plan)
-    verify(plan)
+        progress("Preparing the engine", lambda: precompile(plan))
+    progress("Checking the app contents", lambda: verify_self_contained(plan.app))
+    progress("Signing the app", lambda: sign(plan))
+    progress("Verifying the signature", lambda: verify(plan))
     if not plan.without_engine:
-        verify_relocatable(plan)
+        progress("Checking the installed layout", lambda: verify_relocatable(plan))
     return plan.app
+
+
+def progress(label: str, action, *, interval: float = 5.0) -> None:
+    """Keep a long build visibly alive without claiming an estimated percentage."""
+    started = time.monotonic()
+    stopped = threading.Event()
+
+    def report() -> None:
+        while not stopped.wait(interval):
+            print(f"{label}… {int(time.monotonic() - started)}s elapsed", flush=True)
+
+    print(f"{label}…", flush=True)
+    reporter = threading.Thread(target=report, daemon=True)
+    reporter.start()
+    try:
+        action()
+    finally:
+        stopped.set()
+        reporter.join()
+    print(f"{label}: done", flush=True)
 
 
 # --- regenerating the lock --------------------------------------------------

@@ -180,7 +180,8 @@ class TestAssembly:
         reply = asyncio.run(scenario())
 
         assert reply.ok
-        assert reply.data["switches"]["duty"] is False
+        for name in ("duty", "voice", "message"):
+            assert reply.data["switches"][name] is True
 
     def test_a_history_page_the_wire_cannot_carry_refuses_to_assemble(self, home: Path) -> None:
         """The dial and the ceiling meet at composition, and disagree here (#171).
@@ -356,7 +357,7 @@ class TestTruthAcrossARestart:
             await running(
                 engine,
                 lambda: ask(
-                    Request(action=Action.SWITCH, payload={"name": "duty", "on": True}),
+                    Request(action=Action.SWITCH, payload={"name": "duty", "on": False}),
                     path=engine.socket_path,
                 ),
             )
@@ -369,8 +370,8 @@ class TestTruthAcrossARestart:
                 restarted, lambda: ask(Request(action=Action.STATUS), path=restarted.socket_path)
             )
 
-        assert json.loads((home / "state.json").read_text())["switches"]["duty"] is True
-        assert asyncio.run(read()).data["switches"]["duty"] is True
+        assert json.loads((home / "state.json").read_text())["switches"]["duty"] is False
+        assert asyncio.run(read()).data["switches"]["duty"] is False
 
 
 #: The cadence these tests drive a loop at when that loop is the thing under test.

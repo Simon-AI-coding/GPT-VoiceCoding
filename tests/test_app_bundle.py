@@ -31,6 +31,23 @@ from gpt_voicecoding.seams.control_plane import PROTOCOL_VERSION, Action
 MACH_O = b"\xcf\xfa\xed\xfe"
 
 
+def test_build_progress_reports_start_before_work_and_completion_after(capsys):
+    def work():
+        assert "Building the app…" in capsys.readouterr().out
+
+    bundle_run.progress("Building the app", work)
+    assert "Building the app: done" in capsys.readouterr().out
+
+
+def test_build_progress_does_not_report_failed_work_as_done(capsys):
+    def work():
+        raise bundle_run.BuildFailed("compiler failed")
+
+    with pytest.raises(bundle_run.BuildFailed, match="compiler failed"):
+        bundle_run.progress("Building the app", work)
+    assert ": done" not in capsys.readouterr().out
+
+
 def test_shell_resources_and_source_revision_travel_in_the_bundle(tmp_path, monkeypatch):
     built = tmp_path / "products"
     built.mkdir()

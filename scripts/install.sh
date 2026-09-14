@@ -17,6 +17,7 @@ curl -fsIL --connect-timeout 10 --max-time 30 https://pypi.org/simple/ >/dev/nul
     fail 'Allow HTTPS access to PyPI, then run this command again.'
 
 repository=https://github.com/okqixiaobao727-design/GPT-VoiceCoding
+printf '%s\n' 'Preparing the source checkout…'
 product=${repository##*/}
 source_directory="$HOME/Library/Application Support/$product/source"
 mkdir -p "$(dirname "$source_directory")"
@@ -45,6 +46,7 @@ fi
 
 # Move the old bundle aside; ditto must not merge obsolete files into a new build.
 staging=$(mktemp -d "/Applications/.$product.XXXXXX")
+printf '%s\n' 'Installing the app in Applications…'
 ditto "$built_app" "$staging/$bundle_name.app"
 if [ -e "$installed_app" ]; then
     mv "$installed_app" "$staging/previous.app"
@@ -55,4 +57,5 @@ if ! mv "$staging/$bundle_name.app" "$installed_app"; then
 fi
 # This directory is created by mktemp above and holds only this install's bundles.
 rm -rf "$staging"
+printf '%s\n' 'Installation complete. Opening GPT-VoiceCoding…'
 open "$installed_app"

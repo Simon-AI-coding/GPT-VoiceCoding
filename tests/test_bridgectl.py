@@ -140,16 +140,16 @@ class TestAskingARunningEngine:
         code = main(["--config", str(engine_at), "status"])
 
         assert code == 0
-        assert "duty off" in capsys.readouterr().out
+        assert "duty on" in capsys.readouterr().out
 
     def test_a_switch_is_flipped_and_the_previous_state_reported(
         self, engine_at: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert main(["--config", str(engine_at), "switch", "duty", "on"]) == 0
+        assert main(["--config", str(engine_at), "switch", "duty", "off"]) == 0
 
-        assert "duty is on (was off)" in capsys.readouterr().out
+        assert "duty is off (was on)" in capsys.readouterr().out
         assert main(["--config", str(engine_at), "status"]) == 0
-        assert "duty on" in capsys.readouterr().out
+        assert "duty off" in capsys.readouterr().out
 
     def test_the_live_toggle_is_one_command(
         self, engine_at: Path, capsys: pytest.CaptureFixture[str]

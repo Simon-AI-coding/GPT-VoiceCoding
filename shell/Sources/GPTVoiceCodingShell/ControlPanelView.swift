@@ -27,7 +27,7 @@ struct ControlPanelView: View {
             }
             if shell.confirmation != nil { ConfirmationRow(shell: shell) }
         }
-        .padding(Phosphor.padding).padding(.top, 24)
+        .padding(Phosphor.padding).padding(.top, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(Phosphor.body).foregroundStyle(Phosphor.primary)
         .background(Phosphor.window).tint(Phosphor.accent)
@@ -42,10 +42,11 @@ struct ControlPanelView: View {
 
 private struct HomeView: View {
     @Bindable var shell: ShellModel
+    @State private var rosterContentHeight: CGFloat = 0
     private var panel: ControlPanel { shell.panel }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Toggle(
                 shell.text(.duty),
                 isOn: Binding(
@@ -53,36 +54,43 @@ private struct HomeView: View {
                     set: { on in
                         Task { await shell.setDuty(on) }
                     })
-            ).toggleStyle(.switch).disabled(!panel.engineReachable || panel.busy)
+            ).toggleStyle(ConsoleToggle()).disabled(!panel.engineReachable || panel.busy)
+                .padding(.vertical, 4)
+            ConsoleRule()
             if panel.engineReachable {
                 callBlock
                 telegram
                 agent
                 HStack(alignment: .top, spacing: 12) {
-                    count(panel.counts.sessions, .sessions)
-                    count(panel.counts.waiting, .waiting)
-                    count(panel.counts.finished, .finished)
-                    count(panel.counts.childProcesses, .children)
+                    count(panel.counts.sessions, .sessions, colour: Phosphor.primary)
+                    count(panel.counts.waiting, .waiting, colour: Phosphor.accent)
+                    count(panel.counts.finished, .finished, colour: Phosphor.secondary)
+                    count(panel.counts.childProcesses, .children, colour: Phosphor.secondary)
                 }
+                ConsoleRule()
                 roster
             } else {
                 EngineDownView(shell: shell)
             }
+            ConsoleRule()
             HStack {
                 Button(shell.text(.settings)) { shell.open(.settings(.voice)) }
+                    .buttonStyle(.plain).foregroundStyle(Phosphor.accent)
                 Spacer()
                 Button(shell.text(.quit)) { shell.quit() }
+                    .buttonStyle(ConsoleButton(destructive: true))
             }
         }
     }
 
     private var callBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PhaseLine(shell: shell)
             HStack(spacing: 12) {
-                CallButton(shell: shell)
+                PhaseLine(shell: shell)
+                Spacer(minLength: 8)
                 Toggle(shell.text(.voice), isOn: switchBinding("voice"))
-                    .toggleStyle(.switch).disabled(panel.busy)
+                    .toggleStyle(ConsoleToggle(compact: true)).disabled(panel.busy)
+                CallButton(shell: shell)
             }
             if !switchBinding("voice").wrappedValue {
                 Text(shell.text(.voiceOff)).font(Phosphor.prose).foregroundStyle(Phosphor.secondary)
@@ -94,34 +102,45 @@ private struct HomeView: View {
                 Text(shell.text(.callID, id)).font(Phosphor.label).foregroundStyle(Phosphor.muted)
                     .textSelection(.enabled)
             }
-        }.consoleCard()
+            ConsoleRule()
+        }
     }
 
     private var telegram: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle(
-                shell.text(shell.telegramConnected ? .telegramOn : .telegramOff),
-                isOn: Binding(
-                    get: { shell.telegramConnected },
-                    set: { on in
-                        Task { await panel.flip("message", on: on) }
-                    })
-            ).toggleStyle(.switch)
-                .disabled(shell.configuration?.telegramBound != true || panel.busy)
-            if shell.configuration?.telegramBound != true {
-                Button(shell.text(.connectSettings)) { shell.open(.settings(.telegram)) }
+            let bound = shell.configuration?.telegramBound == true
+            HStack(spacing: 10) {
+                if !bound {
+                    Text("› " + shell.text(.telegramOff)).foregroundStyle(Phosphor.muted)
+                    Spacer(minLength: 4)
+                    Button(shell.text(.connectSettings)) { shell.open(.settings(.telegram)) }
+                        .buttonStyle(.plain).foregroundStyle(Phosphor.accent)
+                }
+                Toggle(
+                    shell.text(shell.telegramConnected ? .telegramOn : .telegramOff),
+                    isOn: Binding(
+                        get: { shell.telegramConnected },
+                        set: { on in
+                            Task { await panel.flip("message", on: on) }
+                        })
+                ).toggleStyle(ConsoleToggle(hidesLabel: !bound))
+                    .disabled(!bound || panel.busy)
             }
+            ConsoleRule()
         }
     }
 
     private var agent: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(shell.text(.agentLabel)).font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
+            Text(shell.text(.agentLabel).uppercased()).font(Phosphor.label)
+                .tracking(0.88).foregroundStyle(Phosphor.tertiary)
             let reading = panel.status?.callAgent
-            Text(reading?.model ?? shell.configuration?.model ?? shell.text(.notChosen))
-                .foregroundStyle(Phosphor.bright).textSelection(.enabled)
-            if let effort = reading?.effort ?? shell.configuration?.effort {
-                Text(effort).foregroundStyle(Phosphor.secondary)
+            HStack(spacing: 6) {
+                Text(reading?.model ?? shell.configuration?.model ?? shell.text(.notChosen))
+                    .foregroundStyle(Phosphor.bright).textSelection(.enabled)
+                if let effort = reading?.effort ?? shell.configuration?.effort {
+                    Text("· " + effort).foregroundStyle(Phosphor.secondary)
+                }
             }
             if let reading {
                 if let percent = reading.contextPercent { Text(shell.text(.context, percent)) }
@@ -147,9 +166,9 @@ private struct HomeView: View {
         .font(Phosphor.label).foregroundStyle(Phosphor.secondary)
     }
 
-    private func count(_ number: Int, _ label: Copy) -> some View {
+    private func count(_ number: Int, _ label: Copy, colour: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(number, format: .number).font(Phosphor.title).foregroundStyle(Phosphor.bright)
+            Text(number, format: .number).font(Phosphor.title).foregroundStyle(colour)
             Text(shell.text(label)).font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -157,12 +176,17 @@ private struct HomeView: View {
 
     private var roster: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(shell.text(.rosterTitle)).font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
             if panel.displayedRoster.isEmpty {
-                Text(shell.text(.emptyTitle)).font(Phosphor.headline)
-                Text(shell.text(.emptyBody)).font(Phosphor.prose).foregroundStyle(
-                    Phosphor.secondary)
+                VStack(spacing: 6) {
+                    Text("○").font(Phosphor.title).foregroundStyle(Phosphor.muted)
+                    Text(shell.text(.emptyTitle)).font(Phosphor.headline)
+                    Text(shell.text(.emptyBody)).font(Phosphor.prose).foregroundStyle(
+                        Phosphor.tertiary)
+                }.multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity).padding(.vertical, 26)
             } else {
+                Text(shell.text(.rosterTitle).uppercased()).font(Phosphor.label)
+                    .tracking(0.88).foregroundStyle(Phosphor.tertiary)
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(panel.displayedRoster) { row in
@@ -172,10 +196,15 @@ private struct HomeView: View {
                                 SessionRowView(row: row, text: shell.text)
                                     .padding(.vertical, 6)
                             }.buttonStyle(.plain)
-                            Divider().overlay(Phosphor.rule)
+                            ConsoleRule()
                         }
                     }
-                }.frame(idealHeight: Phosphor.rosterHeight, maxHeight: Phosphor.rosterHeight)
+                    .onGeometryChange(for: CGFloat.self) {
+                        $0.size.height
+                    } action: {
+                        rosterContentHeight = $0
+                    }
+                }.frame(height: min(rosterContentHeight, Phosphor.rosterHeight))
                     .onHover { panel.setPointerInRoster($0) }
             }
         }
@@ -293,8 +322,12 @@ struct CallButton: View {
                         shell.panel.phase == .onCall || shell.panel.phase == .ending
                             ? .hangUp : .call))
             }
-        }.buttonStyle(ConsoleButton(prominent: true))
-            .disabled(shell.panel.phase.resolving || shell.panel.busy)
+        }.buttonStyle(
+            ConsoleButton(
+                prominent: shell.panel.phase != .onCall,
+                destructive: shell.panel.phase == .onCall)
+        )
+        .disabled(shell.panel.phase.resolving || shell.panel.busy)
     }
 }
 

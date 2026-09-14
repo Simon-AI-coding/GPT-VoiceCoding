@@ -63,7 +63,7 @@ from gpt_voicecoding.core.relay_queue import RelayQueue
 from gpt_voicecoding.core.router import Classification, TextGrammar
 from gpt_voicecoding.core.sessions import SessionRegistry
 from gpt_voicecoding.core.state import BridgeState
-from gpt_voicecoding.core.switches import Switchboard
+from gpt_voicecoding.core.switches import Switchboard, SwitchName
 from gpt_voicecoding.core.turns import DelegatedAnswer
 from gpt_voicecoding.core.verification import SeamLoad
 from gpt_voicecoding.seams.agent import AgentAdapter, ProgressCapture
@@ -194,7 +194,9 @@ class Engine:
             relays=RelayQueue(),
             store=StateStore(config.state_path),
         )
-        state.restore()
+        if not state.restore():
+            for name in (SwitchName.DUTY, SwitchName.VOICE, SwitchName.MESSAGE):
+                state.switches.flip(name, True)
 
         # The hub needs a control handler, and the control plane needs the hub.
         # The knot is tied with one late binding rather than by giving either of

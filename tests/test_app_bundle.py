@@ -112,6 +112,28 @@ class TestEveryConsoleScriptRelocates:
         linked.symlink_to(moved / "bin/future-dependency-script")
         subprocess.run([linked], check=True)
 
+    def test_pip_safe_shebang_moves_with_an_engine_built_under_a_spaced_path(
+        self, tmp_path: Path
+    ) -> None:
+        engine = tmp_path / "built engine"
+        bin_directory = engine / "bin"
+        bin_directory.mkdir(parents=True)
+        python = bin_directory / "python3"
+        python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        python.chmod(0o755)
+        script = bin_directory / "future-dependency-script"
+        script.write_text(
+            f"#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\nraise SystemExit(0)\n"
+        )
+        script.chmod(0o755)
+
+        console_script.relocate_all(bin_directory)
+
+        assert str(engine) not in script.read_text()
+        moved = tmp_path / "moved engine"
+        engine.rename(moved)
+        subprocess.run([moved / "bin" / script.name], check=True)
+
     def test_non_python_entries_are_left_as_installed(self, tmp_path: Path) -> None:
         bin_directory = tmp_path / "engine/bin"
         bin_directory.mkdir(parents=True)

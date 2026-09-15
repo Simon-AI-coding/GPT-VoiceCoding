@@ -1,5 +1,8 @@
 import AppKit
 import Foundation
+import Observation
+import ShellTestSupport
+import SwiftUI
 import Testing
 
 @testable import GPTVoiceCodingShell
@@ -20,16 +23,16 @@ import Testing
     @Test func controlWindowUsesLampScreenAndKeepsItsTopWhenContentChanges() {
         let screen = NSRect(x: -1440, y: 100, width: 1440, height: 900)
         let lamp = NSRect(x: -100, y: 900, width: 72, height: 26)
-        let initial = DesktopWindows.controlFrame(
+        let initial = ControlWindow.frame(
             NSRect(x: 0, y: 0, width: 480, height: 350),
             height: 350, anchor: lamp, screen: screen)
         #expect(initial.maxX == lamp.maxX)
         #expect(initial.maxY == lamp.minY - Phosphor.bubbleGap)
         #expect(screen.contains(initial))
-        let taller = DesktopWindows.controlFrame(initial, height: 600, anchor: nil, screen: screen)
+        let taller = ControlWindow.frame(initial, height: 600, anchor: nil, screen: screen)
         #expect(taller.maxY == initial.maxY)
         #expect(taller.minX == initial.minX)
-        let oversized = DesktopWindows.controlFrame(
+        let oversized = ControlWindow.frame(
             initial, height: 1500, anchor: lamp, screen: screen)
         #expect(screen.contains(oversized))
         #expect(oversized.height == screen.height)
@@ -40,13 +43,34 @@ import Testing
             .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
         ]
         let contentHeight: CGFloat = 350
-        let frameHeight = DesktopWindows.controlWindowFrameHeight(
+        let frameHeight = ControlWindow.frameHeight(
             contentHeight: contentHeight, styleMask: style)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: frameHeight),
             styleMask: style, backing: .buffered, defer: true)
 
         #expect(window.contentLayoutRect.height == contentHeight)
+    }
+
+    @Test func controlWindowFollowsContentThatGrowsAndShrinksWhileShown() async {
+        let content = GrowingContent()
+        let control = ControlWindow(content: GrowingView(content: content))
+        defer { control.dismiss() }
+        control.present(anchor: nil, screen: nil)
+        #expect(control.window.contentLayoutRect.height == 100)
+        content.rows = 6
+        #expect(await waitUntil { control.window.contentLayoutRect.height == 300 })
+        content.rows = 3
+        #expect(await waitUntil { control.window.contentLayoutRect.height == 150 })
+    }
+
+    @Test func controlWindowOpensAtTheHeightItsContentReachedWhileHidden() {
+        let content = GrowingContent()
+        let control = ControlWindow(content: GrowingView(content: content))
+        defer { control.dismiss() }
+        content.rows = 5
+        control.present(anchor: nil, screen: nil)
+        #expect(control.window.contentLayoutRect.height == 250)
     }
 
     @Test func aStaleLoginItemIsPresentedAsPlacedInsteadOfFailed() {
@@ -213,5 +237,19 @@ import Testing
         #expect(chinese(.ready) == "就绪")
         #expect(ShellText.preferredLanguage(saved: nil, system: ["zh-Hant-NZ"]) == "zh-Hans")
         #expect(ShellText.preferredLanguage(saved: "en", system: ["zh-Hans"]) == "en")
+    }
+}
+
+/// Content whose natural height the test changes: 50 points a row.
+@MainActor @Observable private final class GrowingContent {
+    var rows = 2
+}
+
+private struct GrowingView: View {
+    let content: GrowingContent
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<content.rows, id: \.self) { _ in Color.clear.frame(height: 50) }
+        }
     }
 }

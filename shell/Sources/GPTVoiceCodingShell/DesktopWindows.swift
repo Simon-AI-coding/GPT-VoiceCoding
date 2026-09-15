@@ -58,12 +58,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
     private let actions = DutyPanel()
     private let bubble = DutyPanel()
     private var presentedBubble: LampBubble?
-    private let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: Phosphor.windowWidth, height: 1),
-        styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-        backing: .buffered, defer: true)
-    private var contentHost: NSHostingView<MeasuredContent<ControlPanelView>>?
-    private weak var contentScroll: NSScrollView?
+    private let control: ControlWindow
     private var lastWindowRequest = 0
     private var localClick: Any?
     private var globalClick: Any?
@@ -71,36 +66,9 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
     init(shell: ShellModel, savedFrameName: String = DutyPanel.autosaveName) {
         self.shell = shell
         self.card = DutyPanel(savedFrameName: savedFrameName)
+        self.control = ControlWindow(content: ControlPanelView(shell: shell))
         super.init()
-        window.title =
-            Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? ""
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentMinSize.width = Phosphor.windowWidth
-        window.standardWindowButton(.zoomButton)?.isEnabled = false
-        let host = NSHostingView(
-            rootView:
-                MeasuredContent(changed: { [weak self] height in self?.resizeWindow(height: height)
-                }) {
-                    ControlPanelView(shell: shell)
-                })
-        host.sizingOptions = [.intrinsicContentSize]
-        host.frame.size.width = Phosphor.windowWidth
-        host.layoutSubtreeIfNeeded()
-        let initialHeight = host.fittingSize.height
-        host.autoresizingMask = [.width]
-        contentHost = host
-        let scroll = NSScrollView(frame: window.contentView!.bounds)
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
-        scroll.documentView = host
-        window.contentView = scroll
-        contentScroll = scroll
-        resizeWindow(height: initialHeight)
+        control.onClose = { [weak self] in self?.shell.closeWindow() }
         card.contentView = LampHostingView(rootView: DutyCardView(shell: shell))
         card.delegate = self
         actions.isMovableByWindowBackground = false
@@ -131,36 +99,25 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The windows this object owns, for its tests; nothing finds them through `NSApp.windows`.
+    var surfaces: [NSWindow] { [card, actions, bubble, control.window] }
+
     private func synchronize() {
-        for surface in [window, card, actions, bubble] {
+        for surface in surfaces {
             surface.appearance = shell.selectedAppearance.native
         }
 
-        // Preparation can replace the initial Home page with onboarding after this window exists.
-        // Re-read the hosting view's natural height whenever observed shell state changes.
-        contentHost?.layoutSubtreeIfNeeded()
-        if let height = contentHost?.fittingSize.height { resizeWindow(height: height) }
-
         if shell.windowOpen {
-            if !window.isVisible {
-                NSApp.setActivationPolicy(.regular)
-                if !shell.windowRequestedFromLamp { window.center() }
-            }
+            if !control.isVisible { NSApp.setActivationPolicy(.regular) }
             if shell.windowRequest != lastWindowRequest {
                 lastWindowRequest = shell.windowRequest
-                scrollToTop()
-                if shell.windowRequestedFromLamp, shell.cardVisible, let screen = card.screen {
-                    window.setFrame(
-                        Self.controlFrame(
-                            window.frame, height: window.frame.height,
-                            anchor: card.frame, screen: screen.visibleFrame), display: true)
-                }
-                if window.isMiniaturized { window.deminiaturize(nil) }
-                window.makeKeyAndOrderFront(nil)
+                let fromLamp = shell.windowRequestedFromLamp && shell.cardVisible
+                control.present(
+                    anchor: fromLamp ? card.frame : nil, screen: card.screen?.visibleFrame)
                 NSApp.activate(ignoringOtherApps: true)
             }
         } else {
-            window.orderOut(nil)
+            control.dismiss()
             NSApp.setActivationPolicy(.accessory)
         }
         if shell.cardVisible {
@@ -177,29 +134,6 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             shell.dismissLampActions()
             stopObservingClicks()
         }
-    }
-
-    private func resizeWindow(height: CGFloat) {
-        // The preference's initial zero is not a content measurement.
-        guard height > 0 else { return }
-        let contentHeight = ceil(height)
-        contentHost?.frame.size.height = contentHeight
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        let frame = Self.controlFrame(
-            window.frame,
-            height: Self.controlWindowFrameHeight(
-                contentHeight: contentHeight, styleMask: window.styleMask),
-            anchor: nil, screen: screen.visibleFrame)
-        if frame != window.frame { window.setFrame(frame, display: true) }
-    }
-
-    private func scrollToTop() {
-        guard let scroll = contentScroll, let document = scroll.documentView else { return }
-        let y =
-            document.isFlipped
-            ? 0 : max(0, document.bounds.height - scroll.contentView.bounds.height)
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
-        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private func synchronizeAttachments() {
@@ -285,42 +219,6 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         return inBubble || inCrossing
     }
 
-    static func controlFrame(_ current: NSRect, height: CGFloat, anchor: NSRect?, screen: NSRect)
-        -> NSRect
-    {
-        let size = NSSize(
-            width: min(current.width, screen.width), height: min(ceil(height), screen.height))
-        let right = anchor?.maxX ?? current.maxX
-        let top = anchor.map { $0.minY - Phosphor.bubbleGap } ?? current.maxY
-        return NSRect(
-            x: min(max(right - size.width, screen.minX), screen.maxX - size.width),
-            y: min(max(top - size.height, screen.minY), screen.maxY - size.height),
-            width: size.width, height: size.height)
-    }
-
-    static func controlWindowFrameHeight(
-        contentHeight: CGFloat, styleMask: NSWindow.StyleMask
-    ) -> CGFloat {
-        let contentRect = NSRect(x: 0, y: 0, width: 1, height: ceil(contentHeight))
-        return NSWindow.frameRect(
-            forContentRect: contentRect, styleMask: styleMask.subtracting(.fullSizeContentView)
-        ).height
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard notification.object as? NSWindow === window,
-            let width = window.contentView?.bounds.width,
-            contentHost?.rootView.width != width
-        else { return }
-        contentHost?.rootView.width = width
-    }
-
-    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        NSSize(width: frameSize.width, height: sender.frame.height)
-    }
-
-    func windowWillClose(_ notification: Notification) { shell.closeWindow() }
-
     private func observeOutsideClicks() {
         guard localClick == nil else { return }
         let mask: NSEvent.EventTypeMask = [
@@ -359,26 +257,6 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         if let globalClick { NSEvent.removeMonitor(globalClick) }
         localClick = nil
         globalClick = nil
-    }
-}
-
-private struct ContentHeight: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-private struct MeasuredContent<Content: View>: View {
-    var width = Phosphor.windowWidth
-    let changed: (CGFloat) -> Void
-    @ViewBuilder let content: () -> Content
-    var body: some View {
-        content().frame(width: width).fixedSize(horizontal: false, vertical: true)
-            .background(
-                GeometryReader { geometry in
-                    Color.clear.preference(key: ContentHeight.self, value: geometry.size.height)
-                }
-            )
-            .onPreferenceChange(ContentHeight.self, perform: changed)
     }
 }
 

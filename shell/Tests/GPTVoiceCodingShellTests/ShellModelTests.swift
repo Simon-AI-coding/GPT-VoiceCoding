@@ -345,7 +345,6 @@ import Testing
 
     @Test func nativeLampAttachmentsKeepTheAnchorAndShareTheAppearance() async throws {
         _ = NSApplication.shared
-        let previous = Set(NSApp.windows.map(ObjectIdentifier.init))
         let frameName = "Lamp-native-test-\(UUID().uuidString)"
         let fixture = try TelegramCredentialFixture()
         let engine = LampControlPlane(waiting: 2, finished: 2)
@@ -357,7 +356,7 @@ import Testing
         model.updateLamp()
         await model.stopEngine()
         let desktop = DesktopWindows(shell: model, savedFrameName: frameName)
-        let surfaces = NSApp.windows.filter { !previous.contains(ObjectIdentifier($0)) }
+        let surfaces = desktop.surfaces
         defer {
             for surface in surfaces {
                 surface.orderOut(nil)

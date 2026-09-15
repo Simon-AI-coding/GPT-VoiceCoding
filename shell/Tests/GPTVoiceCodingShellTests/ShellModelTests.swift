@@ -374,6 +374,9 @@ import Testing
         #expect(!lamp.isKeyWindow && !lamp.isMainWindow)
         #expect(lamp.contentView?.frame.size == NSSize(width: 72, height: 26))
         #expect(lamp.contentView?.hitTest(NSPoint(x: 73, y: 10)) == nil)
+        let lampHost = try #require(lamp.contentView as? LampHostingView)
+        #expect(lampHost.cursor(at: NSPoint(x: 60, y: 13)) === NSCursor.pointingHand)
+        #expect(lampHost.cursor(at: NSPoint(x: 10, y: 13)) === NSCursor.pointingHand)
         model.toggleLampActions()
         #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 2 })
         let actions = try #require(

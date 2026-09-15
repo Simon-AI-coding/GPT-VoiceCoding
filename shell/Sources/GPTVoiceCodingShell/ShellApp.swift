@@ -42,6 +42,7 @@ final class ShellDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = DesignMark.app.image
+        BackgroundCursor.enable()
         windows = DesktopWindows(shell: shell)
     }
 

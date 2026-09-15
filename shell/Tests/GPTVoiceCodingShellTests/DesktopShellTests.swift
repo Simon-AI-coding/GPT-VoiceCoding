@@ -7,6 +7,16 @@ import Testing
 
 @MainActor
 @Suite struct DesktopShellTests {
+    @Test func backgroundCursorIsANoOpWhenThePrivateSymbolsAreGone() {
+        #expect(!BackgroundCursor.enable(resolve: { _ in nil }))
+    }
+
+    @Test func backgroundCursorResolvesItsPrivateSymbolsOnThisMacOS() {
+        let resolved = { (name: String) in dlsym(dlopen(nil, RTLD_NOW), name) != nil }
+        #expect(resolved("CGSMainConnectionID"))
+        #expect(resolved("CGSSetConnectionProperty"))
+    }
+
     @Test func controlWindowUsesLampScreenAndKeepsItsTopWhenContentChanges() {
         let screen = NSRect(x: -1440, y: 100, width: 1440, height: 900)
         let lamp = NSRect(x: -100, y: 900, width: 72, height: 26)

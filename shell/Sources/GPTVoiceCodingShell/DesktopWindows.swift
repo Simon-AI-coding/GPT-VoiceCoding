@@ -384,7 +384,7 @@ private struct MeasuredContent<Content: View>: View {
 
 /// Owns the entire plate's hit region, so a text label cannot turn dragging into selection.
 @MainActor
-private final class LampHostingView: NSHostingView<DutyCardView> {
+final class LampHostingView: NSHostingView<DutyCardView> {
     private let shell: ShellModel
     private var pointerTracking: NSTrackingArea?
     required init(rootView: DutyCardView) {
@@ -404,6 +404,11 @@ private final class LampHostingView: NSHostingView<DutyCardView> {
         addTrackingArea(tracking)
         pointerTracking = tracking
     }
+    /// Shown while the app is inactive only because of `BackgroundCursor`.
+    func cursor(at point: NSPoint) -> NSCursor {
+        let inCell = point.x < Phosphor.lampEdge + Phosphor.lampCell
+        return inCell && !shell.lampCellEnabled ? .arrow : .pointingHand
+    }
     override func mouseEntered(with event: NSEvent) {
         mouseMoved(with: event)
         shell.setLampPointer(inside: true)
@@ -412,7 +417,7 @@ private final class LampHostingView: NSHostingView<DutyCardView> {
         let point = convert(event.locationInWindow, from: nil)
         let inCell = point.x < Phosphor.lampEdge + Phosphor.lampCell
         shell.lampCellHovered = inCell
-        (inCell && !shell.lampCellEnabled ? NSCursor.arrow : .pointingHand).set()
+        cursor(at: point).set()
     }
     override func mouseExited(with event: NSEvent) {
         shell.lampCellHovered = false
@@ -440,7 +445,8 @@ private final class LampHostingView: NSHostingView<DutyCardView> {
     }
 }
 
-/// A non-intercepting native tracking region; works while its window is inactive.
+/// A non-intercepting native tracking region; works while its window is inactive
+/// only because of `BackgroundCursor`.
 private struct HandRegion: NSViewRepresentable {
     let enabled: Bool
     func makeNSView(context: Context) -> HandTrackingView { HandTrackingView() }
@@ -449,10 +455,7 @@ private struct HandRegion: NSViewRepresentable {
 
 private final class HandTrackingView: NSView {
     var enabled = true {
-        didSet {
-            window?.invalidateCursorRects(for: self)
-            if inside { setCursor() }
-        }
+        didSet { if inside { setCursor() } }
     }
     private var inside = false
     private var tracking: NSTrackingArea?
@@ -462,15 +465,10 @@ private final class HandTrackingView: NSView {
         if let tracking { removeTrackingArea(tracking) }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [
-                .activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate,
-            ], owner: self)
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
+            owner: self)
         addTrackingArea(area)
         tracking = area
-    }
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: enabled ? .pointingHand : .arrow)
     }
     private func setCursor() { (enabled ? NSCursor.pointingHand : .arrow).set() }
     override func mouseEntered(with event: NSEvent) {
@@ -478,7 +476,6 @@ private final class HandTrackingView: NSView {
         setCursor()
     }
     override func mouseMoved(with event: NSEvent) { setCursor() }
-    override func cursorUpdate(with event: NSEvent) { setCursor() }
     override func mouseExited(with event: NSEvent) {
         inside = false
         NSCursor.arrow.set()

@@ -68,7 +68,7 @@ def test_capture_worker_stops_uploading_when_its_reference_fails():
     failure = threading.Event()
     worker = webrtc._CaptureWorker(
         webrtc._OutputIdentity(0, "fixture-device", 0, 0),
-        delivered.append,
+        lambda pcm, _captured_at: delivered.append(pcm),
         lambda error: failure.set(),
         source_factory=Playback,
     )

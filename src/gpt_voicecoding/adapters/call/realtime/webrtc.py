@@ -14,9 +14,12 @@ call at two in the morning, rather than during one.
 
 **What the shape of the audio path is, and why.** 48 kHz mono `s16` in 20 ms
 frames, which is `aiortc`'s Opus-native rate; the backend resamples to its own
-24 kHz internally. Both directions carry a bounded jitter buffer, and both drop
-the *oldest* audio when it overflows: a consumer that fell behind should cost
-latency, never an exception per frame, and never unbounded memory. The playback
+24 kHz internally. Each direction crosses between a device clock and the call's
+clock once, and each crossing has one owner with its own rule (#365, ADR 0030):
+the speaker trades a few tens of milliseconds of delay for continuous
+listening, and the microphone trades completeness for fresh speaking. Both
+drop the *oldest* audio when they overflow — never an exception per frame, and
+never unbounded memory. The playback
 side copies only `samples * 2` bytes out of each resampled plane — the plane's
 buffer is padded, and playing the padding is audible as static. That last one
 was learned from the prototype the hard way and is the sort of detail a rewrite
@@ -25,7 +28,9 @@ silently loses.
 
 from __future__ import annotations
 
+import array
 import asyncio
+import collections
 import contextlib
 import enum
 import fractions
@@ -86,15 +91,33 @@ PLAYBACK_BYTES_PER_SECOND = SAMPLE_RATE * SAMPLE_BYTES
 #: JSON-RPC notification on the app-server socket.
 EVENTS_CHANNEL = "realtime-events"
 
-#: How much captured audio is held before the oldest is dropped. Two seconds:
-#: long enough to ride out a scheduling hiccup, short enough that what is
-#: eventually sent is still a reply to what was said.
+#: How long the capture worker's own handoff may hold audio before it gives up:
+#: two seconds, long enough to ride out a scheduling hiccup. It no longer bounds
+#: what reaches the sender — `MAX_SENDER_LAG_FRAMES` does (#365).
 MAX_CAPTURE_FRAMES = 100
 
 #: The same bound for playback, as two seconds of it. Also the ceiling on a
 #: Playout span: what the span begins holding is what is in this buffer, so no
 #: span can be longer than this however much audio the peer sent (#301).
 MAX_PLAYBACK_BYTES = PLAYBACK_BYTES_PER_SECOND * 2
+
+#: One frame of playback, as bytes: the unit the device takes and the unit a
+#: stretch of digital silence is recognised in.
+FRAME_BYTES = FRAME_SAMPLES * SAMPLE_BYTES
+
+#: The most listening delay the speaker may add to ride out late audio (#365,
+#: ADR 0030). Not the headroom — that is measured from arrival lateness — but the
+#: product's limit on it: a live conversation tolerates tens of milliseconds, so
+#: this is the most whole frames that stay under a hundred. The recorded calls
+#: measure lateness far past it (the far side's own startup hold), so it binds.
+MAX_HEADROOM_SECONDS = FRAME_SECONDS * 4
+
+#: How far the sender may fall behind the microphone before the oldest captured
+#: frame is dropped (#365, ADR 0030). One frame for each thread handoff between
+#: the capture callback and the sender — callback to echo-cancellation worker,
+#: worker to event loop — because each can be holding one frame at the instant
+#: the sender pulls. Anything queued beyond that is backlog, not jitter.
+MAX_SENDER_LAG_FRAMES = 2
 
 #: What to install when the import fails.
 INSTALL_HINT = "pip install 'gpt-voicecoding[voice]'"
@@ -535,7 +558,19 @@ class CuePlayer:
 
 
 class _Microphone:
-    """What the user says, as 20 ms frames, or paced silence in a silent run."""
+    """What the user says, as 20 ms frames, or paced silence in a silent run.
+
+    **The speaking rule: this class owns the crossing to the sender (#365, ADR
+    0030).** Capture opens when the call attempt is registered, so echo
+    cancellation warms up early, but the far side cannot hear until aiortc's
+    sender first pulls — seconds later. Speaking must be fresh, so completeness
+    is traded for it: everything captured before that first pull is dropped —
+    judged by when a frame was captured, so audio still inside the
+    echo-cancellation worker at that moment goes too — and after it the sender
+    is never more than `MAX_SENDER_LAG_FRAMES` behind — the oldest frames go,
+    and a sender that stalled resumes on current audio rather than a burst of
+    backlog. What was dropped is counted and logged when capture stops.
+    """
 
     def __init__(
         self,
@@ -552,8 +587,13 @@ class _Microphone:
         self._device = device
         self._stream: Any = None
         self._track: Any = None
-        self._frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MAX_CAPTURE_FRAMES)
+        #: Processed frames, each with when its first sample was captured.
+        self._frames: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue(
+            maxsize=MAX_SENDER_LAG_FRAMES
+        )
         self._dropped = 0
+        #: When the sender first pulled — the moment the far side can hear.
+        self._heard_from: float | None = None
 
     def track(self, output: _OutputIdentity | None = None) -> Any:
         from aiortc.mediastreams import AudioStreamTrack
@@ -591,7 +631,16 @@ class _Microphone:
         would hear a call that had already ended.
         """
         if not self._silent:
-            return await self._frames.get()
+            if self._heard_from is None:
+                self._heard_from = time.monotonic()
+            while True:
+                pcm, captured_at = await self._frames.get()
+                # Decided by when it was captured, not when it was handed over:
+                # a frame still inside the echo-cancellation worker at the first
+                # pull reaches this queue after it, and is just as stale.
+                if captured_at >= self._heard_from:
+                    return pcm
+                self._dropped += 1
         if track._started is None:
             track._started = time.monotonic()
         delay = track._started + track._pts / SAMPLE_RATE - time.monotonic()
@@ -604,18 +653,18 @@ class _Microphone:
 
         loop = asyncio.get_event_loop()
 
-        def push(data: bytes) -> None:
+        def push(data: bytes, captured_at: float) -> None:
             if self._frames.full():
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self._frames.get_nowait()
                 self._dropped += 1
-            self._frames.put_nowait(data)
+            self._frames.put_nowait((data, captured_at))
 
         def failed(error: Exception) -> None:
             loop.call_soon_threadsafe(self._failed, error)
 
-        def deliver(pcm: bytes) -> None:
-            loop.call_soon_threadsafe(push, pcm)
+        def deliver(pcm: bytes, captured_at: float) -> None:
+            loop.call_soon_threadsafe(push, pcm, captured_at)
 
         def captured(indata: Any, _frames: int, timing: Any, status: Any) -> None:
             worker = self._worker
@@ -661,11 +710,35 @@ class _Microphone:
             with contextlib.suppress(Exception):
                 track.stop()
         if self._dropped:
-            _log.info("dropped %d captured frames while the consumer lagged", self._dropped)
+            _log.info(
+                "dropped %d captured frames: captured before the far side could hear, "
+                "or behind a lagging sender",
+                self._dropped,
+            )
 
 
 class _Speaker:
     """What the call says, played out — or counted, in a silent run.
+
+    **The listening rule: this class owns the crossing to the device (#365, ADR
+    0030).** Inbound audio arrives on the network's clock; the device takes a
+    block on its own. Listening must be continuous, so delay is traded for it:
+
+    - *Headroom is measured.* Each frame's lateness is how far behind the
+      stream's own pace it arrived, and the headroom is the widest lateness seen
+      above the earliest, capped at `MAX_HEADROOM_SECONDS` — the delay limit.
+    - *It changes only where it cannot be heard.* Silence is inserted or shed
+      only between a device block that ended at zero and a whole frame of
+      digital silence, which is what the far side's generated silence decodes
+      to and what speech never contains. No level is picked: zero is not a
+      threshold.
+    - *A dry spell is concealed, never cut.* A block the buffer cannot fill fades
+      to zero across itself, and playback waits to refill to the headroom — or
+      for that long, if nothing more comes — then fades back in.
+    - *The two-second ceiling stays.* Overflow still drops the oldest audio.
+
+    Headroom is held as buffered audio, so a Playout span begun while it is
+    held already counts it (ADR 0027's rule, unchanged in meaning).
 
     **The drain rule, decided from run data (#301).** A span of the Voice's
     playout is over when the audio the Voice had generated has had time to be
@@ -742,6 +815,25 @@ class _Speaker:
         #: so how long the span lasts (#301). Set by `begin_span`, reported
         #: with the window, and cleared with it.
         self._window_started_with = 0
+        #: The listening rule's state (#365). The receive loop writes the first
+        #: three and the device callback reads them, so they are under `_lock`
+        #: with the buffer; the rest belong to one side each and need no lock.
+        #: `_headroom` is bytes. `_pace` is when the first frame would have
+        #: arrived had every frame kept the recent earliest pace, and
+        #: `_arrived_samples` how much audio has arrived since — together, how
+        #: much audio is owed right now but still in flight.
+        self._headroom = 0
+        self._pace: float | None = None
+        self._arrived_samples = 0
+        #: Receive loop: when the first frame arrived, and the recent frames'
+        #: lateness as a sliding-window minimum (arrival, lateness), oldest first.
+        self._first_arrived_at: float | None = None
+        self._recent: collections.deque[tuple[float, float]] = collections.deque()
+        #: Device callback: whether playback is waiting for the buffer to refill,
+        #: since when there has been audio to wait on, and the last sample played.
+        self._refilling = True
+        self._refill_since: float | None = None
+        self._last_sample = 0
 
     def begin_span(self) -> float:
         """Open a span of playout, and say how long its audio takes to be heard.
@@ -835,28 +927,138 @@ class _Speaker:
             self._last_frame_at = arrived
             if self._silent:
                 continue
+            headroom, pace = self._lateness(arrived)
             for out in resampler.resample(frame):
                 # Only the first `samples * SAMPLE_BYTES` bytes are real audio;
                 # the rest of the plane is padding, and padding is audible static.
                 chunk = bytes(out.planes[0])[: out.samples * SAMPLE_BYTES]
                 with self._lock:
+                    self._headroom = max(self._headroom, headroom)
+                    self._pace = pace
+                    self._arrived_samples += out.samples
                     self._buffer.extend(chunk)
                     overflow = len(self._buffer) - MAX_PLAYBACK_BYTES
                     if overflow > 0:
                         del self._buffer[:overflow]
                         self._dropped += 1
 
+    def _lateness(self, arrived: float) -> tuple[int, float]:
+        """The headroom this frame's arrival calls for, in bytes, and the pace it keeps (#365).
+
+        A frame's lateness is how far behind the stream's own pace it arrived:
+        the first frame's arrival plus the audio that has arrived since. What
+        calls for headroom is lateness above the earliest recent frame, so a far
+        side that runs steadily fast or slow reads as none until it varies.
+
+        *Recent* is the ceiling plus one frame: a hold the headroom can cover
+        is caught up by then, so lateness that has lasted longer is the pace
+        moving — a far side that paused — and the pace follows it rather than
+        charging it as owed audio forever. Capped at the delay limit.
+        """
+        if self._first_arrived_at is None:
+            self._first_arrived_at = arrived
+        lateness = arrived - self._first_arrived_at - self._arrived_samples / SAMPLE_RATE
+        recent = self._recent
+        # Windowed from the frame before this one, not from this one: a hold
+        # longer than the window must still be measured against the frames
+        # that arrived before it, or the longest holds would read as none.
+        previous = recent[-1][0] if recent else arrived
+        while recent and recent[0][0] < previous - MAX_HEADROOM_SECONDS - FRAME_SECONDS:
+            recent.popleft()
+        while recent and recent[-1][1] >= lateness:
+            recent.pop()
+        recent.append((arrived, lateness))
+        earliest = recent[0][1]
+        wanted = min(lateness - earliest, MAX_HEADROOM_SECONDS)
+        return round(wanted * SAMPLE_RATE) * SAMPLE_BYTES, self._first_arrived_at + earliest
+
+    def _fill_block(self, outdata: Any, frames: int, _time: Any, _status: Any) -> None:
+        """One block for the device, under the listening rule. See the class."""
+        need = frames * SAMPLE_BYTES
+        with self._lock:
+            block, rising, falling = self._take(need)
+        if rising or falling:
+            block = self._faded(block, need, rising=rising, falling=falling)
+        outdata[:need] = block
+        self._last_sample = int.from_bytes(block[-SAMPLE_BYTES:], "little", signed=True)
+
+    def _take(self, need: int) -> tuple[bytes, bool, bool]:
+        """What the buffer gives this block, and whether it fades in, out, or both.
+
+        Under `_lock`. Adjusts the headroom only at digital silence, refills
+        after a dry spell, and never hands back more or less than `need` bytes
+        except a short block, which the caller conceals.
+        """
+        buffer = self._buffer
+        now = time.monotonic()
+        target = need + self._headroom
+        # What the device can count on: the audio held, plus the audio the
+        # recent pace says is owed but still in flight — up to the headroom,
+        # which is all the lateness this side ever covers. Unlike the buffer
+        # alone this does not jump by a frame with each arrival's phase, so the
+        # headroom is set against the pace and not against whichever frame
+        # happened to be late at the moment of looking.
+        owed = 0
+        if self._pace is not None:
+            due = round((now - self._pace) * SAMPLE_RATE) - self._arrived_samples
+            owed = min(max(due, 0) * SAMPLE_BYTES, self._headroom)
+        rising = False
+        if self._refilling:
+            if not buffer:
+                self._refill_since = None
+                return bytes(need), False, False
+            if self._refill_since is None:
+                self._refill_since = now
+            waited = now - self._refill_since
+            if len(buffer) + owed < target and waited < self._headroom / PLAYBACK_BYTES_PER_SECOND:
+                return bytes(need), False, False
+            self._refilling = False
+            self._refill_since = None
+            rising = True
+        inserted = 0
+        if (
+            self._last_sample == 0
+            and len(buffer) >= FRAME_BYTES
+            and buffer.count(0, 0, FRAME_BYTES) == FRAME_BYTES
+        ):
+            available = len(buffer) + owed
+            if available < target:
+                inserted = min(need, target - available)
+            elif available > target:
+                excess = bytes(buffer[: min(available - target, len(buffer))])
+                silent = len(excess) - len(excess.lstrip(b"\x00"))
+                del buffer[: silent - silent % SAMPLE_BYTES]
+        taken = min(need - inserted, len(buffer))
+        block = bytes(inserted) + bytes(buffer[:taken])
+        del buffer[:taken]
+        falling = len(block) < need
+        if falling:
+            self._refilling = True
+        return block, rising, falling
+
+    def _faded(self, block: bytes, need: int, *, rising: bool, falling: bool) -> bytes:
+        """Conceal a block's edges: a linear ramp across the whole block (#365).
+
+        A block is 20 ms, long enough that the ramp is inaudible as a step and
+        short enough to be the one block that was going to be wrong anyway.
+        What a short block lacks holds its last sample, so the fade out starts
+        from where the audio actually was rather than from zero.
+        """
+        samples = array.array("h", block)
+        count = need // SAMPLE_BYTES
+        held = samples[-1] if samples else self._last_sample
+        samples.extend([held] * (count - len(samples)))
+        for index in range(count):
+            gain = 1.0
+            if rising:
+                gain *= index / count
+            if falling:
+                gain *= (count - 1 - index) / count
+            samples[index] = round(samples[index] * gain)
+        return samples.tobytes()
+
     def _open(self) -> None:
         import sounddevice
-
-        def wanted(outdata: Any, frames: int, _time: Any, _status: Any) -> None:
-            need = frames * SAMPLE_BYTES
-            with self._lock:
-                available = bytes(self._buffer[:need])
-                del self._buffer[: len(available)]
-            outdata[: len(available)] = available
-            if len(available) < need:
-                outdata[len(available) :] = b"\x00" * (need - len(available))
 
         try:
             self._stream = sounddevice.RawOutputStream(
@@ -865,7 +1067,7 @@ class _Speaker:
                 dtype=SAMPLE_FORMAT,
                 blocksize=FRAME_SAMPLES,
                 device=self._device,
-                callback=wanted,
+                callback=self._fill_block,
             )
             self._stream.start()
         except Exception as unavailable:
@@ -1218,7 +1420,7 @@ class _CaptureWorker:
     def __init__(
         self,
         output: _OutputIdentity,
-        deliver: Callable[[bytes], None],
+        deliver: Callable[[bytes, float], None],
         failed: Callable[[Exception], None],
         *,
         source_factory: Callable[..., _SystemPlayback] = _SystemPlayback,
@@ -1292,7 +1494,8 @@ class _CaptureWorker:
                     self._deliver(
                         processor.capture(
                             block.pcm, captured_at=block.at, processed_at=time.monotonic()
-                        )
+                        ),
+                        block.at,
                     )
         except Exception as error:
             self._fail(error)

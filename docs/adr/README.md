@@ -29,6 +29,7 @@
 | [0027](0027-the-engine-decides-when-the-voices-playout-has-been-heard.md) | The engine decides when the Voice's Playout has been heard, from the audio it already holds — **replaces #235's unrecorded drain rule**, which the runs falsified |
 | [0028](0028-the-duty-card-is-the-at-computer-surface.md) | The Duty Card is the at-computer surface; the Control Panel is a window behind it, and the menu bar is a menu |
 | [0029](0029-the-control-window-owns-its-height.md) | The Control Window owns its height; nothing outside it measures content |
+| [0030](0030-each-live-call-audio-crossing-has-one-owner.md) | Each Live Call audio crossing has one owner: the speaker keeps listening continuous, the microphone keeps speaking fresh — **no bare buffer, no fixed prebuffer** |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67), [#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

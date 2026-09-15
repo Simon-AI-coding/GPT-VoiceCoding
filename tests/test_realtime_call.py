@@ -18,14 +18,18 @@ middle of the handshake.
 
 from __future__ import annotations
 
+import array
 import asyncio
+import contextlib
+import itertools
+import json
 import logging
 import shutil
 import sys
 import threading
 import time
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -267,7 +271,7 @@ class _Streams:
 
 
 @contextmanager
-def _sounddevice(streams: _Streams) -> Iterator[None]:
+def _sounddevice(streams: Callable[..., Any]) -> Iterator[None]:
     """`sounddevice`, for the length of a test. CI does not install the real one."""
     stood_in = types.SimpleNamespace(RawOutputStream=streams)
     was = sys.modules.get("sounddevice")
@@ -3272,6 +3276,14 @@ class _Resampled:
         self.planes = [b"\xff" * (samples * webrtc.SAMPLE_BYTES + 64)]
 
 
+class _Pcm:
+    """One decoded frame whose samples the test chose, so what the device plays is readable."""
+
+    def __init__(self, value: int, samples: int = webrtc.FRAME_SAMPLES) -> None:
+        self.samples = samples
+        self.planes = [array.array("h", [value] * samples).tobytes()]
+
+
 class _InboundTrack:
     """The Voice's audio, arriving on a schedule the test writes.
 
@@ -3339,7 +3351,11 @@ class _PaddingTrack:
 def _av(*, samples: int = 0) -> Iterator[None]:
     """`av`, for the length of a test. CI does not install the real one."""
     resampler = types.SimpleNamespace(
-        resample=lambda _frame: [_Resampled(samples)] if samples else []
+        # A frame that already carries its own samples is passed through, so a
+        # test that cares what the device plays can say what arrived.
+        resample=lambda frame: (
+            [frame] if isinstance(frame, _Pcm) else [_Resampled(samples)] if samples else []
+        )
     )
     stood_in = types.SimpleNamespace(AudioResampler=lambda **_parameters: resampler)
     was = sys.modules.get("av")
@@ -3779,3 +3795,522 @@ class TestWhatClosesTheVoicesSpan(_PlayoutSeam):
 
         said = [line.getMessage() for line in caplog.records]
         assert [line for line in said if "carried" in line] == []
+
+
+#: Three real Live Calls' inbound arrival timing, recorded 2026-09-15 (#365).
+ARRIVALS = Path(__file__).parent / "realtime_call_arrivals"
+RECORDED_CALLS = sorted(path.stem for path in ARRIVALS.glob("*.json"))
+
+#: Arrival times in these tests are whole tenths of a millisecond — the
+#: fixtures' own unit — so a device tick and an arrival compare exactly.
+TENTHS_PER_SECOND = 10_000
+FRAME_TENTHS = round(webrtc.FRAME_SECONDS * TENTHS_PER_SECOND)
+
+#: Where the device's clock sits against the first inbound frame. The recorded
+#: calls cut differently depending on it, so every replay is run at each.
+DEVICE_PHASES_TENTHS = range(0, FRAME_TENTHS, FRAME_TENTHS // 8)
+
+
+class _Device:
+    """`sounddevice.RawOutputStream` that pulls one block through the real callback per tick."""
+
+    def __init__(self) -> None:
+        self._callback: Callable[..., None] | None = None
+        self.played = bytearray()
+        #: When each block was pulled, on the test's clock.
+        self.pulled_at: list[float] = []
+
+    def __call__(self, **parameters: Any) -> _Device:
+        self._callback = parameters["callback"]
+        return self
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def pull(self, at: float) -> None:
+        assert self._callback is not None
+        # A fixed-size writable buffer, as PortAudio's is: a callback that
+        # writes the wrong length fails here the way it would on a real device.
+        block = memoryview(bytearray(webrtc.FRAME_BYTES))
+        self._callback(block, webrtc.FRAME_SAMPLES, None, None)
+        self.played += block
+        self.pulled_at.append(at)
+
+
+class _Replay:
+    """Inbound frames and device pulls interleaved on one clock the test moves by hand.
+
+    `recv` first lets the device take every block due before the next frame
+    arrives, then moves the clock to that arrival and hands the frame over — so
+    the speaker sees exactly the order a real call's two clocks produced. A
+    frame and a pull at the same instant put the frame first.
+    """
+
+    def __init__(
+        self, arrivals: list[int], frames: list[_Pcm], clock: _Clock, device: _Device, phase: int
+    ) -> None:
+        self._arrivals = arrivals
+        self._frames = frames
+        self._clock = clock
+        self._device = device
+        self._base = clock.now
+        self._next_pull = phase
+        self._next = 0
+
+    def _pull(self) -> None:
+        self._clock.now = self._base + self._next_pull / TENTHS_PER_SECOND
+        self._device.pull(self._clock.now)
+        self._next_pull += FRAME_TENTHS
+
+    async def recv(self) -> Any:
+        if self._next == len(self._frames):
+            raise _TrackEnded
+        arrives = self._arrivals[self._next]
+        while self._next_pull < arrives:
+            self._pull()
+        self._clock.now = self._base + arrives / TENTHS_PER_SECOND
+        frame = self._frames[self._next]
+        self._next += 1
+        return frame
+
+    def arrived_at(self, frame: int) -> float:
+        return self._base + self._arrivals[frame] / TENTHS_PER_SECOND
+
+    def play_out(self, speaker: Any) -> None:
+        """The inbound stream has ended: let the device take everything the speaker still holds."""
+        while speaker.playout.buffered_bytes:
+            self._pull()
+
+
+def _recorded(name: str) -> tuple[list[int], list[bool]]:
+    """One recorded call: each frame's arrival in tenths of a ms, and whether it is speech."""
+    recorded = json.loads((ARRIVALS / f"{name}.json").read_text())
+    assert recorded["frame_samples"] == webrtc.FRAME_SAMPLES
+    arrivals, at = [], 0
+    for delta in recorded["arrival_delta_tenth_ms"]:
+        at += delta
+        arrivals.append(at)
+    return arrivals, [flag == "1" for flag in recorded["speech"]]
+
+
+def _voice(speech: list[bool]) -> list[_Pcm]:
+    """Frames the device can be read back from: each speech frame its own value, silence zero.
+
+    Silence is digital silence, which is what an Opus frame of it decodes to.
+    """
+    return [_Pcm(index + 1 if spoken else 0) for index, spoken in enumerate(speech)]
+
+
+def _stretches(speech: list[bool]) -> list[range]:
+    """Each unbroken run of speech frames."""
+    runs: list[range] = []
+    start = None
+    for index, spoken in enumerate([*speech, False]):
+        if spoken and start is None:
+            start = index
+        elif not spoken and start is not None:
+            runs.append(range(start, index))
+            start = None
+    return runs
+
+
+class TestWhatTheUserHearsOfTheVoice(_PlayoutSeam):
+    """#365: listening must be continuous — the speaker owns the crossing to the device.
+
+    Inbound audio arrives on the network's clock and the device takes a block
+    on its own. A bare buffer between them played silence for whatever was a
+    few milliseconds late, and a speech waveform cut to zero is a click. These
+    replay three real calls' recorded arrival timing through the real device
+    callback, one 20 ms pull per tick of a clock the test moves, and read what
+    the device was given.
+
+    Built without `aiortc`, `av` or `sounddevice`, the way the Playout seam is.
+    """
+
+    def replayed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        arrivals: list[int],
+        frames: list[_Pcm],
+        phase: int = 0,
+    ) -> tuple[_Device, _Replay]:
+        clock = _Clock()
+        monkeypatch.setattr(webrtc, "time", clock)
+        device = _Device()
+        replay = _Replay(arrivals, frames, clock, device, phase)
+        speaker = webrtc._Speaker(silent=False, device=None)
+
+        async def scenario() -> None:
+            speaker.attach(replay)
+            await speaker._task
+
+        with _sounddevice(device), _av():
+            asyncio.run(scenario())
+        replay.play_out(speaker)
+        speaker.stop()
+        return device, replay
+
+    @pytest.mark.parametrize("call", RECORDED_CALLS)
+    def test_a_recorded_call_reaches_the_device_without_a_cut_inside_speech(
+        self, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        """The regression test: every stretch of speech is played whole, at every phase.
+
+        Whole means unbroken and unfaded — no silence inserted into it, nothing
+        dropped from it, no concealment applied to it — so a single 20 ms
+        shortfall anywhere inside speech fails it. Under the bare buffer this
+        failed on all three recordings.
+        """
+        arrivals, speech = _recorded(call)
+        frames = _voice(speech)
+
+        cut = {}
+        for phase in DEVICE_PHASES_TENTHS:
+            device, _ = self.replayed(monkeypatch, arrivals, frames, phase)
+            broken = [
+                run.start
+                for run in _stretches(speech)
+                if bytes(device.played).find(b"".join(frames[k].planes[0] for k in run)) < 0
+            ]
+            if broken:
+                cut[phase / 10] = broken
+
+        assert cut == {}, f"stretches of speech cut (device phase ms: first frames): {cut}"
+
+    @pytest.mark.parametrize("call", RECORDED_CALLS)
+    def test_the_delay_the_voice_is_heard_with_stays_within_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        """Continuity is bought with delay, and only the delay the ADR allows.
+
+        Added delay is measured against the earliest each stretch of speech
+        could have been heard whole. Played unbroken, a stretch runs on one
+        20 ms grid, and no frame of it can be played before it arrived — so the
+        grid can start no sooner than its latest frame allows. That much delay
+        is the network's, and no rule can remove it. The device then takes
+        whole blocks on its own clock, which costs up to one more; everything
+        past that is headroom, and it may not exceed the ceiling.
+        """
+        arrivals, speech = _recorded(call)
+        frames = _voice(speech)
+
+        worst = 0.0
+        for phase in DEVICE_PHASES_TENTHS:
+            device, replay = self.replayed(monkeypatch, arrivals, frames, phase)
+            played = bytes(device.played)
+            for stretch in _stretches(speech):
+                grid = max(
+                    replay.arrived_at(index) - (index - stretch.start) * webrtc.FRAME_SECONDS
+                    for index in stretch
+                )
+                for index in stretch:
+                    at = played.find(frames[index].planes[0])
+                    assert at >= 0, f"speech frame {index} never reached the device whole"
+                    block, offset = divmod(at, webrtc.FRAME_BYTES)
+                    heard = (
+                        device.pulled_at[block] + offset / webrtc.FRAME_BYTES * webrtc.FRAME_SECONDS
+                    )
+                    earliest = grid + (index - stretch.start) * webrtc.FRAME_SECONDS
+                    worst = max(worst, heard - earliest)
+
+        assert worst <= webrtc.MAX_HEADROOM_SECONDS + webrtc.FRAME_SECONDS
+
+    def test_a_dry_spell_inside_speech_fades_out_and_back_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Audio really stopped arriving, for longer than any headroom can cover.
+
+        That cannot be hidden, but it must not click: no step from the Voice's
+        amplitude to zero when the audio runs out, and none from zero back up
+        when it returns. The call's first sound and its last are the same two
+        edges, and are held to the same rule.
+        """
+        amplitude = 10_000
+        stretch = 40
+        dry = round(10 * webrtc.MAX_HEADROOM_SECONDS * TENTHS_PER_SECOND)
+        arrivals = [FRAME_TENTHS * k for k in range(stretch)]
+        arrivals += [arrivals[-1] + dry + FRAME_TENTHS * k for k in range(stretch)]
+        frames = [_Pcm(amplitude) for _ in arrivals]
+
+        device, _ = self.replayed(monkeypatch, arrivals, frames, FRAME_TENTHS // 2)
+
+        samples = array.array("h", bytes(device.played))
+        assert 0 in samples[stretch * webrtc.FRAME_SAMPLES :], "the dry spell was never reached"
+        largest_step = max(abs(after - before) for before, after in itertools.pairwise(samples))
+        assert largest_step < amplitude // 10
+
+    def test_overflow_still_drops_the_oldest_audio_at_the_ceiling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """More than two seconds arriving before the device takes any: the newest two are kept."""
+        kept = webrtc.MAX_PLAYBACK_BYTES // webrtc.FRAME_BYTES
+        sent = kept + 50
+        frames = [_Pcm(k + 1) for k in range(sent)]
+
+        device, _ = self.replayed(monkeypatch, [0] * sent, frames, FRAME_TENTHS // 2)
+
+        played = bytes(device.played)
+        assert all(played.find(frames[k].planes[0]) < 0 for k in range(sent - kept))
+        assert played.find(b"".join(frame.planes[0] for frame in frames[sent - kept + 1 :])) >= 0
+
+
+class _CaptureStandIn:
+    """`_CaptureWorker`, handing processed frames to the microphone exactly as the real one does.
+
+    The real worker opens the system playback tap, which CI cannot, so for the
+    length of a test the module's worker is replaced by this one — the way the
+    Playout seam replaces the module's clock.
+    """
+
+    made: list[_CaptureStandIn] = []
+
+    def __init__(
+        self, _output: Any, deliver: Callable[[bytes, float], None], _failed: Callable[..., None]
+    ) -> None:
+        self.deliver = deliver
+        _CaptureStandIn.made.append(self)
+
+    def close(self) -> None:
+        return None
+
+
+class _Plane:
+    def update(self, data: bytes) -> None:
+        self.data = bytes(data)
+
+
+class _AudioFrame:
+    """`av.AudioFrame`, as far as the microphone's track can tell."""
+
+    def __init__(self, **_shape: Any) -> None:
+        self.planes = [_Plane()]
+
+
+class _AudioStreamTrack:
+    """`aiortc.mediastreams.AudioStreamTrack`, as far as the microphone's track can tell."""
+
+    def stop(self) -> None:
+        return None
+
+
+class _InputStream:
+    def __init__(self, **_parameters: Any) -> None:
+        return None
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+@contextmanager
+def _capture_stack(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Clock]:
+    """`aiortc`, `av`, `sounddevice`, the capture worker and the clock, stood in for one test."""
+    aiortc = types.ModuleType("aiortc")
+    mediastreams = types.ModuleType("aiortc.mediastreams")
+    mediastreams.AudioStreamTrack = _AudioStreamTrack  # type: ignore[attr-defined]
+    stand_ins = {
+        "aiortc": aiortc,
+        "aiortc.mediastreams": mediastreams,
+        "av": types.SimpleNamespace(AudioFrame=_AudioFrame),
+        "sounddevice": types.SimpleNamespace(RawInputStream=_InputStream),
+    }
+    for name, module in stand_ins.items():
+        monkeypatch.setitem(sys.modules, name, module)  # type: ignore[arg-type]
+    monkeypatch.setattr(webrtc, "_CaptureWorker", _CaptureStandIn)
+    _CaptureStandIn.made.clear()
+    clock = _Clock()
+    monkeypatch.setattr(webrtc, "time", clock)
+    yield clock
+
+
+def _said(value: int) -> bytes:
+    """One captured frame the test can recognise when the sender receives it."""
+    return array.array("h", [value] * webrtc.FRAME_SAMPLES).tobytes()
+
+
+def _heard(frame: Any) -> int:
+    return array.array("h", frame.planes[0].data)[0]
+
+
+class TestWhatTheVoiceHearsOfTheUser:
+    """#365: speaking must be fresh — the microphone owns the crossing to the sender.
+
+    The microphone opens when the call attempt is registered, seconds before
+    the far side can hear, and aiortc's sender takes frames as fast as the
+    track yields them. A two-second queue between the two sent the whole
+    pre-connection backlog at once, ahead of the user's live words. These drive
+    the outbound track's `recv`, which is exactly what the sender calls, on a
+    clock the test moves by hand.
+    """
+
+    def microphone(self) -> tuple[Any, Any, Callable[[bytes, float], None]]:
+        """A microphone opened the way the transport opens it, and its capture worker's hand."""
+        microphone = webrtc._Microphone(
+            silent=False,
+            device=None,
+            output=webrtc._OutputSelection(None),
+            failed=lambda _error: None,
+        )
+        track = microphone.track(webrtc._OutputIdentity(0, "fixture-device", 0, 0))
+        return microphone, track, _CaptureStandIn.made[-1].deliver
+
+    async def delivered(
+        self, deliver: Callable[[bytes, float], None], captured_at: float, *values: int
+    ) -> None:
+        """Frames handed over by the worker thread, and the loop given the turn that runs them."""
+        for value in values:
+            deliver(_said(value), captured_at)
+        await asyncio.sleep(0)
+
+    async def pull_now(self, track: Any) -> int | None:
+        """What one pull returns without waiting for new audio, or `None` if it would wait.
+
+        One loop turn is exactly what a new task needs to run its first step,
+        and a pull that has a frame to give finishes in that step.
+        """
+        pulling = asyncio.ensure_future(track.recv())
+        await asyncio.sleep(0)
+        if pulling.done():
+            return _heard(pulling.result())
+        pulling.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pulling
+        return None
+
+    async def pulled(
+        self, track: Any, deliver: Callable[[bytes, float], None], clock: _Clock, value: int
+    ) -> int:
+        """A pull that waits, answered by one frame captured now."""
+        pulling = asyncio.ensure_future(track.recv())
+        await asyncio.sleep(0)
+        await self.delivered(deliver, clock.now, value)
+        return _heard(await pulling)
+
+    def test_nothing_queued_before_the_first_pull_is_ever_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The first pull is the moment the far side can hear; the room before it is stale."""
+        with _capture_stack(monkeypatch) as clock:
+
+            async def scenario() -> list[int]:
+                _, track, deliver = self.microphone()
+                await self.delivered(deliver, clock.now, *range(1, 151))
+                clock.advance(webrtc.FRAME_SECONDS)
+                sent = [await self.pulled(track, deliver, clock, 1000)]
+                for value in range(1001, 1011):
+                    clock.advance(webrtc.FRAME_SECONDS)
+                    await self.delivered(deliver, clock.now, value)
+                    sent.append(_heard(await track.recv()))
+                return sent
+
+            sent = asyncio.run(scenario())
+
+        assert sent == list(range(1000, 1011))
+
+    def test_audio_captured_before_the_first_pull_but_delivered_after_it_is_not_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Frames still inside the echo-cancellation worker when the sender first pulls.
+
+        They reach the microphone after the pull, and they are exactly as stale as
+        the ones that were already queued: when they were captured is what
+        decides, not when they were handed over.
+        """
+        with _capture_stack(monkeypatch) as clock:
+
+            async def scenario() -> list[int]:
+                _, track, deliver = self.microphone()
+                captured_before = clock.now
+                clock.advance(webrtc.FRAME_SECONDS)
+                pulling = asyncio.ensure_future(track.recv())
+                await asyncio.sleep(0)
+                await self.delivered(deliver, captured_before, *range(1, 51))
+                assert not pulling.done(), "the first pull was answered with stale audio"
+                await self.delivered(deliver, clock.now, 1000)
+                sent = [_heard(await pulling)]
+                return sent + [value for value in [await self.pull_now(track)] if value is not None]
+
+            sent = asyncio.run(scenario())
+
+        assert sent == [1000]
+
+    def test_frames_delivered_at_real_time_pace_are_all_sent_in_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with _capture_stack(monkeypatch) as clock:
+
+            async def scenario() -> list[int]:
+                _, track, deliver = self.microphone()
+                sent = [await self.pulled(track, deliver, clock, 1)]
+                for value in range(2, 101):
+                    clock.advance(webrtc.FRAME_SECONDS)
+                    await self.delivered(deliver, clock.now, value)
+                    sent.append(_heard(await track.recv()))
+                return sent
+
+            sent = asyncio.run(scenario())
+
+        assert sent == list(range(1, 101))
+
+    def test_a_sender_that_falls_behind_gets_current_audio_never_a_backlog(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """It stops pulling for a second, then resumes: what it gets is the newest, and little.
+
+        What was discarded is counted, and the count is what the stop line says.
+        """
+        behind = 50
+
+        with caplog.at_level(logging.INFO), _capture_stack(monkeypatch) as clock:
+
+            async def scenario() -> tuple[list[int], int]:
+                microphone, track, deliver = self.microphone()
+                await self.pulled(track, deliver, clock, 1)
+                for value in range(2, 2 + behind):
+                    clock.advance(webrtc.FRAME_SECONDS)
+                    await self.delivered(deliver, clock.now, value)
+                caught_up = []
+                while (value := await self.pull_now(track)) is not None:
+                    caught_up.append(value)
+                clock.advance(webrtc.FRAME_SECONDS)
+                next_sent = await self.pulled(track, deliver, clock, 1000)
+                microphone.stop()
+                return caught_up, next_sent
+
+            caught_up, next_sent = asyncio.run(scenario())
+
+        newest = list(range(2, 2 + behind))[-webrtc.MAX_SENDER_LAG_FRAMES :]
+        assert caught_up == newest
+        assert next_sent == 1000
+        dropped = behind - len(newest)
+        assert any(
+            f"dropped {dropped} captured frames" in record.getMessage() for record in caplog.records
+        )
+
+    def test_the_dropped_frames_are_still_written_down_when_capture_stops(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Audio captured before the far side could hear is dropped, and that is logged too."""
+        with caplog.at_level(logging.INFO), _capture_stack(monkeypatch) as clock:
+
+            async def scenario() -> None:
+                microphone, track, deliver = self.microphone()
+                await self.delivered(deliver, clock.now, *range(1, 11))
+                clock.advance(webrtc.FRAME_SECONDS)
+                assert await self.pull_now(track) is None
+                microphone.stop()
+
+            asyncio.run(scenario())
+
+        assert any("dropped 10 captured frames" in record.getMessage() for record in caplog.records)

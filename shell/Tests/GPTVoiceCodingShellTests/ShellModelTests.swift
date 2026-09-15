@@ -1120,17 +1120,31 @@ import Testing
     @Test func anOpenSessionIsReadWithItsTargetEveryTwoSeconds() async throws {
         let fixture = try TelegramCredentialFixture()
         let engine = DesktopControlPlane()
+        let clock = DesktopClock()
         let target = SessionAddress(.of(["agent": "claude", "session_id": "one"]))
         let (_, model) = makeShell(
             fixture: fixture, launcher: RecordingEngineLauncher(),
-            panel: ControlPanel(client: engine))
+            panel: ControlPanel(client: engine), now: { clock.time }, sleep: clock.sleep)
         model.open(.session(target))
-        #expect(await waitUntil { engine.briefTargets.count == 2 })
+        #expect(await waitUntil { clock.waiting })
+        await model.readInFlight?.value
+        #expect(engine.briefTargets == [target.payload])
+        for second in 1...2 {
+            clock.advance()
+            #expect(await waitUntil { clock.waiting })
+            await model.readInFlight?.value
+            #expect(engine.briefTargets.count == (second == 1 ? 1 : 2))
+        }
         #expect(engine.briefTargets == [target.payload, target.payload])
         model.open(.home)
-        try await Task.sleep(for: .seconds(2.2))
+        for _ in 0..<2 {
+            clock.advance()
+            #expect(await waitUntil { clock.waiting })
+            await model.readInFlight?.value
+        }
         #expect(engine.briefTargets.count == 2)
         await model.stopEngine()
+        clock.advance()
     }
 
     @Test func newAgentOnACallAsksOnceAndOnlyAcceptanceHangsUpAndRedials() async throws {

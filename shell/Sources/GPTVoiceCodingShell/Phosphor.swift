@@ -28,6 +28,8 @@ enum Phosphor {
         .opacity(0.22)
     static let bubbleFade: TimeInterval = 0.2
     static let navigationWidth: CGFloat = 126
+    static let voicePickerWidth: CGFloat = 150
+    static let modelPickerWidth: CGFloat = 190
     static let rosterHeight: CGFloat = 220
     static let outputHeight: CGFloat = 120
     static let padding: CGFloat = 12

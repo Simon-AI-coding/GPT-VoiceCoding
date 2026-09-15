@@ -63,6 +63,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
         backing: .buffered, defer: true)
     private var contentHost: NSHostingView<MeasuredContent<ControlPanelView>>?
+    private weak var contentScroll: NSScrollView?
     private var lastWindowRequest = 0
     private var localClick: Any?
     private var globalClick: Any?
@@ -98,6 +99,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         scroll.scrollerStyle = .overlay
         scroll.documentView = host
         window.contentView = scroll
+        contentScroll = scroll
         resizeWindow(height: initialHeight)
         card.contentView = LampHostingView(rootView: DutyCardView(shell: shell))
         card.delegate = self
@@ -118,6 +120,8 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             _ = shell.cardQuitVisible
             _ = shell.lampBubble
             _ = shell.panel.phase
+            _ = shell.panel.sessionBrief
+            _ = shell.panel.sessionFailure
             _ = shell.selectedAppearance
         } onChange: { [weak self] in
             Task { @MainActor in
@@ -144,6 +148,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             }
             if shell.windowRequest != lastWindowRequest {
                 lastWindowRequest = shell.windowRequest
+                scrollToTop()
                 if shell.windowRequestedFromLamp, shell.cardVisible, let screen = card.screen {
                     window.setFrame(
                         Self.controlFrame(
@@ -186,6 +191,15 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
                 contentHeight: contentHeight, styleMask: window.styleMask),
             anchor: nil, screen: screen.visibleFrame)
         if frame != window.frame { window.setFrame(frame, display: true) }
+    }
+
+    private func scrollToTop() {
+        guard let scroll = contentScroll, let document = scroll.documentView else { return }
+        let y =
+            document.isFlipped
+            ? 0 : max(0, document.bounds.height - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private func synchronizeAttachments() {
@@ -396,9 +410,14 @@ private final class LampHostingView: NSHostingView<DutyCardView> {
     }
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        shell.lampCellHovered = point.x < Phosphor.lampEdge + Phosphor.lampCell
+        let inCell = point.x < Phosphor.lampEdge + Phosphor.lampCell
+        shell.lampCellHovered = inCell
+        (inCell && !shell.lampCellEnabled ? NSCursor.arrow : .pointingHand).set()
     }
-    override func mouseExited(with event: NSEvent) { shell.lampCellHovered = false }
+    override func mouseExited(with event: NSEvent) {
+        shell.lampCellHovered = false
+        NSCursor.arrow.set()
+    }
     override func rightMouseDown(with event: NSEvent) { shell.toggleLampActions(secondary: true) }
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
@@ -430,7 +449,10 @@ private struct HandRegion: NSViewRepresentable {
 
 private final class HandTrackingView: NSView {
     var enabled = true {
-        didSet { if inside { setCursor() } }
+        didSet {
+            window?.invalidateCursorRects(for: self)
+            if inside { setCursor() }
+        }
     }
     private var inside = false
     private var tracking: NSTrackingArea?
@@ -445,6 +467,10 @@ private final class HandTrackingView: NSView {
             ], owner: self)
         addTrackingArea(area)
         tracking = area
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: enabled ? .pointingHand : .arrow)
     }
     private func setCursor() { (enabled ? NSCursor.pointingHand : .arrow).set() }
     override func mouseEntered(with event: NSEvent) {

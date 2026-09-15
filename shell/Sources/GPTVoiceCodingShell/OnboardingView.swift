@@ -60,7 +60,7 @@ struct OnboardingView: View {
                 }
             case .agent:
                 note(.setupAgentBody)
-                AgentSettingsView(shell: shell, showsNote: false)
+                AgentSettingsView(shell: shell, showsNote: false).zIndex(1)
                 SettingsSaveStatus(shell: shell)
             case .telegram:
                 note(.setupTelegramBody)

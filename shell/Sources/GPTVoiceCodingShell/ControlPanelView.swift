@@ -249,7 +249,7 @@ struct SessionRowView: View {
     }
 }
 
-private struct SessionBriefView: View {
+struct SessionBriefView: View {
     let shell: ShellModel
     let target: SessionAddress
     var body: some View {
@@ -260,31 +260,53 @@ private struct SessionBriefView: View {
                     Text(shell.text.name(brief.name)).font(Phosphor.headline)
                     Text(brief.stateWord).foregroundStyle(briefStateColour)
                 }
-                HStack {
-                    Text(shell.text(.newest))
-                    Spacer()
-                    Text(
-                        shell.text.messageAge(brief.messageAt, at: shell.messageNow, long: true)
-                    ).monospacedDigit()
-                }.font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
-                Text(brief.newest).font(Phosphor.prose).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(shell.text(.newest).uppercased()).font(Phosphor.label).tracking(0.88)
+                        .foregroundStyle(Phosphor.tertiary)
+                    Text(Self.formatted(brief.newest)).font(Phosphor.prose)
+                        .foregroundStyle(Phosphor.secondary).textSelection(.enabled)
+                }
                 if let prompt = brief.prompt {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text(shell.text(.pending).uppercased()).font(Phosphor.label)
                             .tracking(0.88).foregroundStyle(Phosphor.tertiary)
                         Text(prompt).font(Phosphor.prose)
-                        ForEach(Array(brief.options.enumerated()), id: \.offset) { _, option in
-                            Text(option).font(Phosphor.body)
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(brief.options.enumerated()), id: \.offset) { _, option in
+                                Text(option).font(Phosphor.small)
+                            }
                         }
+                        .foregroundStyle(Phosphor.secondary)
                         Text(shell.text(.answerElsewhere)).font(Phosphor.prose)
-                            .foregroundStyle(Phosphor.secondary)
-                    }.consoleCard().textSelection(.enabled)
+                            .foregroundStyle(Phosphor.tertiary)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        Phosphor.card, in: RoundedRectangle(cornerRadius: Phosphor.cardRadius)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Phosphor.cardRadius)
+                            .stroke(
+                                Phosphor.rule,
+                                style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                            )
+                    )
+                    .textSelection(.enabled)
                 }
             }
         } else {
             Text(shell.text(shell.panel.sessionFailure == nil ? .loading : .sessionUnavailable))
                 .font(Phosphor.prose)
         }
+    }
+
+    static func formatted(_ source: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: source,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ))
+            ?? AttributedString(source)
     }
 
     private var briefStateColour: Color {

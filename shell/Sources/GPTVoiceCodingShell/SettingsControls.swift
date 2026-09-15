@@ -199,7 +199,8 @@ struct VoiceSettingsView: View {
             SettingsPicker(
                 title: shell.text(.voice),
                 value: shell.configuration?.voice ?? shell.text(.notChosen),
-                choices: shell.configuration?.voices ?? [], enabled: !shell.savingSettings
+                choices: shell.configuration?.voices ?? [], enabled: !shell.savingSettings,
+                menuWidth: Phosphor.voicePickerWidth
             ) { value in Task { await shell.saveSetting(.voice, value: .string(value)) } }
             SettingsPicker(
                 title: shell.text(.realtimeModel),
@@ -216,6 +217,7 @@ struct SettingsPicker: View {
     let value: String
     let choices: [String]
     var enabled = true
+    var menuWidth = Phosphor.modelPickerWidth
     let select: (String) -> Void
     @State private var expanded = false
 
@@ -266,6 +268,7 @@ struct SettingsPicker: View {
                 }.buttonStyle(PlainHandButton())
             }
         }.padding(4)
+            .frame(width: menuWidth, alignment: .leading)
             .background(
                 Phosphor.raised, in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
             )

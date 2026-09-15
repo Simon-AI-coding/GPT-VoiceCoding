@@ -601,6 +601,11 @@ import Testing
         }
     }
 
+    @Test func sessionBriefFormatsInlineMarkdownWithoutShowingItsMarkers() {
+        let rendered = SessionBriefView.formatted("Yes, **send this one** now.")
+        #expect(String(rendered.characters) == "Yes, send this one now.")
+    }
+
     @Test func anUnknownAutoHangupIsNotOffAndDiagnosticsOwnsTheCheckReturn() async throws {
         let fixture = try TelegramCredentialFixture()
         let (_, model) = makeShell(

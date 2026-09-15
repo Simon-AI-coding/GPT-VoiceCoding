@@ -11,7 +11,7 @@ import Testing
 
 @MainActor
 @Suite struct ShellModelTests {
-    @Test func lampCallingClickCancelsWithoutConfirmation() async throws {
+    @Test func lampCallingCannotCancelTheDial() async throws {
         let fixture = try TelegramCredentialFixture()
         let engine = GatedCallPlane()
         let (_, model) = makeShell(
@@ -21,9 +21,12 @@ import Testing
         let dial = Task { await model.activateLampCell() }
         #expect(await waitUntil { model.panel.phase == .calling })
         await model.activateLampCell()
+        #expect(model.panel.phase == .calling)
+        #expect(!model.lampCellEnabled)
+        engine.dial.resolve()
         await dial.value
         #expect(model.confirmation == nil)
-        #expect(model.panel.phase == .ready)
+        #expect(model.panel.phase == .onCall)
         #expect(model.panel.lastFailure == nil)
         await model.stopEngine()
     }
@@ -523,6 +526,81 @@ import Testing
         }
     }
 
+    @Test func onboardingStepsRenderAtTheDesignWidthAndMinimumHeight() async throws {
+        let template = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("app_bundle/config.example.toml")
+        for language in ["en", "zh-Hans"] {
+            let fixture = try TelegramCredentialFixture()
+            try FileManager.default.removeItem(atPath: fixture.configPath)
+            let location = EngineLocation(
+                configPath: fixture.configPath,
+                socketPath: fixture.directory.appendingPathComponent("engine.sock").path)
+            let file = ShellConfigurationFile(location: location) { _ in
+                ShellConfiguration([
+                    "model": .string("gpt-5.6-terra"), "effort": .string("low"),
+                ])
+            }
+            let preferences = testPreferences()
+            preferences.set(language, forKey: ShellText.preferenceKey)
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(),
+                panel: ControlPanel(client: DesktopControlPlane()), configurationFile: file,
+                preferences: preferences,
+                runCommand: { _ in
+                    InstallationReport(
+                        ok: true, lines: ["claude-hooks: current", "codex-launch-agent: stale"])
+                })
+            let cli = fixture.directory.appendingPathComponent("engine/bin/bridgectl")
+            await model.begin(template: template, delegateCLI: cli)
+
+            for step in OnboardingStep.allCases {
+                if step == .codex { await model.checkCodex() }
+                let view = NSHostingView(
+                    rootView: ControlPanelView(shell: model).frame(width: Phosphor.windowWidth))
+                view.frame.size = view.fittingSize
+                view.layoutSubtreeIfNeeded()
+                #expect(view.frame.width == Phosphor.windowWidth)
+                #expect(view.frame.height >= 300)
+                try await renderLamp(
+                    ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
+                    appearance: .dark,
+                    name: "onboarding-\(step.rawValue)-\(language)-dark")
+                if step != .testCall { await model.advanceOnboarding() }
+            }
+            model.open(.onboarding(.welcome))
+            try await renderLamp(
+                ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
+                appearance: .light, name: "onboarding-1-\(language)-light")
+            await model.stopEngine()
+        }
+    }
+
+    @Test func sessionBriefRendersAtTheDesignWidth() async throws {
+        for language in ["en", "zh-Hans"] {
+            let fixture = try TelegramCredentialFixture()
+            let preferences = testPreferences()
+            preferences.set(language, forKey: ShellText.preferenceKey)
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(),
+                panel: ControlPanel(client: RenderControlPlane(populated: true)),
+                preferences: preferences)
+            let target = SessionAddress(
+                .of(["agent": "codex", "session_id": "atlas · auth flow"]))
+            await model.panel.refreshRoster()
+            model.open(.session(target))
+            await model.panel.refreshSession(target)
+
+            for appearance in ShellAppearance.allCases where appearance != .system {
+                try await renderLamp(
+                    ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
+                    appearance: appearance,
+                    name: "session-brief-\(language)-\(appearance.rawValue)")
+            }
+            await model.stopEngine()
+        }
+    }
+
     @Test func anUnknownAutoHangupIsNotOffAndDiagnosticsOwnsTheCheckReturn() async throws {
         let fixture = try TelegramCredentialFixture()
         let (_, model) = makeShell(
@@ -564,16 +642,12 @@ import Testing
         let dial = Task { await model.panel.toggleLive() }
         #expect(await waitUntil { model.panel.phase == .calling })
         await model.saveSetting(.voice, value: .string("maple"))
-        let appliedLanguage = model.text.language
-        let requestedLanguage: ShellLanguage = appliedLanguage == "en" ? .chinese : .english
-        model.setLanguage(requestedLanguage)
         for phase in [CallPhase.calling, .onCall, .ending] {
             #expect(model.panel.phase == phase)
             #expect(model.restartBlockedByCall)
             await model.restartForSettings()
             #expect(model.pendingRestart)
             #expect(launcher.stopCount == 0)
-            #expect(model.text.language == appliedLanguage)
             if phase == .calling {
                 engine.dial.resolve()
                 await dial.value
@@ -588,7 +662,6 @@ import Testing
         await model.restartForSettings()
         #expect(await waitUntil { model.health == .running(pid: 2002) && !model.pendingRestart })
         #expect(model.configuration?.voice == "maple")
-        #expect(model.text.language == requestedLanguage.rawValue)
         await model.stopEngine()
     }
 
@@ -1012,7 +1085,7 @@ import Testing
             await model.stopEngine()
         }
     }
-    @Test func generalLanguageWaitsForExplicitRestartAndReloadsVisibleCopy() async throws {
+    @Test func generalLanguageWaitsForRelaunchWithoutRaisingAnEngineRestart() async throws {
         let fixture = try TelegramCredentialFixture()
         let before = try Data(contentsOf: URL(fileURLWithPath: fixture.configPath))
         let suite = "gvc-settings-\(UUID().uuidString)"
@@ -1030,15 +1103,15 @@ import Testing
         #expect(model.selectedLanguage == .chinese)
         #expect(model.text.language == "en")
         #expect(preferences.string(forKey: ShellText.preferenceKey) == "zh-Hans")
-        #expect(model.pendingRestart)
+        #expect(!model.pendingRestart)
         model.setAppearance(.dark)
-        #expect(model.pendingRestart)
+        #expect(!model.pendingRestart)
         model.setLanguage(.english)
         #expect(!model.pendingRestart)
         model.setLanguage(.chinese)
         await model.restartForSettings()
-        #expect(model.text.language == "zh-Hans")
-        #expect(model.text(.settings) == "设置")
+        #expect(model.text.language == "en")
+        #expect(model.text(.settings) == "Settings")
         #expect(!model.pendingRestart)
         #expect(launcher.launchCount == 0)
         #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.configPath)) == before)
@@ -1515,6 +1588,32 @@ import Testing
 private struct RenderControlPlane: ControlPlaneDialing {
     let populated: Bool
     func ask(_ request: Request) async throws -> Reply {
+        if request.action == .brief, request.payload?["target"] != nil {
+            return try Reply.of(
+                JSONSerialization.data(withJSONObject: [
+                    "ok": true, "action": request.action.rawValue,
+                    "protocol": controlPlaneProtocolVersion,
+                    "data": [
+                        "session": [
+                            "name": "atlas · auth flow",
+                            "state_word": "waiting for your decision",
+                            "newest": [
+                                "text":
+                                    "I can rotate the key now. Two jobs are still holding the old one, so I need to know what happens to them before I go ahead.",
+                                "occurred_at": "2026-09-15T04:00:00Z",
+                            ],
+                            "decision": [
+                                "prompt":
+                                    "Should the old sessions keep working after the key rotates, or expire right away?",
+                                "options": [
+                                    ["text": "Keep them working until they expire on their own"],
+                                    ["text": "Expire them all now"],
+                                ],
+                            ],
+                        ]
+                    ],
+                ]))
+        }
         let names = ["atlas · auth flow", "harbor · checkout", "lumen · docs site"]
         let rows: [[String: Any]] =
             populated

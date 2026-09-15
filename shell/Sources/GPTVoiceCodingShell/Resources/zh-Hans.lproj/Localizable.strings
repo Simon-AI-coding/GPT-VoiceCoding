@@ -95,8 +95,10 @@
 "launchAtLogin" = "登录时启动";
 "language" = "语言";
 "telegramToken" = "粘贴 BotFather 给你的 token";
+"telegramTokenLabel" = "Telegram token";
+"telegramBot" = "机器人";
 "telegramTokenHelp" = "在 Telegram 中找 BotFather 创建机器人，再粘贴它给你的 token。";
-"telegramValidate" = "检查 token";
+"telegramValidate" = "验证";
 "telegramCheck" = "我已发送 /start，检查绑定";
 "telegramNamed" = "token 能确定机器人，但不能确定消息应该发到哪个聊天。";
 "telegramWaiting" = "在你常用的 Telegram 客户端或网页版中，搜索上方用户名。进入它的聊天，发送 /start（或点 Start），再回这里点检查绑定。";
@@ -125,16 +127,21 @@
 "codexNotLoggedIn" = "Codex 已安装但未登录，应用还不能启动 Call Agent。";
 "codexLoginFix" = "在终端运行 codex login 登录，然后重新检查。";
 "recheck" = "重新检查";
+"installed" = "已安装";
+"loggedIn" = "已登录";
+"yes" = "是";
+"no" = "否";
 "continueSetup" = "继续";
 "skipSetup" = "暂时跳过";
 "placedTitle" = "已放置的内容";
+"placedBody" = "Claude Code 旁现在有一个小助手，让应用知道会话何时停下来；一个登录项会让 Codex 服务在后台保持运行。你可以在设置中撤回这两项改动。";
 "claudePlaced" = "Claude Code 设置中的一段钩子，让应用知道会话何时停下来。";
 "claudeNotPlaced" = "未在 Claude Code 的设置中放置辅助内容。";
 "codexPlaced" = "一个登录项让 Codex 服务在后台保持运行。";
 "codexNotPlaced" = "未给 Codex 服务放置登录项。";
 "placementFailed" = "这一部分未能完成设置，详细原因在诊断中。";
 "placementReversible" = "这两项改动都可以撤回。";
-"folderAccessNotice" = "macOS 会询问是否允许访问项目所在的文件夹，以便向你显示项目名称。";
+"folderAccessNotice" = "macOS 会询问是否允许访问项目所在的文件夹。这只是为了向你显示项目名称。";
 "setupAgentBody" = "这是在通话中与你交谈、操作会话的助手。模型和思考强度已为你预选。";
 "setupTelegramBody" = "粘贴机器人 token 后，应用也能通过 Telegram 联系你，你还能在那里回复会话。";
 "testCallTitle" = "试打一通电话";
@@ -149,6 +156,7 @@
 "appearanceSystemHint" = "跟随 Mac 的外观，并在应用运行时同步变化。";
 "appearanceDarkHint" = "固定使用深色，不受 Mac 外观设置影响。";
 "appearanceLightHint" = "固定使用浅色，不受 Mac 外观设置影响。";
+"languageHint" = "下次打开应用时生效。";
 "lampEngineDown" = "应用未在监看你的会话。";
 
 

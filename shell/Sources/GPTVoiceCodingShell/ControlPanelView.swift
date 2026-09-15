@@ -7,12 +7,13 @@ struct ControlPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if shell.page != .home, !isOnboarding {
-                Button {
-                    shell.goBack()
-                } label: {
-                    Label(shell.text(.back), systemImage: "chevron.left")
+            if let navigationTitle {
+                HStack(spacing: 6) {
+                    Button("‹ " + shell.text(.back)) { shell.goBack() }
+                        .buttonStyle(PlainHandButton()).foregroundStyle(Phosphor.accent)
+                    Text(shell.text(navigationTitle)).foregroundStyle(Phosphor.tertiary)
                 }
+                ConsoleRule()
             }
             switch shell.page {
             case .home, nil: HomeView(shell: shell)
@@ -29,7 +30,9 @@ struct ControlPanelView: View {
                 ConfirmationRow(shell: shell)
             }
         }
-        .padding(Phosphor.padding).padding(.top, 16)
+        .padding(.horizontal, isOnboarding ? 24 : Phosphor.padding)
+        .padding(.bottom, isOnboarding ? 24 : Phosphor.padding)
+        .padding(.top, 28)
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(Phosphor.body).foregroundStyle(Phosphor.primary)
         .background(Phosphor.window).tint(Phosphor.accent)
@@ -39,6 +42,15 @@ struct ControlPanelView: View {
     private var isOnboarding: Bool {
         if case .onboarding = shell.page { return true }
         return false
+    }
+
+    private var navigationTitle: Copy? {
+        switch shell.page {
+        case .session: return .session
+        case .settings: return .settings
+        case .codexCheck: return .diagnostics
+        default: return nil
+        }
     }
 }
 
@@ -243,42 +255,42 @@ private struct SessionBriefView: View {
     var body: some View {
         if let brief = shell.panel.sessionBrief {
             VStack(alignment: .leading, spacing: 12) {
-                Text(shell.text(.session)).font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
-                HStack {
+                HStack(spacing: 8) {
                     AgentMark(agent: target.agent, size: Phosphor.briefMark)
                     Text(shell.text.name(brief.name)).font(Phosphor.headline)
+                    Text(brief.stateWord).foregroundStyle(briefStateColour)
                 }
-                Text(brief.stateWord).foregroundStyle(Phosphor.accent)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(shell.text(.newest))
-                            Spacer()
-                            Text(
-                                shell.text.messageAge(
-                                    brief.messageAt, at: shell.messageNow, long: true)
-                            )
-                            .monospacedDigit()
-                        }.font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
-                        Text(brief.newest).font(Phosphor.prose)
-                        if let prompt = brief.prompt {
-                            Divider()
-                            Text(shell.text(.pending)).font(Phosphor.label).foregroundStyle(
-                                Phosphor.tertiary)
-                            Text(prompt).font(Phosphor.prose)
-                            ForEach(Array(brief.options.enumerated()), id: \.offset) { _, option in
-                                Text(option).font(Phosphor.prose)
-                            }
-                            Text(shell.text(.answerElsewhere)).font(Phosphor.prose)
-                                .foregroundStyle(Phosphor.secondary)
+                HStack {
+                    Text(shell.text(.newest))
+                    Spacer()
+                    Text(
+                        shell.text.messageAge(brief.messageAt, at: shell.messageNow, long: true)
+                    ).monospacedDigit()
+                }.font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
+                Text(brief.newest).font(Phosphor.prose).textSelection(.enabled)
+                if let prompt = brief.prompt {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(shell.text(.pending).uppercased()).font(Phosphor.label)
+                            .tracking(0.88).foregroundStyle(Phosphor.tertiary)
+                        Text(prompt).font(Phosphor.prose)
+                        ForEach(Array(brief.options.enumerated()), id: \.offset) { _, option in
+                            Text(option).font(Phosphor.body)
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                }.frame(idealHeight: Phosphor.rosterHeight, maxHeight: Phosphor.rosterHeight)
+                        Text(shell.text(.answerElsewhere)).font(Phosphor.prose)
+                            .foregroundStyle(Phosphor.secondary)
+                    }.consoleCard().textSelection(.enabled)
+                }
             }
         } else {
             Text(shell.text(shell.panel.sessionFailure == nil ? .loading : .sessionUnavailable))
                 .font(Phosphor.prose)
         }
+    }
+
+    private var briefStateColour: Color {
+        guard let state = shell.panel.displayedRoster.first(where: { $0.target == target })?.state
+        else { return Phosphor.secondary }
+        return Phosphor.state(state)
     }
 }
 
@@ -372,14 +384,20 @@ struct SettingsView: View {
                     Button {
                         shell.open(.settings(item))
                     } label: {
-                        Text(shell.text(item.title)).frame(maxWidth: .infinity, alignment: .leading)
-                            .foregroundStyle(item == group ? Phosphor.accent : Phosphor.secondary)
-                    }.buttonStyle(PlainHandButton()).padding(.vertical, 4)
+                        HStack(spacing: 6) {
+                            Text("›").foregroundStyle(
+                                item == group ? Phosphor.accent : Phosphor.muted)
+                            Text(shell.text(item.title)).foregroundStyle(
+                                item == group ? Phosphor.primary : Phosphor.secondary)
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 6).padding(.vertical, 4)
+                            .background(
+                                item == group ? Phosphor.accentWash : .clear,
+                                in: RoundedRectangle(cornerRadius: Phosphor.controlRadius))
+                    }.buttonStyle(PlainHandButton())
                 }
             }.frame(width: Phosphor.navigationWidth)
-            Divider()
             VStack(alignment: .leading, spacing: 12) {
-                Text(shell.text(group.title)).font(Phosphor.headline)
                 switch group {
                 case .diagnostics: DiagnosticsView(shell: shell)
                 case .voice: VoiceSettingsView(shell: shell)

@@ -58,13 +58,13 @@ enum Phosphor {
     static let switchWidth: CGFloat = 30
     static let switchHeight: CGFloat = 16
     static let switchKnob: CGFloat = 12
-    static let body = Font.system(size: 13, design: .monospaced)
-    static let small = Font.system(size: 12, design: .monospaced)
-    static let title = Font.system(size: 22, weight: .medium, design: .monospaced)
-    static let display = Font.system(size: 28, weight: .medium, design: .monospaced)
+    static let body = mono(size: 13)
+    static let small = mono(size: 12)
+    static let title = mono(size: 22, weight: .medium)
+    static let display = mono(size: 28, weight: .medium)
     static let prose = Font.system(size: 13)
-    static let label = Font.system(size: 11, weight: .medium, design: .monospaced)
-    static let headline = Font.system(size: 15, weight: .medium, design: .monospaced)
+    static let label = mono(size: 11, weight: .medium)
+    static let headline = mono(size: 15, weight: .medium)
     static let motion = Animation.timingCurve(0.32, 0.72, 0, 1, duration: 0.2)
     static let pulse = Animation.easeInOut(duration: 0.8)
 
@@ -89,6 +89,13 @@ enum Phosphor {
                     green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255,
                     alpha: isDark ? darkAlpha : lightAlpha)
             })
+    }
+
+    private static func mono(size: CGFloat, weight: NSFont.Weight = .regular) -> Font {
+        let face = weight == .medium ? "JetBrainsMono-Medium" : "JetBrainsMono-Regular"
+        return Font(
+            NSFont(name: face, size: size)
+                ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight))
     }
 }
 
@@ -119,10 +126,12 @@ struct AgentMark: View {
 struct ConsoleButton: ButtonStyle {
     var prominent = false
     var destructive = false
+    var large = false
     @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(Phosphor.body)
-            .padding(.horizontal, 10).padding(.vertical, 4)
+            .padding(.horizontal, large ? 16 : prominent ? 14 : 10)
+            .padding(.vertical, large ? 6 : prominent ? 5 : 4)
             .foregroundStyle(
                 !isEnabled
                     ? Phosphor.muted
@@ -136,7 +145,8 @@ struct ConsoleButton: ButtonStyle {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Phosphor.controlRadius)
-                    .stroke(destructive ? Phosphor.danger : Phosphor.ruleStrong)
+                    .stroke(
+                        destructive ? Phosphor.danger : prominent ? .clear : Phosphor.ruleStrong)
             )
             .opacity(configuration.isPressed ? 0.7 : 1).pointingHand()
     }
@@ -161,7 +171,11 @@ struct ConsoleToggle: ToggleStyle {
                 }
                 Capsule()
                     .fill(configuration.isOn && isEnabled ? Phosphor.accent : Color.clear)
-                    .overlay(Capsule().stroke(isEnabled ? Phosphor.ruleStrong : Phosphor.rule))
+                    .overlay(
+                        Capsule().stroke(
+                            isEnabled ? Phosphor.ruleStrong : Phosphor.rule,
+                            style: StrokeStyle(lineWidth: 1, dash: isEnabled ? [] : [3, 3]))
+                    )
                     .overlay(alignment: configuration.isOn && isEnabled ? .trailing : .leading) {
                         Circle()
                             .fill(

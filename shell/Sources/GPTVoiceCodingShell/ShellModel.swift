@@ -100,7 +100,7 @@ final class ShellModel {
     private var hangupDeadline: TimeInterval?
     private var confirmingCallID: String?
     var lampCellEnabled: Bool {
-        panel.engineReachable && panel.phase != .ending && (!panel.busy || panel.phase == .calling)
+        panel.engineReachable && !panel.phase.resolving && !panel.busy
     }
     var lampHangupArmed: Bool {
         panel.phase == .onCall && (lampCellHovered || confirmation == .hangUp)
@@ -109,7 +109,7 @@ final class ShellModel {
     func activateLampCell() async {
         guard lampCellEnabled else { return }
         switch panel.phase {
-        case .calling: await panel.cancelDial()
+        case .calling, .ending: break
         case .onCall:
             if confirmation == .hangUp {
                 confirmation = nil
@@ -120,7 +120,6 @@ final class ShellModel {
                 dismissLampActions()
             }
         case .ready, .couldNotConnect: await panel.toggleLive()
-        case .ending: break
         }
     }
 
@@ -230,10 +229,7 @@ final class ShellModel {
     private(set) var selectedAppearance: ShellAppearance
     private(set) var configuration: ShellConfiguration?
     private var configurationPendingRestart = false
-    private var restartingLanguage: ShellLanguage?
-    var pendingRestart: Bool {
-        configurationPendingRestart || selectedLanguage.rawValue != text.language
-    }
+    var pendingRestart: Bool { configurationPendingRestart }
     private(set) var savingSettings = false
     private(set) var settingsFailure: String?
     private var settingsSavedPID: Int32?
@@ -861,12 +857,7 @@ final class ShellModel {
 
     func restartForSettings() async {
         guard pendingRestart, !savingSettings, !restartBlockedByCall else { return }
-        if configurationPendingRestart {
-            restartingLanguage = selectedLanguage
-            await supervisor.retry()
-        } else {
-            text = ShellText(language: selectedLanguage.rawValue)
-        }
+        await supervisor.retry()
     }
 
     private func refreshStatus() async {
@@ -876,10 +867,6 @@ final class ShellModel {
             case .running(let pid) = queriedHealth, health == queriedHealth, pid != settingsSavedPID
         {
             configurationPendingRestart = false
-            if let restartingLanguage {
-                text = ShellText(language: restartingLanguage.rawValue)
-                self.restartingLanguage = nil
-            }
         }
     }
 

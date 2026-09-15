@@ -25,6 +25,28 @@ import Testing
         #expect(oversized.height == screen.height)
     }
 
+    @Test func controlWindowLeavesItsMeasuredContentBelowTheTitleBar() {
+        let style: NSWindow.StyleMask = [
+            .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
+        ]
+        let contentHeight: CGFloat = 350
+        let frameHeight = DesktopWindows.controlWindowFrameHeight(
+            contentHeight: contentHeight, styleMask: style)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: frameHeight),
+            styleMask: style, backing: .buffered, defer: true)
+
+        #expect(window.contentLayoutRect.height == contentHeight)
+    }
+
+    @Test func aStaleLoginItemIsPresentedAsPlacedInsteadOfFailed() {
+        let presentation = OnboardingView.placementPresentation(
+            state: .stale, current: .codexPlaced, absent: .codexNotPlaced)
+
+        #expect(presentation.copy == .codexPlaced)
+        #expect(!presentation.failed)
+    }
+
     @Test func messageAgeUsesOneUnitAndNeverInventsMissingTime() {
         let text = ShellText(language: "en")
         let stamp = Date(timeIntervalSince1970: 1_000_000)

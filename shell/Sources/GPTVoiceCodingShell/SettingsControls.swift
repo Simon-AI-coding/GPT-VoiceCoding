@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AgentSettingsView: View {
     let shell: ShellModel
+    var showsNote = true
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             SettingsPicker(
@@ -21,13 +22,15 @@ struct AgentSettingsView: View {
             ) { effort in
                 Task { await shell.saveSetting(.effort, value: .string(effort)) }
             }
-            Text(shell.text(.agentModelsNote)).font(Phosphor.prose).foregroundStyle(
-                Phosphor.secondary)
-            if shell.agentModelUnavailable {
+            if showsNote {
+                Text(shell.text(.agentModelsNote)).font(Phosphor.prose).foregroundStyle(
+                    Phosphor.secondary)
+            }
+            if showsNote && shell.agentModelUnavailable {
                 Text(shell.text(.agentModelGone)).font(Phosphor.prose).foregroundStyle(
                     Phosphor.secondary)
             }
-            if !shell.panel.engineReachable || shell.panel.models.isEmpty {
+            if showsNote && (!shell.panel.engineReachable || shell.panel.models.isEmpty) {
                 Text(shell.text(.agentModelsUnavailable)).font(Phosphor.prose).foregroundStyle(
                     Phosphor.secondary)
             }
@@ -48,7 +51,7 @@ struct CallSettingsView: View {
                         get: { autoHangup },
                         set: { on in Task { await shell.panel.flip("auto_hangup", on: on) } }
                     )
-                ).toggleStyle(.switch).pointingHand().disabled(
+                ).toggleStyle(ConsoleToggle()).disabled(
                     !shell.panel.engineReachable || shell.panel.busy)
             } else {
                 Text(shell.text(.autoHangup) + " · " + shell.text(.unavailable))
@@ -79,7 +82,7 @@ struct GeneralSettingsView: View {
                 isOn: Binding(
                     get: { shell.loginItem.enabled }, set: { shell.loginItem.set($0) }
                 )
-            ).toggleStyle(.switch).pointingHand()
+            ).toggleStyle(ConsoleToggle())
             if shell.loginItem.failure != nil {
                 Text(shell.text(.settingsSaveFailed)).font(Phosphor.prose)
                 Button(shell.text(.openDiagnostics)) { shell.open(.settings(.diagnostics)) }
@@ -118,14 +121,30 @@ struct GeneralSettingsView: View {
             }.font(Phosphor.body)
             Text(shell.text(shell.selectedAppearance.hint))
                 .font(Phosphor.prose).foregroundStyle(Phosphor.secondary)
-            SettingsPicker(
-                title: shell.text(.language),
-                value: shell.selectedLanguage.label,
-                choices: ShellLanguage.allCases.map(\.label)
-            ) {
-                let chosen = $0
-                shell.setLanguage(ShellLanguage.allCases.first { $0.label == chosen }!)
+            HStack(spacing: 8) {
+                Text(shell.text(.language)).foregroundStyle(Phosphor.tertiary)
+                Spacer(minLength: 8)
+                ForEach(ShellLanguage.allCases, id: \.self) { language in
+                    Button(language.label) { shell.setLanguage(language) }
+                        .buttonStyle(PlainHandButton())
+                        .foregroundStyle(
+                            shell.selectedLanguage == language
+                                ? Phosphor.accent : Phosphor.secondary
+                        )
+                        .padding(.horizontal, 10).padding(.vertical, 2)
+                        .background(
+                            shell.selectedLanguage == language ? Phosphor.accentWash : .clear,
+                            in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                                .stroke(
+                                    shell.selectedLanguage == language
+                                        ? Phosphor.ruleAccent : Phosphor.ruleStrong))
+                }
             }
+            Text(shell.text(.languageHint)).font(Phosphor.prose)
+                .foregroundStyle(Phosphor.secondary)
         }
     }
 }
@@ -141,15 +160,23 @@ private struct SettingsNumber: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).foregroundStyle(Phosphor.tertiary)
-            HStack {
+            HStack(spacing: 8) {
+                Text(title).foregroundStyle(Phosphor.tertiary)
+                Spacer(minLength: 8)
                 TextField("", text: $draft).focused($focused)
                     .textFieldStyle(.plain).foregroundStyle(Phosphor.bright)
                     .onSubmit(commit)
+                    .multilineTextAlignment(.trailing).frame(minWidth: 28, idealWidth: 36)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(
+                        Phosphor.raised, in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                            .stroke(Phosphor.ruleStrong))
                 Text(text(.secondsUnit)).foregroundStyle(Phosphor.tertiary)
-            }.padding(6).background(Phosphor.raised)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Phosphor.controlRadius).stroke(Phosphor.rule))
+            }
             if invalid { Text(text(.numberRequired)).font(Phosphor.prose) }
         }
         .onAppear { reset() }
@@ -190,37 +217,61 @@ struct SettingsPicker: View {
     let choices: [String]
     var enabled = true
     let select: (String) -> Void
+    @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
             Text(title).foregroundStyle(Phosphor.tertiary)
-            Menu {
-                ForEach(choices, id: \.self) { choice in
-                    Button {
-                        if choice != value { select(choice) }
-                    } label: {
-                        if choice == value {
-                            Label(choice, systemImage: "checkmark")
-                        } else {
-                            Text(choice)
-                        }
-                    }
-                }
+            Spacer(minLength: 8)
+            Button {
+                expanded.toggle()
             } label: {
-                HStack {
+                HStack(spacing: 8) {
                     Text(value).foregroundStyle(enabled ? Phosphor.bright : Phosphor.secondary)
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.down").foregroundStyle(Phosphor.tertiary)
-                }.padding(.horizontal, 8).padding(.vertical, 4)
+                    Text("⌄").font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
+                }.padding(.horizontal, 8).padding(.vertical, 3)
                     .background(
                         Phosphor.raised, in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: Phosphor.controlRadius).stroke(Phosphor.rule)
+                        RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                            .stroke(enabled ? Phosphor.ruleStrong : Phosphor.rule)
                     )
-            }.menuStyle(.borderlessButton).menuIndicator(.hidden).pointingHand()
-                .disabled(!enabled || choices.isEmpty)
+            }.buttonStyle(PlainHandButton()).disabled(!enabled || choices.isEmpty)
         }
+        .overlay(alignment: .topTrailing) {
+            if expanded {
+                choicesList.offset(y: 28)
+            }
+        }
+        .zIndex(expanded ? 1 : 0)
+    }
+
+    private var choicesList: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(choices, id: \.self) { choice in
+                Button {
+                    expanded = false
+                    if choice != value { select(choice) }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(choice == value ? "›" : " ").foregroundStyle(Phosphor.accent)
+                        Text(choice).foregroundStyle(
+                            choice == value ? Phosphor.bright : Phosphor.secondary)
+                        Spacer(minLength: 12)
+                    }.padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(
+                            choice == value ? Phosphor.accentWash : .clear,
+                            in: RoundedRectangle(cornerRadius: Phosphor.controlRadius))
+                }.buttonStyle(PlainHandButton())
+            }
+        }.padding(4)
+            .background(
+                Phosphor.raised, in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                    .stroke(Phosphor.ruleStrong))
     }
 }
 

@@ -73,55 +73,78 @@ extension ActionFailure {
 struct DiagnosticsView: View {
     let shell: ShellModel
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(shell.diagnosticHealth)
-                    .font(Phosphor.prose)
-                Button(shell.text(.codexCheckTitle)) { shell.open(.codexCheck) }
-                ForEach(shell.diagnosticRows) { row in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(shell.text(row.title)).font(Phosphor.label).foregroundStyle(
-                            Phosphor.tertiary)
-                        Text(row.value).textSelection(.enabled)
-                        if row.title == .socket
-                            || row.title == .log && shell.configuration?.logPath != nil
-                        {
-                            Button(shell.text(.open)) {
-                                NSWorkspace.shared.activateFileViewerSelecting([
-                                    URL(fileURLWithPath: row.value)
-                                ])
-                            }
-                        }
-                    }
-                }
-                ForEach(Array(shell.diagnosticErrors.enumerated()), id: \.offset) { _, detail in
-                    Text(detail).font(Phosphor.prose).foregroundStyle(Phosphor.danger)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 8) {
+                Text("●").foregroundStyle(
+                    shell.panel.engineReachable ? Phosphor.accent : Phosphor.danger)
+                Text(shell.diagnosticHealth).font(Phosphor.prose)
+            }
+            VStack(spacing: 6) {
+                ForEach(shell.diagnosticRows) { row in diagnosticRow(row) }
+            }
+            Button(shell.text(.codexCheckTitle)) { shell.open(.codexCheck) }
+            ForEach(Array(shell.diagnosticErrors.enumerated()), id: \.offset) { _, detail in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("●").foregroundStyle(Phosphor.danger)
+                    Text(detail).font(Phosphor.prose).foregroundStyle(Phosphor.secondary)
                         .textSelection(.enabled)
                 }
+            }
+            HStack(spacing: 8) {
                 Button(shell.text(shell.panel.busy ? .checking : .verify)) {
                     Task { await shell.panel.verify() }
                 }.disabled(shell.panel.busy)
                 Text(shell.text(.verifyHint)).font(Phosphor.prose)
-                Text(shell.text(.verifyLimit)).font(Phosphor.prose).foregroundStyle(
-                    Phosphor.secondary)
-                ForEach(shell.panel.seams ?? []) { seam in
-                    HStack {
-                        Text(seam.seam)
-                        Spacer()
-                        Text(seam.outcome)
+                    .foregroundStyle(Phosphor.secondary)
+            }
+            Text(shell.text(.verifyLimit)).font(Phosphor.prose).foregroundStyle(
+                Phosphor.secondary)
+            if let seams = shell.panel.seams, !seams.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(seams) { seam in
+                        HStack {
+                            Text(seam.seam).foregroundStyle(Phosphor.secondary)
+                            Spacer(minLength: 8)
+                            Text(seam.outcome).foregroundStyle(
+                                seam.outcome == "ok" ? Phosphor.accent : Phosphor.danger)
+                        }.font(Phosphor.small).padding(.horizontal, 8).padding(.vertical, 5)
+                            .overlay(alignment: .bottom) { ConsoleRule() }
                     }
                 }
-                Text(shell.text(.output)).font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
-                ScrollView([.horizontal, .vertical]) {
-                    Text(shell.engineOutput.suffix(50).joined(separator: "\n"))
-                        .font(Phosphor.label).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(height: Phosphor.outputHeight).background(Phosphor.sunken)
-                Button(shell.text(.copyDiagnostics)) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(shell.diagnosticsText, forType: .string)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }.frame(idealHeight: Phosphor.rosterHeight + Phosphor.outputHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Phosphor.cardRadius)
+                        .stroke(Phosphor.rule))
+            }
+            Text(shell.text(.output).uppercased()).font(Phosphor.label).tracking(0.88)
+                .foregroundStyle(Phosphor.tertiary)
+            ScrollView([.horizontal, .vertical]) {
+                Text(shell.engineOutput.suffix(50).joined(separator: "\n"))
+                    .font(Phosphor.label).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: Phosphor.outputHeight).padding(8).background(Phosphor.sunken)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Phosphor.cardRadius)
+                        .stroke(Phosphor.rule))
+            Button(shell.text(.copyDiagnostics)) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(shell.diagnosticsText, forType: .string)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func diagnosticRow(_ row: DiagnosticRow) -> some View {
+        HStack(spacing: 8) {
+            Text(shell.text(row.title)).foregroundStyle(Phosphor.tertiary)
+            Spacer(minLength: 8)
+            Text(row.value).foregroundStyle(Phosphor.bright).lineLimit(1)
+                .truncationMode(.middle).textSelection(.enabled)
+            if row.title == .log && shell.configuration?.logPath != nil {
+                Button(shell.text(.open)) {
+                    NSWorkspace.shared.activateFileViewerSelecting([
+                        URL(fileURLWithPath: row.value)
+                    ])
+                }.buttonStyle(PlainHandButton()).foregroundStyle(Phosphor.accent)
+            }
+        }.font(Phosphor.small)
     }
 }

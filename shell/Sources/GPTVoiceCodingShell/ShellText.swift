@@ -89,14 +89,16 @@ enum Copy: String, CaseIterable {
         numberRequired
     case appearance, appearanceSystem, appearanceDark, appearanceLight
     case appearanceSystemHint, appearanceDarkHint, appearanceLightHint
-    case launchAtLogin, language
+    case launchAtLogin, language, languageHint
     case agentModelsNote, agentModelGone, agentModelsUnavailable
     case onboardingStep, welcomeTitle, welcomeBody, start, codexCheckTitle, codexReady,
         codexNotInstalled, codexInstallFix, codexNotLoggedIn, codexLoginFix, recheck,
-        continueSetup, skipSetup, placedTitle, claudePlaced, claudeNotPlaced, codexPlaced,
+        installed, loggedIn, yes, no, continueSetup, skipSetup, placedTitle, placedBody,
+        claudePlaced, claudeNotPlaced, codexPlaced,
         codexNotPlaced, placementFailed, placementReversible, folderAccessNotice,
         setupAgentBody, setupTelegramBody, testCallTitle, testCallBody, placeTestCall, doneSetup
-    case telegramToken, telegramTokenHelp, telegramValidate, telegramCheck, telegramNamed,
+    case telegramToken, telegramTokenLabel, telegramBot, telegramTokenHelp, telegramValidate,
+        telegramCheck, telegramNamed,
         telegramWaiting, telegramNotFound, telegramConfirmed, telegramInvalidToken,
         telegramConnectionFailed,
         telegramDestinationFailed, telegramMaskedNote, telegramChange, telegramUnbind,

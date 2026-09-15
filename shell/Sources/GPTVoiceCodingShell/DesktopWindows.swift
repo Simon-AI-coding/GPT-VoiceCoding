@@ -85,9 +85,10 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
                 }) {
                     ControlPanelView(shell: shell)
                 })
-        let initialHeight = host.fittingSize.height
         host.sizingOptions = [.intrinsicContentSize]
         host.frame.size.width = Phosphor.windowWidth
+        host.layoutSubtreeIfNeeded()
+        let initialHeight = host.fittingSize.height
         host.autoresizingMask = [.width]
         contentHost = host
         let scroll = NSScrollView(frame: window.contentView!.bounds)
@@ -131,6 +132,11 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             surface.appearance = shell.selectedAppearance.native
         }
 
+        // Preparation can replace the initial Home page with onboarding after this window exists.
+        // Re-read the hosting view's natural height whenever observed shell state changes.
+        contentHost?.layoutSubtreeIfNeeded()
+        if let height = contentHost?.fittingSize.height { resizeWindow(height: height) }
+
         if shell.windowOpen {
             if !window.isVisible {
                 NSApp.setActivationPolicy(.regular)
@@ -171,10 +177,14 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
     private func resizeWindow(height: CGFloat) {
         // The preference's initial zero is not a content measurement.
         guard height > 0 else { return }
-        contentHost?.frame.size.height = ceil(height)
+        let contentHeight = ceil(height)
+        contentHost?.frame.size.height = contentHeight
         guard let screen = window.screen ?? NSScreen.main else { return }
         let frame = Self.controlFrame(
-            window.frame, height: height, anchor: nil, screen: screen.visibleFrame)
+            window.frame,
+            height: Self.controlWindowFrameHeight(
+                contentHeight: contentHeight, styleMask: window.styleMask),
+            anchor: nil, screen: screen.visibleFrame)
         if frame != window.frame { window.setFrame(frame, display: true) }
     }
 
@@ -272,6 +282,15 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
             x: min(max(right - size.width, screen.minX), screen.maxX - size.width),
             y: min(max(top - size.height, screen.minY), screen.maxY - size.height),
             width: size.width, height: size.height)
+    }
+
+    static func controlWindowFrameHeight(
+        contentHeight: CGFloat, styleMask: NSWindow.StyleMask
+    ) -> CGFloat {
+        let contentRect = NSRect(x: 0, y: 0, width: 1, height: ceil(contentHeight))
+        return NSWindow.frameRect(
+            forContentRect: contentRect, styleMask: styleMask.subtracting(.fullSizeContentView)
+        ).height
     }
 
     func windowDidResize(_ notification: Notification) {

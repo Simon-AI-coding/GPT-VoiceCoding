@@ -154,7 +154,7 @@ Prefer the socket payload for tokens: entering a literal token in a shell comman
 can leave it in shell history even though the engine never logs it.
 
 The desktop shell owns one shared poller (#360, maintainer clarification): with
-only the Duty Card visible, read both `status` and the roster `brief` every two
+only the Duty Lamp visible, read both `status` and the roster `brief` every two
 seconds. With the Control Panel window open, read `status` every second and
 `brief` every two seconds, including the targeted brief while that screen is
 open. With neither surface visible, stop polling. The card needs `status` as
@@ -168,6 +168,24 @@ state code as its brief. The original lifecycle `state` is unchanged. Desktop
 counts use `brief_state` after excluding ended rows, Child Processes, and
 Headless Runs from the main Sessions, so prose questions are not miscounted as
 finished and the shell does not duplicate Core's question recognition.
+
+### Latest desktop reminder (#363)
+
+The roster `brief` optionally includes `roster.desktop_reminder`, shaped as
+`{"id": "opaque unique identity", "row": <one roster row>}`. Core creates it on
+an eligible main Session Stop (decision, permission or finished), preserving
+that Stop's row snapshot even if the Session resumes before the next read.
+The identity is stable across reads and unique across engine lifetimes. New
+reminders overwrite the single in-memory record; ordinary progress, naming,
+roster ordering and other outlet switches do not create reminders. Duty off
+or removal of the target from the live roster clears it.
+
+The desktop treats the first successful read after opening or reconnecting as
+a baseline, then displays only a changed identity. Missing optional data means
+no automatic reminder, never a fallback to timestamp differences. Counts and
+hover continue using their existing fields. This extends the existing brief
+read; it adds no action, independent poller, queue or delivery receipt.
+
 
 ## The actions
 

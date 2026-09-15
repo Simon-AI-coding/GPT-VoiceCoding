@@ -142,3 +142,12 @@
 "testCallBody" = "打一通电话，听听它的声音。macOS 会在第一次使用时询问麦克风权限。";
 "placeTestCall" = "拨打测试电话";
 "doneSetup" = "完成";
+
+"appearance" = "外观";
+"appearanceSystem" = "跟随系统";
+"appearanceDark" = "深色";
+"appearanceLight" = "浅色";
+"appearanceSystemHint" = "跟随 Mac 的外观，并在应用运行时同步变化。";
+"appearanceDarkHint" = "固定使用深色，不受 Mac 外观设置影响。";
+"appearanceLightHint" = "固定使用浅色，不受 Mac 外观设置影响。";
+"lampEngineDown" = "应用未在监看你的会话。";

@@ -7,6 +7,19 @@ import Testing
 
 @MainActor
 @Suite struct DesktopShellTests {
+    @Test func theReadingRegionKeepsDiagonalTravelIntoTheWiderBubble() {
+        let lamp = NSRect(x: 228, y: 400, width: 72, height: 26)
+        let bubble = NSRect(x: 20, y: 320, width: 280, height: 72)
+        for point in [NSPoint(x: 230, y: 402), NSPoint(x: 224, y: 396), NSPoint(x: 150, y: 390)] {
+            #expect(DesktopWindows.containsReadingPoint(point, lamp: lamp, bubble: bubble))
+        }
+        #expect(
+            !DesktopWindows.containsReadingPoint(NSPoint(x: 19, y: 396), lamp: lamp, bubble: bubble)
+        )
+        #expect(
+            !DesktopWindows.containsReadingPoint(NSPoint(x: 224, y: 396), lamp: lamp, bubble: nil))
+    }
+
     @Test func missingNamesAreLocalisedButCoreStateWordsAreNot() {
         let row = BriefRow(.of(["state_word": "finished"]))
         let brief = SessionBriefReading(.of(["state_word": "finished"]))
@@ -36,7 +49,8 @@ import Testing
         #expect(panel.isMovableByWindowBackground)
         let screen = NSRect(x: 100, y: 40, width: 1200, height: 760)
         let frame = DutyPanel.initialFrame(in: screen, height: 70)
-        #expect(frame.width == 352)
+        #expect(frame.width == 72)
+        #expect(panel.frame.size == NSSize(width: 72, height: 26))
         #expect(frame.maxX == screen.maxX - 16)
         #expect(frame.maxY == screen.maxY - 8)
     }
@@ -54,6 +68,7 @@ import Testing
         panel.place(in: screen)
         #expect(panel.frame.maxX == screen.maxX - 16)
         #expect(panel.frame.maxY == screen.maxY - 8)
+        #expect(panel.frame.size == NSSize(width: 72, height: 26))
         #expect(panel.frameAutosaveName == name)
     }
 
@@ -61,7 +76,7 @@ import Testing
         let name = "DutyCard-test-\(UUID().uuidString)"
         defer { NSWindow.removeFrame(usingName: name) }
         let screen = try #require(NSScreen.main).visibleFrame
-        let moved = NSRect(x: screen.minX + 80, y: screen.minY + 100, width: 352, height: 70)
+        let moved = NSRect(x: screen.minX + 80, y: screen.minY + 100, width: 72, height: 26)
         do {
             let panel = DutyPanel(savedFrameName: name)
             panel.place(in: screen)
@@ -76,12 +91,32 @@ import Testing
         let native = DutyPanel(savedFrameName: name)
         let measured = NSRect(x: 0, y: 0, width: 352, height: 90)
         native.setFrame(measured, display: false)
-        #expect(native.setFrameUsingName(name))
+        #expect(native.setFrameUsingName(name, force: true))
         let relaunched = DutyPanel(savedFrameName: name)
         relaunched.setFrame(measured, display: false)
         #expect(UserDefaults.standard.string(forKey: "NSWindow Frame \(name)") == saved)
         relaunched.place(in: screen)
-        #expect(relaunched.frame == native.frame)
+        #expect(relaunched.frame.maxX == native.frame.maxX)
+        #expect(relaunched.frame.maxY == native.frame.maxY)
+        #expect(relaunched.frame.size == NSSize(width: 72, height: 26))
+    }
+
+    @Test func anOldSavedCardRestoresOnlyItsTopRightAnchor() throws {
+        let name = "DutyCard-test-\(UUID().uuidString)"
+        defer { NSWindow.removeFrame(usingName: name) }
+        let screen = try #require(NSScreen.main).visibleFrame
+        let old = DutyPanel(savedFrameName: name)
+        old.setFrame(
+            NSRect(x: screen.minX + 80, y: screen.minY + 100, width: 352, height: 70),
+            display: false)
+        old.saveFrame(usingName: name)
+        let native = DutyPanel(savedFrameName: name)
+        #expect(native.setFrameUsingName(name, force: true))
+        let lamp = DutyPanel(savedFrameName: name)
+        lamp.place(in: screen)
+        #expect(lamp.frame.maxX == native.frame.maxX)
+        #expect(lamp.frame.maxY == native.frame.maxY)
+        #expect(lamp.frame.size == NSSize(width: 72, height: 26))
     }
 
     @Test func allShellWordsHaveBothLanguagesAndThePreferenceAppliesOnRelaunch() throws {

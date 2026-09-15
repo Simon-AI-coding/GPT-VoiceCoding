@@ -463,6 +463,14 @@ class RosterRow:
 
 
 @dataclass(frozen=True, slots=True)
+class DesktopReminder:
+    """The latest eligible Stop snapshot, stable across desktop readings."""
+
+    id: str
+    row: RosterRow
+
+
+@dataclass(frozen=True, slots=True)
 class RosterBrief:
     """How many Sessions are in each state, and one header row for each.
 
@@ -472,6 +480,7 @@ class RosterBrief:
     counts: Mapping[BriefState, int]
     rows: tuple[RosterRow, ...]
     focus: SessionTarget | None = None
+    desktop_reminder: DesktopReminder | None = None
 
 
 # ----------------------------------------------------------------------

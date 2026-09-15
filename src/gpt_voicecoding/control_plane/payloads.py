@@ -321,22 +321,33 @@ def roster_brief_document(brief: RosterBrief) -> dict[str, Any]:
     return {
         "counts": {str(state): count for state, count in brief.counts.items()},
         "focus": target_document(brief.focus) if brief.focus is not None else None,
-        "rows": [
+        "rows": [roster_row_document(row) for row in brief.rows],
+        **(
             {
-                "target": target_document(row.target),
-                "name": str(row.name) if row.name is not None else None,
-                "agent": str(row.agent),
-                "state": str(row.state),
-                "state_word": briefing.state_word(row.state, row.awaited),
-                "awaited": row.awaited,
-                "focus": row.focus,
-                "newest": row.newest,
-                "last_activity_at": (
-                    row.last_activity_at.isoformat() if row.last_activity_at is not None else None
-                ),
+                "desktop_reminder": {
+                    "id": brief.desktop_reminder.id,
+                    "row": roster_row_document(brief.desktop_reminder.row),
+                }
             }
-            for row in brief.rows
-        ],
+            if brief.desktop_reminder is not None
+            else {}
+        ),
+    }
+
+
+def roster_row_document(row: briefing.RosterRow) -> dict[str, Any]:
+    return {
+        "target": target_document(row.target),
+        "name": str(row.name) if row.name is not None else None,
+        "agent": str(row.agent),
+        "state": str(row.state),
+        "state_word": briefing.state_word(row.state, row.awaited),
+        "awaited": row.awaited,
+        "focus": row.focus,
+        "newest": row.newest,
+        "last_activity_at": (
+            row.last_activity_at.isoformat() if row.last_activity_at is not None else None
+        ),
     }
 
 

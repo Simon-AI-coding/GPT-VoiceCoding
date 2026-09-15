@@ -11,6 +11,389 @@ import Testing
 
 @MainActor
 @Suite struct ShellModelTests {
+    @Test func appearanceIsAnImmediatePersistedShellPreference() throws {
+        let fixture = try TelegramCredentialFixture()
+        let preferences = testPreferences()
+        let (_, first) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            preferences: preferences)
+        #expect(first.selectedAppearance == .system)
+        first.setAppearance(.dark)
+        #expect(first.selectedAppearance == .dark)
+        #expect(!first.pendingRestart)
+        let (_, second) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            preferences: preferences)
+        #expect(second.selectedAppearance == .dark)
+        second.setAppearance(.light)
+        #expect(second.selectedAppearance.native?.name == .aqua)
+        second.setAppearance(.system)
+        #expect(second.selectedAppearance.native == nil)
+        #expect(!second.pendingRestart)
+    }
+
+    @Test func desktopReminderReplacesWithoutReplayAndStaysWhileHovered() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane()
+        var time: TimeInterval = 0
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine), now: { time })
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        engine.reminder = "second"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble?.row?.name == "second")
+        time = 4
+        engine.reminder = "third"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble?.row?.name == "third")
+        time = 8
+        model.updateLamp()
+        #expect(model.lampBubble != nil)
+        model.setLampPointer(inside: true)
+        time = 20
+        model.updateLamp()
+        #expect(model.lampBubble?.row?.name == "third")
+        model.setLampPointer(inside: false)
+        #expect(model.lampBubble == nil)
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        model.setLampPointer(inside: true)
+        #expect(model.lampBubble?.row?.name == "Latest finished")
+        model.openLampBrief(try #require(model.lampBubble?.row).target)
+        #expect(model.page == .session(model.panel.firstCountedRow!.target))
+        await model.stopEngine()
+    }
+
+    @Test func clickingTheDisplayedBubbleKeepsItsTargetAcrossReplacement() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane()
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        engine.reminder = "displayed"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        let displayed = try #require(model.lampBubble?.row)
+        engine.reminder = "replacement"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble?.row?.target != displayed.target)
+        model.openLampBrief(displayed.target)
+        #expect(model.page == .session(displayed.target))
+        await model.stopEngine()
+    }
+
+    @Test func remindersExpireAndReconnectionDoesNotReplayTheBaseline() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane()
+        var time: TimeInterval = 0
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine), now: { time })
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        engine.reminder = "new"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        time = 4.99
+        model.updateLamp()
+        #expect(model.lampBubble != nil)
+        time = 5
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        engine.reachable = false
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        engine.reminder = "while disconnected"
+        engine.reachable = true
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        await model.stopEngine()
+        await model.setDuty(false)
+        #expect(!model.cardVisible)
+        engine.reminder = "while duty was off"
+        await model.setDuty(true)
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        engine.reminder = "after reopening"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble?.row?.name == "after reopening")
+        engine.reminder = nil
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+    }
+
+    @Test func onlyFinishedStillAlternatesAndConnectingRestartsTheClock() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let gate = OneShot<Void>()
+        let engine = LampControlPlane(gate: gate)
+        var time: TimeInterval = 0
+        let panel = ControlPanel(client: engine, now: { time })
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: panel, now: { time })
+        await panel.refresh()
+        await panel.refreshRoster()
+        let dial = Task { await panel.toggleLive() }
+        #expect(await waitUntil { panel.phase == .calling })
+        #expect(model.lampTime == nil)
+        time = 3
+        panel.tick()
+        #expect(model.lampTime == "00:03")
+        time = 6
+        panel.tick()
+        #expect(model.lampTime == nil)
+        gate.resolve(())
+        await dial.value
+        #expect(panel.phase == .onCall)
+        #expect(panel.elapsed == 0)
+        #expect(model.lampTime == nil)
+        time = 9
+        panel.tick()
+        #expect(model.lampTime == "00:03")
+        await model.stopEngine()
+    }
+
+    @Test func failureBubbleDoesNotExtendTheCallPhase() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane(failCall: true)
+        var time: TimeInterval = 0
+        let panel = ControlPanel(client: engine, now: { time })
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: panel, now: { time })
+        await panel.refresh()
+        await panel.refreshRoster()
+        model.updateLamp()
+        await panel.toggleLive()
+        time = 1
+        model.updateLamp()
+        #expect(model.lampBubble == .failure)
+        time = 6
+        panel.tick()
+        model.updateLamp()
+        #expect(panel.phase == .ready)
+        #expect(model.lampBubble == nil)
+        await model.stopEngine()
+    }
+
+    @Test func theEighteenLampStatesRenderAtTheFixedSizeInBothAppearances() async throws {
+        let states: [(String, Int, Int, CallPhase, Int, String)] = [
+            ("01-empty", 0, 0, .ready, 0, ""),
+            ("02-waiting", 3, 0, .ready, 0, ""),
+            ("03-both-counts", 2, 2, .ready, 0, ""),
+            ("04-finished", 0, 2, .ready, 0, ""),
+            ("05-capped", 10, 10, .ready, 0, ""),
+            ("06-calling", 0, 0, .calling, 7, ""),
+            ("07-live-counts", 2, 2, .onCall, 0, ""),
+            ("08-live-time", 0, 0, .onCall, 84, ""),
+            ("09-ending", 0, 0, .ending, 0, ""),
+            ("10-failure", 0, 0, .couldNotConnect, 0, ""),
+            ("11-engine", 0, 0, .ready, 0, "engine"),
+            ("12-both-agents", 2, 0, .onCall, 0, ""),
+            ("13-hover", 2, 2, .ready, 0, "hover"),
+            ("14-actions-ready", 2, 2, .ready, 0, "actions"),
+            ("15-actions-live", 0, 0, .onCall, 84, "actions"),
+            ("16-quit", 2, 2, .ready, 0, "quit"),
+            ("17-confirm", 0, 0, .onCall, 84, "confirm"),
+            ("18-reminder", 3, 0, .ready, 0, "reminder"),
+        ]
+        for (label, waiting, finished, phase, elapsed, interaction) in states {
+            let fixture = try TelegramCredentialFixture()
+            let gate = phase.resolving ? OneShot<Void>() : nil
+            let engine = LampControlPlane(
+                waiting: waiting, finished: finished,
+                up: phase == .onCall || phase == .ending, gate: gate,
+                failCall: phase == .couldNotConnect)
+            var time: TimeInterval = 0
+            let panel = ControlPanel(client: engine, now: { time })
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(),
+                panel: panel, now: { time })
+            await panel.refresh()
+            await panel.refreshRoster()
+            model.updateLamp()
+            let operation: Task<Void, Never>?
+            if phase.resolving || phase == .couldNotConnect {
+                operation = Task { await panel.toggleLive() }
+                #expect(await waitUntil { panel.phase == phase })
+            } else {
+                operation = nil
+            }
+            time = TimeInterval(elapsed)
+            panel.tick()
+            model.updateLamp()
+            try #require(panel.phase == phase)
+            switch interaction {
+            case "engine":
+                engine.reachable = false
+                await panel.refresh()
+                model.updateLamp()
+            case "hover": model.setLampPointer(inside: true)
+            case "actions": model.toggleLampActions()
+            case "quit": model.toggleLampActions(secondary: true)
+            case "confirm": model.quit()
+            case "reminder":
+                engine.reminder = "atlas · auth flow"
+                await panel.refreshRoster()
+                model.updateLamp()
+            default: break
+            }
+            #expect(panel.phase == phase)
+            for appearance in [ShellAppearance.dark, .light] {
+                model.setAppearance(appearance)
+                let plate = NSHostingView(rootView: DutyCardView(shell: model))
+                plate.appearance = appearance.native
+                #expect(plate.fittingSize == NSSize(width: 72, height: 26))
+                let board = VStack(alignment: .trailing, spacing: Phosphor.bubbleGap) {
+                    HStack(spacing: Phosphor.actionGap) {
+                        if model.cardActionsVisible || model.cardQuitVisible {
+                            LampActionsView(shell: model)
+                        }
+                        DutyCardView(shell: model)
+                    }
+                    if let bubble = model.lampBubble {
+                        LampBubbleView(shell: model, bubble: bubble)
+                    }
+                    Spacer(minLength: 0)
+                }.padding(24).frame(width: 380, height: 200, alignment: .topTrailing)
+                    .background(Phosphor.sunken)
+                try await renderLamp(
+                    board, appearance: appearance, name: "lamp-\(label)-\(appearance.rawValue)")
+            }
+            gate?.resolve(())
+            await operation?.value
+            await model.stopEngine()
+        }
+    }
+
+    @Test func nativeLampAttachmentsKeepTheAnchorAndShareTheAppearance() async throws {
+        _ = NSApplication.shared
+        let previous = Set(NSApp.windows.map(ObjectIdentifier.init))
+        let frameName = "Lamp-native-test-\(UUID().uuidString)"
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane(waiting: 2, finished: 2)
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        await model.stopEngine()
+        let desktop = DesktopWindows(shell: model, savedFrameName: frameName)
+        let surfaces = NSApp.windows.filter { !previous.contains(ObjectIdentifier($0)) }
+        defer {
+            for surface in surfaces {
+                surface.orderOut(nil)
+                surface.setFrameAutosaveName("")
+            }
+            NSWindow.removeFrame(usingName: frameName)
+            withExtendedLifetime(desktop) {}
+        }
+        let lamp = try #require(
+            surfaces.first {
+                $0 is DutyPanel && $0.frame.size == NSSize(width: 72, height: 26) && $0.isVisible
+            })
+        let anchor = lamp.frame
+        #expect(!lamp.isKeyWindow && !lamp.isMainWindow)
+        #expect(lamp.contentView?.frame.size == NSSize(width: 72, height: 26))
+        #expect(lamp.contentView?.hitTest(NSPoint(x: 73, y: 10)) == nil)
+        model.toggleLampActions()
+        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 2 })
+        let actions = try #require(
+            surfaces.first { $0 !== lamp && $0 is DutyPanel && $0.isVisible })
+        let actionWidth = actions.frame.width
+        #expect(actions.frame.maxX == anchor.minX - Phosphor.actionGap)
+        #expect(actions.frame.height == 26)
+        await model.panel.toggleLive()
+        try #require(await waitUntil { model.panel.phase == .onCall })
+        await Task.yield()
+        #expect(actions.frame.width == actionWidth)
+        model.setLampPointer(inside: true)
+        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 3 })
+        let bubble = try #require(
+            surfaces.first { $0 !== lamp && $0 !== actions && $0 is DutyPanel && $0.isVisible })
+        #expect(bubble.frame.width == 280)
+        #expect(bubble.frame.maxX == anchor.maxX)
+        #expect(bubble.frame.maxY == anchor.minY - Phosphor.bubbleGap)
+        for appearance in [ShellAppearance.dark, .light, .system] {
+            model.setAppearance(appearance)
+            #expect(
+                await waitUntil {
+                    surfaces.allSatisfy { $0.appearance?.name == appearance.native?.name }
+                })
+        }
+        model.quit(fromLamp: true)
+        #expect(model.confirmationOnLamp)
+        #expect(model.lampBubble == .confirmation)
+        #expect(await waitUntil { bubble.isKeyWindow })
+        #expect(!lamp.canBecomeKey && !actions.canBecomeKey)
+        // Exercise AppKit's Escape command without nesting its event loop inside Swift Testing.
+        #expect(bubble.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil))
+        #expect(await waitUntil { model.confirmation == nil })
+        #expect(model.panel.phase == .onCall)
+        #expect(await waitUntil { !bubble.isKeyWindow })
+        model.setLampPointer(inside: false)
+        model.dismissLampActions()
+        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 1 })
+        #expect(lamp.frame == anchor)
+        await model.setDuty(false)
+        #expect(await waitUntil { !surfaces.contains(where: \.isVisible) })
+    }
+
+    @Test func generalAppearanceChoicesRenderInBothLanguagesAndThemes() async throws {
+        for language in ["en", "zh-Hans"] {
+            let fixture = try TelegramCredentialFixture()
+            let preferences = testPreferences()
+            preferences.set(language, forKey: ShellText.preferenceKey)
+            let (_, model) = makeShell(
+                fixture: fixture, launcher: RecordingEngineLauncher(), preferences: preferences)
+            await model.stopEngine()
+            model.open(.settings(.general))
+            for appearance in [ShellAppearance.system, .dark, .light] {
+                model.setAppearance(appearance)
+                try await renderLamp(
+                    ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
+                    appearance: appearance, name: "general-\(language)-\(appearance.rawValue)")
+            }
+        }
+    }
+
+    private func renderLamp<V: View>(_ content: V, appearance: ShellAppearance, name: String)
+        async throws
+    {
+        let view = NSHostingView(
+            rootView: content.environment(\.colorScheme, appearance == .light ? .light : .dark))
+        view.appearance = appearance.native
+        view.frame.size = view.fittingSize
+        view.layoutSubtreeIfNeeded()
+        await Task.yield()
+        view.frame.size = view.fittingSize
+        view.layoutSubtreeIfNeeded()
+        #expect(view.frame.width > 0 && view.frame.height > 0)
+        if let directory = ProcessInfo.processInfo.environment["GPTVC_RENDER_OUTPUT"] {
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
+        }
+    }
+
     @Test(arguments: [false, true])
     func homeRendersWithinTheDesignWidthInBothLanguages(populated: Bool) async throws {
         for language in ["en", "zh-Hans"] {
@@ -1337,5 +1720,83 @@ private final class HeldEngineProcess: EngineProcess, @unchecked Sendable {
 
     func forceStop() {
         requestStop()
+    }
+}
+
+private final class LampControlPlane: ControlPlaneDialing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reminderID: String? = "first"
+    private var available = true
+    private var dutyOn = true
+    private var callUp: Bool
+    let waiting: Int
+    let finished: Int
+    let gate: OneShot<Void>?
+    let failCall: Bool
+    var reminder: String? {
+        get { lock.withLock { reminderID } }
+        set { lock.withLock { reminderID = newValue } }
+    }
+    var reachable: Bool {
+        get { lock.withLock { available } }
+        set { lock.withLock { available = newValue } }
+    }
+    init(
+        waiting: Int = 0, finished: Int = 1, up: Bool = false,
+        gate: OneShot<Void>? = nil, failCall: Bool = false
+    ) {
+        self.waiting = waiting
+        self.finished = finished
+        self.callUp = up
+        self.gate = gate
+        self.failCall = failCall
+    }
+    func ask(_ request: Request) async throws -> Reply {
+        if !reachable { throw ControlPlaneFailure.engineUnreachable("test disconnection") }
+        if request.action == .live {
+            if let gate { await gate.value() }
+            lock.withLock { if !failCall { callUp.toggle() } }
+        }
+        let data: [String: Any] = lock.withLock {
+            if request.action == .switch, let on = request.payload?["on"]?.bool { dutyOn = on }
+            func row(_ name: String, state: String = "finished", agent: String = "codex")
+                -> [String: Any]
+            {
+                [
+                    "target": ["agent": agent, "session_id": name], "name": name,
+                    "state": state,
+                    "state_word": state == "decision" ? "waiting for your decision" : "finished",
+                    "newest": "Should the old sessions keep working after the key rotates?",
+                ]
+            }
+            if request.action == .brief {
+                var roster: [String: Any] = [
+                    "rows":
+                        (0..<finished).map { row($0 == 0 ? "Latest finished" : "Finished \($0)") }
+                        + (0..<waiting).map {
+                            row(
+                                "atlas · auth flow \($0)", state: "decision",
+                                agent: $0.isMultiple(of: 2) ? "claude" : "codex")
+                        }
+                ]
+                if let reminderID {
+                    roster["desktop_reminder"] = ["id": reminderID, "row": row(reminderID)]
+                }
+                return ["roster": roster]
+            }
+            return [
+                "switches": ["duty": dutyOn],
+                "sessions": (0..<waiting).map { _ in
+                    ["lifecycle": "live", "brief_state": "decision"]
+                }
+                    + (0..<finished).map { _ in ["lifecycle": "live", "brief_state": "finished"] },
+                "state": callUp ? "up" : "down", "call_id": callUp ? "call" as Any : NSNull(),
+            ]
+        }
+        return try Reply.of(
+            JSONSerialization.data(withJSONObject: [
+                "ok": true, "action": request.action.rawValue,
+                "protocol": controlPlaneProtocolVersion, "data": data,
+            ]))
     }
 }

@@ -142,3 +142,12 @@
 "testCallBody" = "One call, so you know what it sounds like. macOS will ask for the microphone the first time.";
 "placeTestCall" = "Place the test call";
 "doneSetup" = "Done";
+
+"appearance" = "Appearance";
+"appearanceSystem" = "System";
+"appearanceDark" = "Dark";
+"appearanceLight" = "Light";
+"appearanceSystemHint" = "Follows your Mac, and changes with it while the app is open.";
+"appearanceDarkHint" = "Held at dark whatever your Mac is set to.";
+"appearanceLightHint" = "Held at light whatever your Mac is set to.";
+"lampEngineDown" = "The app isn't watching your sessions.";

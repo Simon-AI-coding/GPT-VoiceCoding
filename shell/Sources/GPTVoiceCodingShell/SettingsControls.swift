@@ -83,6 +83,40 @@ struct GeneralSettingsView: View {
                 Text(shell.text(.settingsSaveFailed)).font(Phosphor.prose)
                 Button(shell.text(.openDiagnostics)) { shell.open(.settings(.diagnostics)) }
             }
+            HStack {
+                Text(shell.text(.appearance)).foregroundStyle(Phosphor.tertiary)
+                Spacer()
+                HStack(spacing: 4) {
+                    ForEach(ShellAppearance.allCases, id: \.self) { appearance in
+                        Button {
+                            shell.setAppearance(appearance)
+                        } label: {
+                            Text(shell.text(appearance.title))
+                                .padding(.horizontal, 10).padding(.vertical, 2)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                            .foregroundStyle(
+                                shell.selectedAppearance == appearance
+                                    ? Phosphor.accent : Phosphor.secondary
+                            )
+                            .background(
+                                shell.selectedAppearance == appearance
+                                    ? Phosphor.accentWash : .clear,
+                                in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                                    .stroke(
+                                        shell.selectedAppearance == appearance
+                                            ? Phosphor.ruleAccent : Phosphor.ruleStrong)
+                            )
+                            .accessibilityAddTraits(
+                                shell.selectedAppearance == appearance ? .isSelected : [])
+                    }
+                }
+            }.font(Phosphor.body)
+            Text(shell.text(shell.selectedAppearance.hint))
+                .font(Phosphor.prose).foregroundStyle(Phosphor.secondary)
             SettingsPicker(
                 title: shell.text(.language),
                 value: shell.selectedLanguage.label,

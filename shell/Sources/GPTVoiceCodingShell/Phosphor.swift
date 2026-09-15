@@ -4,7 +4,26 @@ import SwiftUI
 /// Named values transcribed from the handoff's phosphor/tokens.css.
 enum Phosphor {
     static let windowWidth: CGFloat = 480
-    static let cardWidth: CGFloat = 352
+    static let cardWidth: CGFloat = 72
+    static let lampHeight: CGFloat = 26
+    static let lampCell: CGFloat = 28
+    static let lampSlot: CGFloat = 41
+    static let lampEdge: CGFloat = 1.5
+    static let lampRadius: CGFloat = 7
+    static let lampGlyph: CGFloat = 15
+    static let bubbleWidth: CGFloat = 280
+    static let bubbleGap: CGFloat = 8
+    static let actionGap: CGFloat = 6
+    static let bubbleHold: TimeInterval = 5
+    static let failedHold: TimeInterval = 6
+    static let slotHold: Int = 3
+    static let lampPulse: TimeInterval = 1.6
+    // The handoff keeps halo RGBA values constant in both appearances.
+    static let lampGlow = Color(red: 233.0 / 255, green: 162.0 / 255, blue: 59.0 / 255).opacity(
+        0.20)
+    static let lampFailureGlow = Color(red: 240.0 / 255, green: 119.0 / 255, blue: 106.0 / 255)
+        .opacity(0.22)
+    static let bubbleFade: TimeInterval = 0.2
     static let navigationWidth: CGFloat = 126
     static let rosterHeight: CGFloat = 220
     static let outputHeight: CGFloat = 120
@@ -27,7 +46,12 @@ enum Phosphor {
     static let accentInk = colour(light: 0xffffff, dark: 0x000000)
     static let danger = colour(light: 0xc7362b, dark: 0xf0776a)
     static let rule = colour(light: 0x0d0d0d, dark: 0xffffff).opacity(0.14)
-    static let ruleStrong = colour(light: 0x0d0d0d, dark: 0xffffff).opacity(0.25)
+    static let ruleStrong = colour(
+        light: 0x0d0d0d, dark: 0xffffff, lightAlpha: 0.26, darkAlpha: 0.24)
+    static let accentWash = colour(
+        light: 0x9a5c06, dark: 0xe9a23b, lightAlpha: 0.10, darkAlpha: 0.12)
+    static let ruleAccent = accent.opacity(0.45)
+    static let dangerInk = colour(light: 0xffffff, dark: 0x000000)
     static let switchWidth: CGFloat = 30
     static let switchHeight: CGFloat = 16
     static let switchKnob: CGFloat = 12
@@ -50,14 +74,17 @@ enum Phosphor {
         }
     }
 
-    private static func colour(light: UInt32, dark: UInt32) -> Color {
+    private static func colour(
+        light: UInt32, dark: UInt32, lightAlpha: Double = 1, darkAlpha: Double = 1
+    ) -> Color {
         Color(
             nsColor: NSColor(name: nil) { appearance in
-                let rgb =
-                    appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+                let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let rgb = isDark ? dark : light
                 return NSColor(
                     srgbRed: Double((rgb >> 16) & 255) / 255,
-                    green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255, alpha: 1)
+                    green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255,
+                    alpha: isDark ? darkAlpha : lightAlpha)
             })
     }
 }

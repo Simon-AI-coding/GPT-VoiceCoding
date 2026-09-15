@@ -22,6 +22,27 @@ func desktopRow(
 
 @MainActor
 @Suite struct DesktopPanelTests {
+    @Test func theRosterCarriesCoreReminderIdentityAndClearsMissingReadings() async throws {
+        let row = desktopRow("Stopped", state: "finished", word: "finished")
+        let engine = ScriptedControlPlane([
+            .brief: .success(
+                desktopReply(
+                    .brief,
+                    [
+                        "roster": [
+                            "rows": [row], "desktop_reminder": ["id": "stop-one", "row": row],
+                        ]
+                    ]))
+        ])
+        let panel = ControlPanel(client: engine)
+        await panel.refreshRoster()
+        #expect(panel.desktopReminder?.id == "stop-one")
+        #expect(panel.desktopReminder?.row.name == "Stopped")
+        engine.answer(.brief, with: .success(desktopReply(.brief, ["roster": ["rows": [row]]])))
+        await panel.refreshRoster()
+        #expect(panel.desktopReminder == nil)
+    }
+
     @Test func desktopFactsArriveFromTheFakeEngineOnARealSocket() async throws {
         let engine = try FakeEngineSocket(
             behaviour: .script([

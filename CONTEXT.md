@@ -31,7 +31,7 @@ What the system knows about one Session, structured for telling the user: its na
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
-The count of Sessions in each state, with one header row per live Session — its agent, its Session Name, its state word and the start of its newest message — the rows in order of most recent activity, newest first — one row and one order on every surface. Each surface shows as much of it as it holds: spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions, its rows without the message; on the desktop the Duty Card shows its two counts that matter to the user and its first row (#343); in the Control Panel it is the Session list, every row, each opening into its Session Brief to read and not to answer (#341). Child Processes, Headless Runs and ended Sessions have no row anywhere.
+The count of Sessions in each state, with one header row per live Session — its agent, its Session Name, its state word and the start of its newest message — the rows in order of most recent activity, newest first — one row and one order on every surface. Each surface shows as much of it as it holds: spoken when several Sessions need the user, or on request; on the Companion Channel it is the Session list the menu shows, an Anchor whose choices are the live Sessions, its rows without the message; on the desktop the Duty Lamp shows its two counts that matter to the user and offers its most recent counted row on hover (#363); in the Control Panel it is the Session list, every row, each opening into its Session Brief to read and not to answer (#341). Child Processes, Headless Runs and ended Sessions have no row anywhere.
 _Avoid_: 多项目简报, overview, summary
 
 **Focus Session**:
@@ -89,7 +89,7 @@ The one decision-maker: it owns every policy and holds the system's single sourc
 _Avoid_: Bridge Control Center, supervisor, orchestrator, engine (the process, not the role)
 
 **Duty Switch**:
-The master on/off switch: off means the system does not speak, does not ring, does not push, and does not touch the Live Call; events are still recorded. The Silence Ceiling still applies — it is the call's own limit, not an act toward the user. The Voice and Message Switches and every Feature Switch are effective only while it is on; the Auto Hang-up Switch stands beside it, not under it. On the desktop it is also what shows and withdraws the Duty Card (ADR 0028).
+The master on/off switch: off means the system does not speak, does not ring, does not push, and does not touch the Live Call; events are still recorded. The Silence Ceiling still applies — it is the call's own limit, not an act toward the user. The Voice and Message Switches and every Feature Switch are effective only while it is on; the Auto Hang-up Switch stands beside it, not under it. On the desktop it is also what shows and withdraws the Duty Lamp (ADR 0028).
 _Avoid_: duty mode, pause mode, do-not-disturb
 
 **Voice Switch**:
@@ -113,11 +113,11 @@ Status queries and switch flips, accepted from every surface and never gated by 
 _Avoid_: admin commands, management interface
 
 **Control Panel**:
-The one at-computer window for the system's current state and switches: Home, a Session Brief and Settings replace one another inside it, with technical details confined to Diagnostics (ADR 0028). Opened from the Duty Card or the menu bar; the app joins the Dock and app switcher only while the window is open.
+The one at-computer window for the system's current state and switches: Home, a Session Brief and Settings replace one another inside it, with technical details confined to Diagnostics (ADR 0028). Opened from the Duty Lamp or the menu bar; the app joins the Dock and app switcher only while the window is open.
 _Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, retired)
 
-**Duty Card**:
-The always-on-top, non-activating desktop card present exactly while Duty is on, carrying the Call Phase and the same waiting and finished counts as Home: live main Sessions *waiting for your decision*, *requesting permission*, or *finished*, never a Session *waiting on* another, a Child Process or a Headless Run. It shows the most recently active counted Session's row; a click offers the Live Toggle, Home and Settings, and a secondary click offers Quit — it displays briefs and never takes a reply (ADR 0028).
+**Duty Lamp**:
+The fixed 72×26, always-on-top, non-activating desktop lamp (the former Duty Card), present exactly while Duty is on, carrying the Call Phase and the same waiting and finished counts as Home: live main Sessions *waiting for your decision*, *requesting permission*, or *finished*, never a Session *waiting on* another, a Child Process or a Headless Run. Its numbers alternate with call duration every three seconds during Calling and On a call. Hover shows the most recently active counted Session's row; a new Core-issued desktop reminder replaces the current bubble for five seconds, held while hovered, without replay on initial reading or reconnection. A click expands to the left and offers the Live Toggle, Home and Settings, and a secondary click offers Quit — it displays briefs and never takes a reply (ADR 0028).
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Diagnostics**:

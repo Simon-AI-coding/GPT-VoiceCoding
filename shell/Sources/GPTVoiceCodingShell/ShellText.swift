@@ -25,6 +25,7 @@ enum Copy: String, CaseIterable {
     case keepCall
     case notWatching
     case engineDown
+    case lampEngineDown
     case openDiagnostics
     case callID
     case callAgent
@@ -84,6 +85,8 @@ enum Copy: String, CaseIterable {
     case voiceNote, settingsSaveFailed, restartRequired, restartNow, restartAfterCall
     case autoHangup, silenceSeconds, coolDownSeconds, speechSettleSeconds, secondsUnit,
         numberRequired
+    case appearance, appearanceSystem, appearanceDark, appearanceLight
+    case appearanceSystemHint, appearanceDarkHint, appearanceLightHint
     case launchAtLogin, language, languageNextLaunch
     case agentModelsNote, agentModelGone, agentModelsUnavailable
     case onboardingStep, welcomeTitle, welcomeBody, start, codexCheckTitle, codexReady,

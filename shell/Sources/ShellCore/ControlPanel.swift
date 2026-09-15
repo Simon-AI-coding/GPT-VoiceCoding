@@ -131,6 +131,19 @@ public struct BriefRow: Equatable, Identifiable, Sendable {
     }
 }
 
+public struct DesktopReminder: Equatable, Sendable {
+    public let id: String
+    public let row: BriefRow
+
+    init?(_ value: JSONValue?) {
+        guard let id = value?["id"]?.string, !id.isEmpty,
+            let row = value?["row"], row["target"] != nil
+        else { return nil }
+        self.id = id
+        self.row = BriefRow(row)
+    }
+}
+
 public struct SessionBriefReading: Equatable, Sendable {
     public let name: String?
     public let stateWord: String
@@ -236,6 +249,9 @@ public final class ControlPanel {
     private var phaseStarted: TimeInterval = 0
     private let now: () -> TimeInterval
     public private(set) var roster: [BriefRow] = []
+    public private(set) var desktopReminder: DesktopReminder?
+    public private(set) var rosterRevision = 0
+    public private(set) var rosterReachable = false
     private var heldRoster: [BriefRow]?
     public var displayedRoster: [BriefRow] { heldRoster ?? roster }
     public var firstCountedRow: BriefRow? { roster.first { $0.isCounted } }
@@ -307,10 +323,17 @@ public final class ControlPanel {
     }
 
     public func refreshRoster() async {
-        let outcome = await ask(Request(action: .brief)) {
-            ($0["roster"]?["rows"]?.array ?? []).map(BriefRow.init)
+        let outcome = await ask(Request(action: .brief)) { $0["roster"] ?? .null }
+        guard !Task.isCancelled else { return }
+        if let answer = outcome.answer {
+            roster = (answer["rows"]?.array ?? []).map(BriefRow.init)
+            desktopReminder = DesktopReminder(answer["desktop_reminder"])
+            rosterReachable = true
+            rosterRevision += 1
+        } else {
+            rosterReachable = false
+            desktopReminder = nil
         }
-        if !Task.isCancelled, let answer = outcome.answer { roster = answer }
     }
 
     public func setPointerInRoster(_ inside: Bool) {

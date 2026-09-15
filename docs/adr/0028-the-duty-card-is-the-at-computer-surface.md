@@ -76,3 +76,32 @@ launch, login items included, is silent — the icon, and the Card if Duty is on
 - The Control Panel's definition in `CONTEXT.md` widens from "the dropdown"
   to the window; the v0 dropdown's contents are redistributed, and nothing
   the shell showed is lost — technical text moves to Diagnostics.
+
+## Amendment — Duty Lamp (#363, 2026-09-15)
+
+The **Duty Lamp** replaces the Duty Card's persistent two-line presentation.
+It is the same desktop surface and Duty remains its only visibility switch.
+The fixed 72×26 plate carries the Call Phase as a glyph and fill, waiting and
+finished counts as numbers, and alternates those numbers with call duration
+every three seconds. The Session line is now a 280-point bubble: on hover it
+reads the most recently active counted row; automatically it displays only
+the latest eligible Stop snapshot supplied by Core for five seconds. A newer
+reminder replaces it and restarts the hold; hovering keeps it open.
+
+Core retains one ephemeral reminder with a unique identity and its row snapshot
+in the existing Roster Brief. Reading it does not create a new reminder. Duty
+off or an ended target clears it. The shell establishes a baseline on first
+read, Duty reopening and engine reconnection, rather than replaying that record.
+There is no notification queue, acknowledgement, new query action or new poller.
+Core remains the authority for classifications and recent-activity order.
+
+Click expands the existing actions leftward without moving the Lamp; secondary
+click offers Quit in the same location. Hover, its crossing gap and the bubble
+share one reading region; the Lamp uses a pointing-hand cursor. The nonactivating
+window itself is 72×26 and saved old Card dimensions are normalized while keeping
+the top-right anchor. Quit during a call retains the existing confirmation.
+
+General adds a shell-local System / Dark / Light preference, applied immediately
+to the main window, Lamp and its attachments. It does not write engine settings
+or request a restart. Other decisions above remain in force. The fixed handoff
+listed in #363 is the visual authority, including both appearances and motion.

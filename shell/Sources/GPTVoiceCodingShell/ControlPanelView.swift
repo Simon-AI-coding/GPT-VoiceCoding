@@ -25,7 +25,9 @@ struct ControlPanelView: View {
                 Text(shell.text(.unreadableSettings)).font(Phosphor.prose)
                 Button(shell.text(.openDiagnostics)) { shell.open(.settings(.diagnostics)) }
             }
-            if shell.confirmation != nil { ConfirmationRow(shell: shell) }
+            if shell.confirmation != nil && !shell.confirmationOnLamp {
+                ConfirmationRow(shell: shell)
+            }
         }
         .padding(Phosphor.padding).padding(.top, 16)
         .frame(maxWidth: .infinity, alignment: .leading)

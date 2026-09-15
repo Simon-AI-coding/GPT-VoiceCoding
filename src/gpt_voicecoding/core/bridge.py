@@ -440,6 +440,7 @@ class BridgeCore:
         instruction_context: InstructionContext | None = None,
     ) -> None:
         self._state = state
+        self._desktop_reminder: briefing.DesktopReminder | None = None
         self._call = call
         self._channel = channel
         self._agents = dict(agents)
@@ -659,7 +660,13 @@ class BridgeCore:
         retired the sixth).
         """
         if target is None:
-            return briefing.roster(self._state.sessions.all(), self._state.sessions.focus)
+            roster = briefing.roster(self._state.sessions.all(), self._state.sessions.focus)
+            if self._desktop_reminder is not None and (
+                not self.adjudicator.may_use("duty")
+                or self._desktop_reminder.row.target not in {row.target for row in roster.rows}
+            ):
+                self._desktop_reminder = None
+            return replace(roster, desktop_reminder=self._desktop_reminder)
         brief, _ = await self._session_brief_now(target)
         return brief
 
@@ -729,6 +736,8 @@ class BridgeCore:
         """
         opened_before = self.adjudicator.outlets()
         previous = self._state.switches.flip(name, on)
+        if not self.adjudicator.may_use("duty"):
+            self._desktop_reminder = None
         self._state.persist()
         opened = self.adjudicator.outlets() - opened_before
         if opened:
@@ -1209,6 +1218,14 @@ class BridgeCore:
         # re-briefs a roster this row is not on, so it is work with no consumer.
         if session.is_headless_run:
             return
+        if session.is_addressable and self.adjudicator.may_use("duty"):
+            row = briefing.roster((session,), None).rows[0]
+            if row.state in {
+                briefing.BriefState.DECISION,
+                briefing.BriefState.PERMISSION,
+                briefing.BriefState.FINISHED,
+            }:
+                self._desktop_reminder = briefing.DesktopReminder(new_request_id(), row)
         await self._announce_waiting(
             session,
             event.target,
@@ -1344,6 +1361,12 @@ class BridgeCore:
         row's own classification answers that, because `resolve` refuses an
         ended Session before it reaches the question of whether it was a child.
         """
+        if (
+            ended is not None
+            and self._desktop_reminder is not None
+            and self._desktop_reminder.row.target == ended.target
+        ):
+            self._desktop_reminder = None
         if ended is None or not ended.child.is_main or ended.is_headless_run:
             return
         await self._push(briefing.ended_line(ended))

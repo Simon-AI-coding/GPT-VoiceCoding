@@ -34,6 +34,41 @@ enum OnboardingStep: Int, CaseIterable {
 enum CodexCheck { case checking, ready, notInstalled, notLoggedIn }
 
 enum ShellConfirmation { case quit, newAgent }
+enum ShellAppearance: String, CaseIterable {
+    case system, dark, light
+    static let preferenceKey = "appearance"
+    var native: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .dark: return NSAppearance(named: .darkAqua)
+        case .light: return NSAppearance(named: .aqua)
+        }
+    }
+    var title: Copy {
+        switch self {
+        case .system: return .appearanceSystem
+        case .dark: return .appearanceDark
+        case .light: return .appearanceLight
+        }
+    }
+    var hint: Copy {
+        switch self {
+        case .system: return .appearanceSystemHint
+        case .dark: return .appearanceDarkHint
+        case .light: return .appearanceLightHint
+        }
+    }
+}
+
+enum LampBubble: Equatable {
+    case session(BriefRow, automatically: Bool = false)
+    case failure, engine, confirmation
+    var row: BriefRow? {
+        if case .session(let row, _) = self { return row }
+        return nil
+    }
+}
+
 enum TelegramStage { case idle, entering, validating, waiting, confirmed }
 
 /// What the views read: the child's health on one side, the control plane on the
@@ -51,10 +86,109 @@ final class ShellModel {
     private(set) var page: ShellPage?
     private(set) var windowRequest = 0
     var confirmation: ShellConfirmation?
+    private var quitRequestedFromLamp = false
+    var confirmationOnLamp: Bool {
+        cardVisible && confirmation == .quit && (quitRequestedFromLamp || !windowOpen)
+    }
     var cardActionsVisible = false
+    var cardQuitVisible = false
+    private var lampPointerInside = false
+    private var lampNotice: LampBubble?
+    private var lampDeadline: TimeInterval?
+    private var reminderBaseline = false
+    private var lastReminderID: String?
+    private var lampReadRevision = 0
+    private var lampLastPhase: CallPhase = .ready
+
+    var lampTime: String? {
+        guard panel.phase == .calling || panel.phase == .onCall, let elapsed = panel.elapsed else {
+            return nil
+        }
+        let hasCounts = panel.counts.waiting + panel.counts.finished > 0
+        guard !hasCounts || (elapsed / Phosphor.slotHold) % 2 == 1 else { return nil }
+        return String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+    }
+
+    var lampBubble: LampBubble? {
+        guard cardVisible else { return nil }
+        if confirmationOnLamp { return .confirmation }
+        if !panel.engineReachable { return .engine }
+        if let lampNotice { return lampNotice }
+        if lampPointerInside, let row = panel.firstCountedRow { return .session(row) }
+        return nil
+    }
+
+    func updateLamp() {
+        guard cardVisible, panel.engineReachable, panel.rosterReachable else {
+            reminderBaseline = false
+            lampReadRevision = panel.rosterRevision
+            lampNotice = nil
+            lampDeadline = nil
+            if !cardVisible {
+                lampPointerInside = false
+                dismissLampActions()
+            }
+            return
+        }
+        if panel.rosterRevision != lampReadRevision {
+            lampReadRevision = panel.rosterRevision
+            let reminder = panel.desktopReminder
+            if reminderBaseline, let reminder, reminder.id != lastReminderID {
+                lampNotice = .session(reminder.row, automatically: true)
+                lampDeadline = now() + Phosphor.bubbleHold
+            } else if reminder == nil, lampNotice?.row != nil {
+                lampNotice = nil
+                lampDeadline = nil
+            }
+            lastReminderID = reminder?.id
+            reminderBaseline = true
+        }
+        if panel.phase == .couldNotConnect, lampLastPhase != .couldNotConnect {
+            lampNotice = .failure
+            lampDeadline = now() + Phosphor.failedHold
+        } else if panel.phase != .couldNotConnect, lampNotice == .failure, !lampPointerInside {
+            lampNotice = nil
+            lampDeadline = nil
+        }
+        lampLastPhase = panel.phase
+        if !lampPointerInside, let deadline = lampDeadline, now() >= deadline {
+            lampNotice = nil
+            lampDeadline = nil
+        }
+    }
+
+    func setLampPointer(inside: Bool) {
+        guard lampPointerInside != inside else { return }
+        lampPointerInside = inside
+        if !inside {
+            lampNotice = nil
+            lampDeadline = nil
+        }
+    }
+
+    func toggleLampActions(secondary: Bool = false) {
+        if secondary {
+            cardQuitVisible.toggle()
+            cardActionsVisible = false
+        } else {
+            cardActionsVisible.toggle()
+            cardQuitVisible = false
+        }
+    }
+
+    func dismissLampActions() {
+        cardActionsVisible = false
+        cardQuitVisible = false
+    }
+
+    func openLampBrief(_ target: SessionAddress) {
+        open(.session(target))
+        setLampPointer(inside: false)
+    }
     let text: ShellText
     private let preferences: UserDefaults
     private(set) var selectedLanguage: ShellLanguage
+    private(set) var selectedAppearance: ShellAppearance
     private(set) var configuration: ShellConfiguration?
     private(set) var pendingRestart = false
     private(set) var savingSettings = false
@@ -181,6 +315,10 @@ final class ShellModel {
         self.location = location
         self.loginItem = loginItem ?? LoginItem()
         self.preferences = preferences
+        selectedAppearance =
+            ShellAppearance(
+                rawValue: preferences.string(forKey: ShellAppearance.preferenceKey) ?? "")
+            ?? .system
         let language = ShellText.preferredLanguage(
             saved: preferences.string(forKey: ShellText.preferenceKey),
             system: Locale.preferredLanguages)
@@ -362,6 +500,12 @@ final class ShellModel {
     }
 
     private func healthChanged(_ health: EngineHealth) async {
+        if self.health != health {
+            reminderBaseline = false
+            lampReadRevision = panel.rosterRevision
+            lampNotice = nil
+            lampDeadline = nil
+        }
         self.health = health
         await readWhatTheLauncherLearned()
         await applyCredentialAction(
@@ -457,6 +601,7 @@ final class ShellModel {
     }
 
     private func synchronizePolling() {
+        if !cardVisible { updateLamp() }
         guard !stopping, windowOpen || cardVisible else {
             poller?.cancel()
             poller = nil
@@ -472,6 +617,7 @@ final class ShellModel {
                 guard let self else { return }
                 let started = self.now()
                 self.panel.tick()
+                self.updateLamp()
                 if self.readInFlight == nil {
                     self.readInFlight = Task {
                         await self.readVisibleSurfaces(at: started)
@@ -507,6 +653,7 @@ final class ShellModel {
             }
         }
         guard !Task.isCancelled else { return }
+        updateLamp()
         await readWhatTheLauncherLearned()
         await applyCredentialAction(
             credentialStartRecovery.credentialChanged(to: credentialState, health: health))
@@ -521,6 +668,11 @@ final class ShellModel {
     var autoHangup: Bool? { panel.status?.switches.first { $0.name == "auto_hangup" }?.on }
 
     func goBack() { open(page == .codexCheck ? .settings(.diagnostics) : .home) }
+
+    func setAppearance(_ appearance: ShellAppearance) {
+        selectedAppearance = appearance
+        preferences.set(appearance.rawValue, forKey: ShellAppearance.preferenceKey)
+    }
 
     func setLanguage(_ language: ShellLanguage) {
         selectedLanguage = language
@@ -689,9 +841,10 @@ final class ShellModel {
 
     /// Quit. The engine is stopped on the way out by the terminate hook, which
     /// is also what catches a quit that did not come from this menu.
-    func quit() {
+    func quit(fromLamp: Bool = false) {
         if panel.phase == .onCall {
             if !cardVisible && !windowOpen { open(.home) }
+            quitRequestedFromLamp = fromLamp
             confirmation = .quit
         } else {
             NSApplication.shared.terminate(nil)

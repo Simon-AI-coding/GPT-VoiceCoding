@@ -11,7 +11,7 @@ The system-owned realtime voice call — the system's one and only voice surface
 _Avoid_: Live thread, voice chat, call (unqualified)
 
 **Live Toggle**:
-The single action that starts a Live Call when none is up, or ends the current one.
+The single action that starts a Live Call when none is up, or ends the current one. Its control-plane entry also accepts explicit cancellation of a named pending dial; that cancellation never toggles another call (#364).
 _Avoid_: toggle phrase
 
 **Call Phase**:
@@ -27,7 +27,7 @@ The automatic hang-up: a call ends after a configured stretch in which neither t
 _Avoid_: idle timeout, inactivity timer
 
 **Session Brief**:
-What the system knows about one Session, structured for telling the user: its name, its agent, its state (waiting for a decision, requesting permission, waiting on another Session or its own Child Process, finished, or running), its newest message, and the decision it is waiting on — the question with its options and any recommendation, or the tool awaiting permission with a one-line summary — and, when the user's last reply to it never arrived, that it did not and why. The summary the user hears and the detail they may ask for are one and the same facts.
+What the system knows about one Session, structured for telling the user: its name, its agent, its state (waiting for a decision, requesting permission, waiting on another Session or its own Child Process, finished, or running), its newest message and its source time when known, and the decision it is waiting on — the question with its options and any recommendation, or the tool awaiting permission with a one-line summary — and, when the user's last reply to it never arrived, that it did not and why. The summary the user hears and the detail they may ask for are one and the same facts.
 _Avoid_: 单项目简报, notice (unqualified), stop detail
 
 **Roster Brief**:
@@ -113,11 +113,11 @@ Status queries and switch flips, accepted from every surface and never gated by 
 _Avoid_: admin commands, management interface
 
 **Control Panel**:
-The one at-computer window for the system's current state and switches: Home, a Session Brief and Settings replace one another inside it, with technical details confined to Diagnostics (ADR 0028). Opened from the Duty Lamp or the menu bar; the app joins the Dock and app switcher only while the window is open.
+The one at-computer window for the system's current state and switches: Control, a Session Brief and Settings replace one another inside it, with technical details confined to Diagnostics (ADR 0028). Opened from the Duty Lamp or the menu bar; the app joins the Dock and app switcher only while the window is open.
 _Avoid_: settings app, preferences window, config tool, dropdown (the v0 form, retired)
 
 **Duty Lamp**:
-The fixed 72×26, always-on-top, non-activating desktop lamp (the former Duty Card), present exactly while Duty is on, carrying the Call Phase and the same waiting and finished counts as Home: live main Sessions *waiting for your decision*, *requesting permission*, or *finished*, never a Session *waiting on* another, a Child Process or a Headless Run. Its numbers alternate with call duration every three seconds during Calling and On a call. Hover shows the most recently active counted Session's row; a new Core-issued desktop reminder replaces the current bubble for five seconds, held while hovered, without replay on initial reading or reconnection. A click expands to the left and offers the Live Toggle, Home and Settings, and a secondary click offers Quit — it displays briefs and never takes a reply (ADR 0028).
+The fixed 72×26, always-on-top, non-activating desktop lamp (the former Duty Card), present exactly while Duty is on, carrying the Call Phase and the same waiting and finished counts as Home: live main Sessions *waiting for your decision*, *requesting permission*, or *finished*, never a Session *waiting on* another, a Child Process or a Headless Run. Its numbers alternate with call duration every three seconds during Calling and On a call. Hover shows the most recently active counted Session's row; a new Core-issued desktop reminder replaces the current bubble for five seconds, held while hovered, without replay on initial reading or reconnection. The right slot expands to the left and offers the Live Toggle, Control and Settings; the left cell dials, cancels the current dial, or asks before hanging up an established call. The six-second ask never pauses the call. A secondary click offers Quit — it displays briefs and never takes a reply (ADR 0028).
 _Avoid_: floating strip, widget, HUD, pet, Status Strip (the working title)
 
 **Diagnostics**:

@@ -19,8 +19,10 @@ enum Copy: String, CaseIterable {
     case call
     case hangUp
     case home
+    case messageJustNow, messageSecondsAgo, messageMinutesAgo, messageHoursAgo, messageDaysAgo
     case settings
     case quit
+    case hangupAsk
     case quitAsk
     case keepCall
     case notWatching
@@ -87,7 +89,7 @@ enum Copy: String, CaseIterable {
         numberRequired
     case appearance, appearanceSystem, appearanceDark, appearanceLight
     case appearanceSystemHint, appearanceDarkHint, appearanceLightHint
-    case launchAtLogin, language, languageNextLaunch
+    case launchAtLogin, language
     case agentModelsNote, agentModelGone, agentModelsUnavailable
     case onboardingStep, welcomeTitle, welcomeBody, start, codexCheckTitle, codexReady,
         codexNotInstalled, codexInstallFix, codexNotLoggedIn, codexLoginFix, recheck,
@@ -130,6 +132,25 @@ struct ShellText {
     static func preferredLanguage(saved: String?, system: [String]) -> String {
         let language = saved ?? system.first ?? "en"
         return (language.hasPrefix("zh") ? ShellLanguage.chinese : .english).rawValue
+    }
+
+    func messageAge(_ message: Date?, at now: Date, long: Bool = false) -> String {
+        guard let message else { return "—" }
+        let seconds = max(0, Int(now.timeIntervalSince(message)))
+        if seconds < 10 { return long ? self(.messageJustNow) : "now" }
+        let amount: Int
+        let unit: String
+        let wording: Copy
+        if seconds < 60 {
+            (amount, unit, wording) = (seconds, "s", .messageSecondsAgo)
+        } else if seconds < 3600 {
+            (amount, unit, wording) = (seconds / 60, "m", .messageMinutesAgo)
+        } else if seconds < 86400 {
+            (amount, unit, wording) = (seconds / 3600, "h", .messageHoursAgo)
+        } else {
+            (amount, unit, wording) = (seconds / 86400, "d", .messageDaysAgo)
+        }
+        return long ? self(wording, amount) : "\(amount)\(unit)"
     }
 
     func callAsFunction(_ key: Copy, _ arguments: CVarArg...) -> String {

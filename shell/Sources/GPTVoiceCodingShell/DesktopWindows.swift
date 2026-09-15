@@ -62,6 +62,7 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         contentRect: NSRect(x: 0, y: 0, width: Phosphor.windowWidth, height: 1),
         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
         backing: .buffered, defer: true)
+    private var contentHost: NSHostingView<MeasuredContent<ControlPanelView>>?
     private var lastWindowRequest = 0
     private var localClick: Any?
     private var globalClick: Any?
@@ -78,12 +79,25 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         window.delegate = self
         window.contentMinSize.width = Phosphor.windowWidth
         window.standardWindowButton(.zoomButton)?.isEnabled = false
-        window.contentView = NSHostingView(
+        let host = NSHostingView(
             rootView:
                 MeasuredContent(changed: { [weak self] height in self?.resizeWindow(height: height)
                 }) {
                     ControlPanelView(shell: shell)
                 })
+        let initialHeight = host.fittingSize.height
+        host.sizingOptions = [.intrinsicContentSize]
+        host.frame.size.width = Phosphor.windowWidth
+        host.autoresizingMask = [.width]
+        contentHost = host
+        let scroll = NSScrollView(frame: window.contentView!.bounds)
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = host
+        window.contentView = scroll
+        resizeWindow(height: initialHeight)
         card.contentView = LampHostingView(rootView: DutyCardView(shell: shell))
         card.delegate = self
         actions.isMovableByWindowBackground = false
@@ -120,10 +134,16 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         if shell.windowOpen {
             if !window.isVisible {
                 NSApp.setActivationPolicy(.regular)
-                window.center()
+                if !shell.windowRequestedFromLamp { window.center() }
             }
             if shell.windowRequest != lastWindowRequest {
                 lastWindowRequest = shell.windowRequest
+                if shell.windowRequestedFromLamp, shell.cardVisible, let screen = card.screen {
+                    window.setFrame(
+                        Self.controlFrame(
+                            window.frame, height: window.frame.height,
+                            anchor: card.frame, screen: screen.visibleFrame), display: true)
+                }
                 if window.isMiniaturized { window.deminiaturize(nil) }
                 window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
@@ -149,8 +169,13 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
     }
 
     private func resizeWindow(height: CGFloat) {
-        let maximum = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? height
-        resize(window, height: min(height, maximum))
+        // The preference's initial zero is not a content measurement.
+        guard height > 0 else { return }
+        contentHost?.frame.size.height = ceil(height)
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let frame = Self.controlFrame(
+            window.frame, height: height, anchor: nil, screen: screen.visibleFrame)
+        if frame != window.frame { window.setFrame(frame, display: true) }
     }
 
     private func synchronizeAttachments() {
@@ -214,6 +239,10 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
     }
 
     private func updatePointer() {
+        let point = NSEvent.mouseLocation
+        shell.lampCellHovered =
+            card.frame.contains(point)
+            && point.x < card.frame.minX + Phosphor.lampEdge + Phosphor.lampCell
         shell.setLampPointer(
             inside: Self.containsReadingPoint(
                 NSEvent.mouseLocation,
@@ -232,13 +261,25 @@ final class DesktopWindows: NSObject, NSWindowDelegate {
         return inBubble || inCrossing
     }
 
-    private func resize(_ panel: NSWindow, height: CGFloat) {
-        var frame = panel.frame
-        let height = ceil(height)
-        guard frame.height != height else { return }
-        frame.origin.y += frame.height - height
-        frame.size.height = height
-        panel.setFrame(frame, display: true)
+    static func controlFrame(_ current: NSRect, height: CGFloat, anchor: NSRect?, screen: NSRect)
+        -> NSRect
+    {
+        let size = NSSize(
+            width: min(current.width, screen.width), height: min(ceil(height), screen.height))
+        let right = anchor?.maxX ?? current.maxX
+        let top = anchor.map { $0.minY - Phosphor.bubbleGap } ?? current.maxY
+        return NSRect(
+            x: min(max(right - size.width, screen.minX), screen.maxX - size.width),
+            y: min(max(top - size.height, screen.minY), screen.maxY - size.height),
+            width: size.width, height: size.height)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === window,
+            let width = window.contentView?.bounds.width,
+            contentHost?.rootView.width != width
+        else { return }
+        contentHost?.rootView.width = width
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
@@ -294,10 +335,11 @@ private struct ContentHeight: PreferenceKey {
 }
 
 private struct MeasuredContent<Content: View>: View {
+    var width = Phosphor.windowWidth
     let changed: (CGFloat) -> Void
     @ViewBuilder let content: () -> Content
     var body: some View {
-        content().fixedSize(horizontal: false, vertical: true)
+        content().frame(width: width).fixedSize(horizontal: false, vertical: true)
             .background(
                 GeometryReader { geometry in
                     Color.clear.preference(key: ContentHeight.self, value: geometry.size.height)
@@ -319,32 +361,108 @@ private final class LampHostingView: NSHostingView<DutyCardView> {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let pointerTracking { removeTrackingArea(pointerTracking) }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect, .cursorUpdate],
+            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
             owner: self)
         addTrackingArea(tracking)
         pointerTracking = tracking
     }
     override func mouseEntered(with event: NSEvent) {
-        NSCursor.pointingHand.set()
+        mouseMoved(with: event)
         shell.setLampPointer(inside: true)
     }
-    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        shell.lampCellHovered = point.x < Phosphor.lampEdge + Phosphor.lampCell
+    }
+    override func mouseExited(with event: NSEvent) { shell.lampCellHovered = false }
     override func rightMouseDown(with event: NSEvent) { shell.toggleLampActions(secondary: true) }
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
+        let inCell =
+            convert(event.locationInWindow, from: nil).x < Phosphor.lampEdge + Phosphor.lampCell
+        shell.lampCellPressed = inCell && shell.lampCellEnabled
+        defer { shell.lampCellPressed = false }
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             if next.type == .leftMouseUp {
-                shell.toggleLampActions()
+                if inCell {
+                    Task { await shell.activateLampCell() }
+                } else {
+                    shell.toggleLampActions()
+                }
                 return
             }
             window.performDrag(with: event)
             return
         }
+    }
+}
+
+/// A non-intercepting native tracking region; works while its window is inactive.
+private struct HandRegion: NSViewRepresentable {
+    let enabled: Bool
+    func makeNSView(context: Context) -> HandTrackingView { HandTrackingView() }
+    func updateNSView(_ view: HandTrackingView, context: Context) { view.enabled = enabled }
+}
+
+private final class HandTrackingView: NSView {
+    var enabled = true {
+        didSet { if inside { setCursor() } }
+    }
+    private var inside = false
+    private var tracking: NSTrackingArea?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [
+                .activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate,
+            ], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+    private func setCursor() { (enabled ? NSCursor.pointingHand : .arrow).set() }
+    override func mouseEntered(with event: NSEvent) {
+        inside = true
+        setCursor()
+    }
+    override func mouseMoved(with event: NSEvent) { setCursor() }
+    override func cursorUpdate(with event: NSEvent) { setCursor() }
+    override func mouseExited(with event: NSEvent) {
+        inside = false
+        NSCursor.arrow.set()
+    }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil, inside {
+            inside = false
+            NSCursor.arrow.set()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+}
+
+private struct PointingHand: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        content.background(HandRegion(enabled: enabled && isEnabled))
+    }
+}
+
+extension View {
+    func pointingHand(enabled: Bool = true) -> some View {
+        modifier(PointingHand(enabled: enabled))
+    }
+}
+
+struct PlainHandButton: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.pointingHand().opacity(configuration.isPressed ? 0.7 : 1)
     }
 }

@@ -105,3 +105,54 @@ General adds a shell-local System / Dark / Light preference, applied immediately
 to the main window, Lamp and its attachments. It does not write engine settings
 or request a restart. Other decisions above remain in force. The fixed handoff
 listed in #363 is the visual authority, including both appearances and motion.
+
+
+## Amendment — Duty Lamp follow-up (#364, 2026-09-15)
+
+The root Stage 2 in the fixed follow-up handoff is the visual authority. The
+right slot opens Call / Hang up, Control and Settings; the left cell dials when
+Ready, cancels its pending dial during Calling, and asks before hanging up an
+established call. Hover and the pending ask use the design's red 135-degree
+handset; Keep, Escape, another left-cell click or six seconds cancels the ask.
+Explicit Hang up buttons retain their direct action. The plate remains 72×26.
+
+DesktopWindows owns one native scrolling window, measured at its current width.
+Opening it from the Lamp anchors it below and right-aligned on that display;
+internal navigation preserves the top edge. Content taller than that display
+scrolls. The initial content is measured before the viewport is assigned, so a
+zero-height viewport cannot prevent its own first measurement. Shared native
+tracking regions provide the pointing hand even in inactive windows; dragging
+the Lamp does not activate either click action.
+
+Message times travel with ProgressEntry and Briefing's selected Newest, through
+the roster, detail and immutable desktop reminder snapshot. Activity sorting is
+unchanged. The Shell formats these times on its existing visible clock, with no
+new backend reads or timer per row. Missing times remain absent and display an
+em dash. Claude transcript timestamps supply message times. The installed
+codex-cli 0.154.0 experimental thread/read schema omits message timestamps,
+but its persisted item_completed records carry completed_at_ms and exact
+thread/turn/item IDs. The Adapter reads the daemon-named rollout during its
+existing deep read, validates the file's thread identity, and joins only times
+for daemon-selected messages. The existing TurnCache retains that reading;
+there is no new poller, content source, or arrival-time ledger. Missing source
+records stay unknown rather than borrowing turn or activity times. A live
+read on 2026-09-15 matched all 84 returned messages to their lifecycle records.
+This narrowly extends the old no-rollout-progress rule: content, state and
+approval authority remain with the app-server; the local record supplies only
+its omitted message completion time. Historical files lacking those exact
+lifecycle records cannot provide a verified time.
+
+
+Cancellation extends the existing live control action with cancel_dial carrying
+an opaque attempt ID. User dials may provide attempt_id; automatic dials receive
+one in CallKeeper and status exposes the current dial_attempt. The Keeper sends
+end_call outside the opening operation lock, sharing a completion future with
+the opening attempt so the lock cannot admit a later dial before cleanup ends.
+Stale or repeated cancellation cannot toggle a subsequent call. A queued CallStarted from a handshake whose result was cancelled cannot
+re-adopt that released call. Other call event and cue semantics are unchanged. The existing Realtime Adapter owns connection/audio cleanup.
+
+Language and engine configuration have independent pending-application state.
+Restart now reloads Shell text directly for language-only changes; combined
+changes reload that text after the replacement engine is reachable. Calling,
+On a call and Ending disable the action without scheduling a later restart.
+Appearance remains immediate and independent.

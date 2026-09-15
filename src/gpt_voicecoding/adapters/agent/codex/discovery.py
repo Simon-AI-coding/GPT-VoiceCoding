@@ -20,11 +20,13 @@ by #82's prototype (`661d3d9`), not assumed.
 running says which one it could be sitting in. It never says what a Session
 *is*: identity is the daemon's thread id and nothing else.
 
-**The rollouts on disk supply one fact and one only**: whether an exact
+**Rollouts supply root evidence during discovery**: whether an exact
 `resume <UUID>` process names a thread the user themselves rooted. That is what
 lets a TUI started while the daemon was down compose a row at all — #82 proved
 such a TUI is never adopted by a daemon that starts later, so it is not a corner
-case but the ordinary result.
+case but the ordinary result. On a deep message read, #364 also joins exact
+item completion times from the daemon-named rollout. That adds no content,
+classification or independent polling; TurnCache retains it with the message.
 
 **Unreachability gets no row and no field.** #68 removed that vocabulary: a
 Relay into a Session the daemon cannot load returns the existing `FAILED` grade
@@ -34,10 +36,11 @@ proven to exist.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -208,7 +211,9 @@ class TurnCache:
         if reading.thread is None:
             assert reading.reason is not None
             return ProgressObservation.unreadable(reading.reason)
-        progress = progress_from(reading.thread, capture=self.capture)
+        progress = progress_from(
+            reading.thread, capture=self.capture, completed_at=reading.completed_at
+        )
         observed_stamp = reading.thread.get(thread_tail.UPDATED_AT, cache_stamp)
         if observed_stamp is not None:
             self._cache[thread_id] = (observed_stamp, progress)
@@ -370,7 +375,12 @@ def _report_unheld_terminals(
         )
 
 
-def progress_from(thread: Mapping[str, Any], *, capture: ProgressCapture) -> ProgressObservation:
+def progress_from(
+    thread: Mapping[str, Any],
+    *,
+    capture: ProgressCapture,
+    completed_at: Mapping[tuple[str, str], datetime] | None = None,
+) -> ProgressObservation:
     """One `thread/read` answer, as the seam holds it.
 
     The one place a thread document becomes a `ProgressObservation`, so the cadence's cached
@@ -378,7 +388,7 @@ def progress_from(thread: Mapping[str, Any], *, capture: ProgressCapture) -> Pro
     `read_at` is stamped here because it belongs to the *reading*: it is when this
     was true, and a value carried forward from a cache hit keeps its own moment.
     """
-    entries, omission = thread_tail.recent(thread, capture=capture)
+    entries, omission = thread_tail.recent(thread, capture=capture, completed_at=completed_at)
     return ProgressObservation.from_capture(
         recent=entries,
         omission=omission,
@@ -469,6 +479,7 @@ class ThreadRead:
     """One daemon read, preserving why no authoritative document arrived."""
 
     thread: dict[str, Any] | None = None
+    completed_at: Mapping[tuple[str, str], datetime] = field(default_factory=dict)
     reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -497,7 +508,8 @@ async def read_thread(
         reason = f"{READ_METHOD} answered about a different thread than {thread_id}"
         _log.info("%s", reason)
         return ThreadRead(reason=reason)
-    return ThreadRead(thread=thread)
+    completed_at = await asyncio.to_thread(rollouts.message_times, thread) if with_turns else {}
+    return ThreadRead(thread=thread, completed_at=completed_at)
 
 
 async def _named(

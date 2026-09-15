@@ -48,7 +48,8 @@ struct CallSettingsView: View {
                         get: { autoHangup },
                         set: { on in Task { await shell.panel.flip("auto_hangup", on: on) } }
                     )
-                ).toggleStyle(.switch).disabled(!shell.panel.engineReachable || shell.panel.busy)
+                ).toggleStyle(.switch).pointingHand().disabled(
+                    !shell.panel.engineReachable || shell.panel.busy)
             } else {
                 Text(shell.text(.autoHangup) + " · " + shell.text(.unavailable))
                     .foregroundStyle(Phosphor.secondary)
@@ -78,7 +79,7 @@ struct GeneralSettingsView: View {
                 isOn: Binding(
                     get: { shell.loginItem.enabled }, set: { shell.loginItem.set($0) }
                 )
-            ).toggleStyle(.switch)
+            ).toggleStyle(.switch).pointingHand()
             if shell.loginItem.failure != nil {
                 Text(shell.text(.settingsSaveFailed)).font(Phosphor.prose)
                 Button(shell.text(.openDiagnostics)) { shell.open(.settings(.diagnostics)) }
@@ -94,7 +95,7 @@ struct GeneralSettingsView: View {
                             Text(shell.text(appearance.title))
                                 .padding(.horizontal, 10).padding(.vertical, 2)
                                 .contentShape(Rectangle())
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(PlainHandButton())
                             .foregroundStyle(
                                 shell.selectedAppearance == appearance
                                     ? Phosphor.accent : Phosphor.secondary
@@ -125,8 +126,6 @@ struct GeneralSettingsView: View {
                 let chosen = $0
                 shell.setLanguage(ShellLanguage.allCases.first { $0.label == chosen }!)
             }
-            Text(shell.text(.languageNextLaunch)).font(Phosphor.prose).foregroundStyle(
-                Phosphor.secondary)
         }
     }
 }
@@ -219,7 +218,7 @@ struct SettingsPicker: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: Phosphor.controlRadius).stroke(Phosphor.rule)
                     )
-            }.menuStyle(.borderlessButton).menuIndicator(.hidden)
+            }.menuStyle(.borderlessButton).menuIndicator(.hidden).pointingHand()
                 .disabled(!enabled || choices.isEmpty)
         }
     }
@@ -234,15 +233,32 @@ struct SettingsSaveStatus: View {
             Button(shell.text(.openDiagnostics)) { shell.open(.settings(.diagnostics)) }
         }
         if shell.pendingRestart {
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
+            ConsoleRule()
+            HStack(spacing: 8) {
                 HStack(alignment: .top, spacing: 6) {
                     Text("!").foregroundStyle(Phosphor.accent)
                     Text(shell.text(.restartRequired)).font(Phosphor.prose)
-                }
-                Button(shell.text(shell.restartBlockedByCall ? .restartAfterCall : .restartNow)) {
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Button {
                     Task { await shell.restartForSettings() }
-                }.disabled(shell.restartBlockedByCall || shell.savingSettings)
+                } label: {
+                    Text(shell.text(shell.restartBlockedByCall ? .restartAfterCall : .restartNow))
+                        .font(Phosphor.small.weight(.medium)).fixedSize()
+                        .padding(.horizontal, 10).padding(.vertical, 3)
+                        .foregroundStyle(
+                            shell.restartBlockedByCall ? Phosphor.muted : Phosphor.accentInk
+                        )
+                        .background(
+                            shell.restartBlockedByCall ? .clear : Phosphor.accent,
+                            in: RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Phosphor.controlRadius)
+                                .strokeBorder(
+                                    shell.restartBlockedByCall ? Phosphor.rule : .clear,
+                                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+                }.buttonStyle(PlainHandButton()).disabled(
+                    shell.restartBlockedByCall || shell.savingSettings)
             }
         }
     }

@@ -68,6 +68,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+from uuid import uuid4
 
 from gpt_voicecoding.core.adjudication import SwitchAdjudicator
 from gpt_voicecoding.core.clock import Clock, default_clock
@@ -233,6 +234,7 @@ class KeeperStatus:
     cool_down_remaining: float
     #: Whether an event inside a Cool-down bought a dial that has not been paid.
     dial_owed: bool
+    dial_attempt: str | None = None
 
 
 class CallTime:
@@ -704,12 +706,18 @@ class CallTime:
         self._gap_since = None if speaking else now
 
 
+@dataclass
+class _DialAttempt:
+    id: str
+    cancellation: asyncio.Future[bool] | None = None
+
+
 class CallKeeper:
     """The async shell: the Call adapter, one lock, the Briefer, and the clock.
 
-    Five entries, and no content passes through any of them. `live_toggle`,
-    `wake`, `tick`, `heard` and `status` are the whole surface. Mid-call news
-    (#196) added no sixth: what is spoken into a gap is the Briefer's answer at
+    Six entries, and no content passes through any of them. `live_toggle`,
+    `cancel_dial`, `wake`, `tick`, `heard` and `status` are the whole surface. Mid-call news
+    (#196) added no entry: what is spoken into a gap is the Briefer's answer at
     the moment of speaking, so it arrives through the same one seam the dial's
     hand-over does and never through a caller's argument.
     """
@@ -744,8 +752,10 @@ class CallKeeper:
         #: dial that is landing while the ceiling is firing is the interleaving
         #: this forbids, and it is the same lock for both.
         self._operation_lock = asyncio.Lock()
+        self._dial_attempt: _DialAttempt | None = None
+        self._cancelled_call_id: str | None = None
 
-    async def live_toggle(self) -> CallSnapshot:
+    async def live_toggle(self, *, attempt_id: str | None = None) -> CallSnapshot:
         """End the call the system owns, or start one if none is up.
 
         **Never gated, and Cool-down does not apply.** The switches constrain
@@ -761,8 +771,24 @@ class CallKeeper:
         """
         async with self._operation_lock:
             now = self._clock()
-            snapshot = await self._perform(self._time.toggled(now), now)
+            snapshot = await self._perform(self._time.toggled(now), now, attempt_id=attempt_id)
             return snapshot if snapshot is not None else CallSnapshot(state=CallState.DOWN)
+
+    async def cancel_dial(self, attempt_id: str) -> bool:
+        """Cancel only this in-flight dial, without queuing behind its handshake."""
+        attempt = self._dial_attempt
+        if attempt is None or attempt.id != attempt_id:
+            return False
+        if attempt.cancellation is not None:
+            return await asyncio.shield(attempt.cancellation)
+        attempt.cancellation = asyncio.get_running_loop().create_future()
+        try:
+            await self._call.end_call()
+        except BaseException:
+            attempt.cancellation.set_result(False)
+            raise
+        attempt.cancellation.set_result(True)
+        return True
 
     async def wake(self, *, focus: bool) -> None:
         """Something wake-worthy happened — a question, a permission, a finished turn.
@@ -783,6 +809,12 @@ class CallKeeper:
     async def heard(self, event: CallEvent) -> None:
         """One event the Call seam raised. Recorded, and cued."""
         async with self._operation_lock:
+            if (
+                isinstance(event, CallStarted)
+                and event.call_id == self._cancelled_call_id
+                and event.call_id != self._time.status(self._clock()).call_id
+            ):
+                return
             now = self._clock()
             await self._unattended(self._time.heard(event, now, self._permits()), now)
 
@@ -793,7 +825,10 @@ class CallKeeper:
         control plane answers `status` from, which must never wait on a call
         operation to say what is going on (ADR 0002).
         """
-        return self._time.status(self._clock())
+        return replace(
+            self._time.status(self._clock()),
+            dial_attempt=self._dial_attempt.id if self._dial_attempt else None,
+        )
 
     # -- doing what the machine says --------------------------------------
 
@@ -818,7 +853,9 @@ class CallKeeper:
         except Exception:  # noqa: BLE001 - the Keeper outlives one refused operation
             _log.exception("the Call adapter refused an operation the Keeper asked for")
 
-    async def _perform(self, acts: tuple[Act, ...], now: float) -> CallSnapshot | None:
+    async def _perform(
+        self, acts: tuple[Act, ...], now: float, *, attempt_id: str | None = None
+    ) -> CallSnapshot | None:
         """Carry out the machine's acts in order, and report the call's new state."""
         snapshot: CallSnapshot | None = None
         for act in acts:
@@ -832,10 +869,14 @@ class CallKeeper:
                         _log.info(CEILING_END_LINE, self._time.silence_end_seconds)
                     snapshot = await self._end(now)
                 case Dialling():
-                    snapshot = await self._open(now, user_opened=act.user_opened)
+                    snapshot = await self._open(
+                        now, user_opened=act.user_opened, attempt_id=attempt_id
+                    )
         return snapshot
 
-    async def _open(self, now: float, *, user_opened: bool) -> CallSnapshot | None:
+    async def _open(
+        self, now: float, *, user_opened: bool, attempt_id: str | None = None
+    ) -> CallSnapshot | None:
         """Bring a call up, on a hand-over read at this moment and never before.
 
         The Briefer answering `None` is not a failure: nobody needs the user, so
@@ -855,23 +896,29 @@ class CallKeeper:
                 self._time.nothing_to_say(now)
                 return None
             hand_over = fresh
+        attempt = _DialAttempt(attempt_id or str(uuid4()))
+        self._dial_attempt = attempt
         try:
-            dial = replace(self._dial_for(hand_over), user_opened=user_opened)
-            snapshot = await self._call.ensure_call(dial)
-        except Exception:
-            # A dial that could not be built — no instructions to open on — or an
-            # adapter that raised. Both are a failed dial, recorded before the
-            # refusal travels on: the Live Toggle's caller is owed the reason
-            # (the control plane words `CallInstructionsMissing` for the user),
-            # and the system's own paths log it and carry on (`wake`, `tick`).
-            self._time.dialled(now, call_id=None)
-            raise
-        # A snapshot that is not UP is deliberately **not** claimed: claiming a
-        # call that never arrived would bar the dial that fixes it.
-        self._time.dialled(
-            now, call_id=snapshot.call_id if snapshot.is_up else None, user_opened=user_opened
-        )
-        return snapshot
+            try:
+                dial = replace(self._dial_for(hand_over), user_opened=user_opened)
+                snapshot = await self._call.ensure_call(dial)
+            except Exception:
+                if attempt.cancellation is None or not await asyncio.shield(attempt.cancellation):
+                    self._time.dialled(now, call_id=None)
+                    raise
+                snapshot = CallSnapshot(state=CallState.DOWN)
+            if attempt.cancellation is not None and await asyncio.shield(attempt.cancellation):
+                # A completed handshake can have queued its start event before
+                # cancellation settled. It cannot reclaim the cancelled call.
+                self._cancelled_call_id = snapshot.call_id
+                self._time.ended(self._clock())
+                return CallSnapshot(state=CallState.DOWN)
+            self._time.dialled(
+                now, call_id=snapshot.call_id if snapshot.is_up else None, user_opened=user_opened
+            )
+            return snapshot
+        finally:
+            self._dial_attempt = None
 
     async def _say_what_stands_now(self, now: float, occasion: Occasion) -> None:
         """Speak this occasion's answer, read at this instant.

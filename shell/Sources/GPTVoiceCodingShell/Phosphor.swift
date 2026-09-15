@@ -3,11 +3,12 @@ import SwiftUI
 
 /// Named values transcribed from the handoff's phosphor/tokens.css.
 enum Phosphor {
+    static let messageTimeWidth: CGFloat = 34
     static let windowWidth: CGFloat = 480
     static let cardWidth: CGFloat = 72
     static let lampHeight: CGFloat = 26
     static let lampCell: CGFloat = 28
-    static let lampSlot: CGFloat = 41
+    static let lampSlot: CGFloat = cardWidth - lampCell - lampEdge * 2
     static let lampEdge: CGFloat = 1.5
     static let lampRadius: CGFloat = 7
     static let lampGlyph: CGFloat = 15
@@ -15,6 +16,8 @@ enum Phosphor {
     static let bubbleGap: CGFloat = 8
     static let actionGap: CGFloat = 6
     static let bubbleHold: TimeInterval = 5
+    static let hangupHold: TimeInterval = 6
+    static let lampPressedScale: CGFloat = 0.92
     static let failedHold: TimeInterval = 6
     static let slotHold: Int = 3
     static let lampPulse: TimeInterval = 1.6
@@ -135,7 +138,7 @@ struct ConsoleButton: ButtonStyle {
                 RoundedRectangle(cornerRadius: Phosphor.controlRadius)
                     .stroke(destructive ? Phosphor.danger : Phosphor.ruleStrong)
             )
-            .opacity(configuration.isPressed ? 0.7 : 1)
+            .opacity(configuration.isPressed ? 0.7 : 1).pointingHand()
     }
 }
 
@@ -174,7 +177,7 @@ struct ConsoleToggle: ToggleStyle {
             .contentShape(Rectangle())
             .opacity(isEnabled ? 1 : 0.5)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlainHandButton())
         .accessibilityRepresentation {
             Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch)
         }

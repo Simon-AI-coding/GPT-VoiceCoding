@@ -11,6 +11,55 @@ import Testing
 
 @MainActor
 @Suite struct ShellModelTests {
+    @Test func lampCallingClickCancelsWithoutConfirmation() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = GatedCallPlane()
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        let dial = Task { await model.activateLampCell() }
+        #expect(await waitUntil { model.panel.phase == .calling })
+        await model.activateLampCell()
+        await dial.value
+        #expect(model.confirmation == nil)
+        #expect(model.panel.phase == .ready)
+        #expect(model.panel.lastFailure == nil)
+        await model.stopEngine()
+    }
+
+    @Test func lampHangupConfirmationKeepsTheCallUntilAcceptedAndExpires() async throws {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane(up: true)
+        var time: TimeInterval = 0
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine), now: { time })
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        await model.activateLampCell()
+        #expect(model.confirmation == .hangUp)
+        #expect(model.confirmationOnLamp)
+        #expect(model.panel.phase == .onCall)
+        time = 5.9
+        model.updateLamp()
+        #expect(model.confirmation == .hangUp)
+        time = 6
+        model.updateLamp()
+        #expect(model.confirmation == nil)
+        #expect(model.panel.phase == .onCall)
+        await model.activateLampCell()
+        await model.activateLampCell()
+        #expect(model.confirmation == nil)
+        await model.activateLampCell()
+        await model.resolveConfirmation(accept: false)
+        #expect(model.panel.phase == .onCall)
+        await model.activateLampCell()
+        await model.resolveConfirmation(accept: true)
+        #expect(model.panel.phase == .ready)
+        await model.stopEngine()
+    }
+
     @Test func appearanceIsAnImmediatePersistedShellPreference() throws {
         let fixture = try TelegramCredentialFixture()
         let preferences = testPreferences()
@@ -80,14 +129,19 @@ import Testing
         await model.panel.refresh()
         await model.panel.refreshRoster()
         model.updateLamp()
+        engine.messageTime = "2026-09-15T00:00:01Z"
         engine.reminder = "displayed"
         await model.panel.refreshRoster()
         model.updateLamp()
         let displayed = try #require(model.lampBubble?.row)
+        engine.messageTime = "2026-09-15T00:00:02Z"
         engine.reminder = "replacement"
         await model.panel.refreshRoster()
         model.updateLamp()
         #expect(model.lampBubble?.row?.target != displayed.target)
+        let firstTime = try #require(displayed.messageAt)
+        let replacementTime = try #require(model.lampBubble?.row?.messageAt)
+        #expect(replacementTime.timeIntervalSince(firstTime) == 1)
         model.openLampBrief(displayed.target)
         #expect(model.page == .session(displayed.target))
         await model.stopEngine()
@@ -192,7 +246,7 @@ import Testing
         await model.stopEngine()
     }
 
-    @Test func theEighteenLampStatesRenderAtTheFixedSizeInBothAppearances() async throws {
+    @Test func lampStatesRenderAtTheFixedSizeInBothAppearances() async throws {
         let states: [(String, Int, Int, CallPhase, Int, String)] = [
             ("01-empty", 0, 0, .ready, 0, ""),
             ("02-waiting", 3, 0, .ready, 0, ""),
@@ -212,6 +266,8 @@ import Testing
             ("16-quit", 2, 2, .ready, 0, "quit"),
             ("17-confirm", 0, 0, .onCall, 84, "confirm"),
             ("18-reminder", 3, 0, .ready, 0, "reminder"),
+            ("19-hangup-hover", 0, 0, .onCall, 84, "hangup-hover"),
+            ("20-hangup-confirm", 0, 0, .onCall, 84, "hangup-confirm"),
         ]
         for (label, waiting, finished, phase, elapsed, interaction) in states {
             let fixture = try TelegramCredentialFixture()
@@ -248,6 +304,8 @@ import Testing
             case "actions": model.toggleLampActions()
             case "quit": model.toggleLampActions(secondary: true)
             case "confirm": model.quit()
+            case "hangup-hover": model.lampCellHovered = true
+            case "hangup-confirm": await model.activateLampCell()
             case "reminder":
                 engine.reminder = "atlas · auth flow"
                 await panel.refreshRoster()
@@ -348,10 +406,32 @@ import Testing
         #expect(await waitUntil { model.confirmation == nil })
         #expect(model.panel.phase == .onCall)
         #expect(await waitUntil { !bubble.isKeyWindow })
+        await model.activateLampCell()
+        #expect(model.confirmation == .hangUp)
+        #expect(await waitUntil { bubble.isKeyWindow })
+        #expect(bubble.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil))
+        #expect(await waitUntil { model.confirmation == nil })
+        #expect(model.panel.phase == .onCall)
+        #expect(await waitUntil { !bubble.isKeyWindow })
         model.setLampPointer(inside: false)
         model.dismissLampActions()
         #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 1 })
         #expect(lamp.frame == anchor)
+        model.open(.settings(.general), fromLamp: true)
+        let control = try #require(surfaces.first { !($0 is DutyPanel) })
+        #expect(await waitUntil { control.isVisible && control.frame.height > 100 })
+        let top = control.frame.maxY
+        #expect(control.frame.maxX == anchor.maxX)
+        #expect(top == anchor.minY - Phosphor.bubbleGap)
+        #expect(control.frame.width == Phosphor.windowWidth)
+        for group in SettingsGroup.allCases {
+            model.open(.settings(group))
+            for _ in 0..<5 { await Task.yield() }
+            #expect(control.frame.maxY == top)
+            #expect(control.frame.maxX == anchor.maxX)
+            #expect(control.frame.width == Phosphor.windowWidth)
+        }
+        model.closeWindow()
         await model.setDuty(false)
         #expect(await waitUntil { !surfaces.contains(where: \.isVisible) })
     }
@@ -365,11 +445,16 @@ import Testing
                 fixture: fixture, launcher: RecordingEngineLauncher(), preferences: preferences)
             await model.stopEngine()
             model.open(.settings(.general))
+            model.setLanguage(language == "en" ? .chinese : .english)
             for appearance in [ShellAppearance.system, .dark, .light] {
                 model.setAppearance(appearance)
-                try await renderLamp(
-                    ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
-                    appearance: appearance, name: "general-\(language)-\(appearance.rawValue)")
+                for group in SettingsGroup.allCases {
+                    model.open(.settings(group))
+                    try await renderLamp(
+                        ControlPanelView(shell: model).frame(width: Phosphor.windowWidth),
+                        appearance: appearance,
+                        name: "settings-\(group)-\(language)-\(appearance.rawValue)")
+                }
             }
         }
     }
@@ -479,12 +564,16 @@ import Testing
         let dial = Task { await model.panel.toggleLive() }
         #expect(await waitUntil { model.panel.phase == .calling })
         await model.saveSetting(.voice, value: .string("maple"))
+        let appliedLanguage = model.text.language
+        let requestedLanguage: ShellLanguage = appliedLanguage == "en" ? .chinese : .english
+        model.setLanguage(requestedLanguage)
         for phase in [CallPhase.calling, .onCall, .ending] {
             #expect(model.panel.phase == phase)
             #expect(model.restartBlockedByCall)
             await model.restartForSettings()
             #expect(model.pendingRestart)
             #expect(launcher.stopCount == 0)
+            #expect(model.text.language == appliedLanguage)
             if phase == .calling {
                 engine.dial.resolve()
                 await dial.value
@@ -499,6 +588,7 @@ import Testing
         await model.restartForSettings()
         #expect(await waitUntil { model.health == .running(pid: 2002) && !model.pendingRestart })
         #expect(model.configuration?.voice == "maple")
+        #expect(model.text.language == requestedLanguage.rawValue)
         await model.stopEngine()
     }
 
@@ -922,7 +1012,7 @@ import Testing
             await model.stopEngine()
         }
     }
-    @Test func generalChangesOnlyTheLoginItemAndNextLaunchLanguage() async throws {
+    @Test func generalLanguageWaitsForExplicitRestartAndReloadsVisibleCopy() async throws {
         let fixture = try TelegramCredentialFixture()
         let before = try Data(contentsOf: URL(fileURLWithPath: fixture.configPath))
         let suite = "gvc-settings-\(UUID().uuidString)"
@@ -940,6 +1030,15 @@ import Testing
         #expect(model.selectedLanguage == .chinese)
         #expect(model.text.language == "en")
         #expect(preferences.string(forKey: ShellText.preferenceKey) == "zh-Hans")
+        #expect(model.pendingRestart)
+        model.setAppearance(.dark)
+        #expect(model.pendingRestart)
+        model.setLanguage(.english)
+        #expect(!model.pendingRestart)
+        model.setLanguage(.chinese)
+        await model.restartForSettings()
+        #expect(model.text.language == "zh-Hans")
+        #expect(model.text(.settings) == "设置")
         #expect(!model.pendingRestart)
         #expect(launcher.launchCount == 0)
         #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.configPath)) == before)
@@ -1143,6 +1242,7 @@ import Testing
         let (_, model) = makeShell(
             fixture: fixture, launcher: RecordingEngineLauncher(),
             panel: ControlPanel(client: engine),
+            wallNow: { Date(timeIntervalSince1970: 1_000_000 + clock.time) },
             now: { clock.time }, sleep: clock.sleep)
         model.open(.home)
         // Let each visible read finish before advancing the existing test clock;
@@ -1153,6 +1253,7 @@ import Testing
         #expect(await waitUntil { clock.waiting && engine.requests.count == 3 })
         await model.readInFlight?.value
         #expect(engine.requests.filter { $0 == "brief" }.count == 1)
+        #expect(model.messageNow == Date(timeIntervalSince1970: 1_000_001))
         clock.advance()
         #expect(await waitUntil { clock.waiting && engine.requests.count == 5 })
         await model.readInFlight?.value
@@ -1453,6 +1554,7 @@ private func makeShell(
     loginItem: LoginItem? = nil,
     preferences: UserDefaults = testPreferences(),
     runCommand: (@Sendable (EngineCommand) async -> InstallationReport)? = nil,
+    wallNow: @escaping () -> Date = Date.init,
     now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
     sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
 ) -> (supervisor: EngineSupervisor, model: ShellModel) {
@@ -1468,7 +1570,7 @@ private func makeShell(
         credentials: fixture.credentials,
         panel: panel ?? ControlPanel(client: UnreachableControlPlane()),
         supervisor: supervisor, configurationFile: configurationFile, loginItem: loginItem,
-        preferences: preferences, runCommand: runCommand, now: now, sleep: sleep)
+        preferences: preferences, runCommand: runCommand, wallNow: wallNow, now: now, sleep: sleep)
     return (supervisor, model)
 }
 
@@ -1559,19 +1661,35 @@ private struct UnreachableControlPlane: ControlPlaneDialing {
 }
 
 private actor GatedCallPlane: ControlPlaneDialing {
+    private var attempt: String?
+    private var cancelled = false
     nonisolated let dial = OneShot<Void>()
     nonisolated let hangup = OneShot<Void>()
     private var up = false
     func ask(_ request: Request) async throws -> Reply {
+        var acceptedCancellation = false
         if request.action == .live {
-            if up { await hangup.value() } else { await dial.value() }
-            up.toggle()
+            if let cancelling = request.payload?["cancel_dial"]?.string {
+                acceptedCancellation = cancelling == attempt
+                if acceptedCancellation {
+                    cancelled = true
+                    dial.resolve()
+                }
+            } else {
+                attempt = request.payload?["attempt_id"]?.string
+                cancelled = false
+                if up { await hangup.value() } else { await dial.value() }
+                if !cancelled { up.toggle() }
+            }
         }
         return try Reply.of(
             JSONSerialization.data(withJSONObject: [
                 "ok": true, "action": request.action.rawValue,
                 "protocol": controlPlaneProtocolVersion,
-                "data": ["state": up ? "up" : "down", "call_id": up ? "call" as Any : NSNull()],
+                "data": [
+                    "state": up ? "up" : "down", "call_id": up ? "call" as Any : NSNull(),
+                    "cancelled": acceptedCancellation,
+                ],
             ]))
     }
 }
@@ -1726,6 +1844,11 @@ private final class HeldEngineProcess: EngineProcess, @unchecked Sendable {
 private final class LampControlPlane: ControlPlaneDialing, @unchecked Sendable {
     private let lock = NSLock()
     private var reminderID: String? = "first"
+    private var messageTimestamp: String?
+    var messageTime: String? {
+        get { lock.withLock { messageTimestamp } }
+        set { lock.withLock { messageTimestamp = newValue } }
+    }
     private var available = true
     private var dutyOn = true
     private var callUp: Bool
@@ -1762,12 +1885,14 @@ private final class LampControlPlane: ControlPlaneDialing, @unchecked Sendable {
             func row(_ name: String, state: String = "finished", agent: String = "codex")
                 -> [String: Any]
             {
-                [
+                var document: [String: Any] = [
                     "target": ["agent": agent, "session_id": name], "name": name,
                     "state": state,
                     "state_word": state == "decision" ? "waiting for your decision" : "finished",
                     "newest": "Should the old sessions keep working after the key rotates?",
                 ]
+                if let messageTimestamp { document["message_at"] = messageTimestamp }
+                return document
             }
             if request.action == .brief {
                 var roster: [String: Any] = [

@@ -41,6 +41,7 @@ from gpt_voicecoding.core.switches import Switchboard, SwitchName
 from gpt_voicecoding.seams.call import (
     CallDropped,
     CallEnded,
+    CallSnapshot,
     CallStarted,
     CallState,
     Cue,
@@ -190,16 +191,16 @@ def permits(*, dial: bool = True, hang_up: bool = True) -> Permits:
     return Permits(dial=dial, hang_up=hang_up)
 
 
-class TestTheInterfaceIsFiveEntriesAndNoContent:
+class TestTheInterfaceKeepsCallControlSeparateFromContent:
     """`CONTEXT.md`'s *Call Keeper*: it knows nothing of what is said."""
 
-    def test_the_keeper_has_exactly_the_five_public_entries(self) -> None:
+    def test_the_keeper_exposes_only_call_control_and_observation(self) -> None:
         surface = {
             name
             for name, _ in inspect.getmembers(CallKeeper, inspect.isfunction)
             if not name.startswith("_")
         }
-        assert surface == {"live_toggle", "wake", "tick", "heard", "status"}
+        assert surface == {"live_toggle", "cancel_dial", "wake", "tick", "heard", "status"}
 
     def test_no_entry_takes_a_session_brief_or_any_other_words(self) -> None:
         """The Keeper decides *when* to sound, never *what* is said.
@@ -208,7 +209,7 @@ class TestTheInterfaceIsFiveEntriesAndNoContent:
         A brief crossing this interface is how "it knows nothing of what is
         said" stops being true.
         """
-        for name in ("live_toggle", "wake", "tick", "heard", "status"):
+        for name in ("live_toggle", "cancel_dial", "wake", "tick", "heard", "status"):
             hints = inspect.signature(getattr(CallKeeper, name)).parameters
             assert SpokenBrief not in {parameter.annotation for parameter in hints.values()}
 
@@ -1027,3 +1028,36 @@ class TestTheStateMachineOnItsOwn:
         time = self.machine()
         time.heard(CallStarted(call_id="call-1"), 0.0, permits())  # type: ignore[attr-defined]
         assert time.wake(0.0, permits(), focus=False) == (Sounding(Cue.EVENT),)  # type: ignore[attr-defined]
+
+
+def test_cancel_dial_reaches_the_adapter_before_connection_returns_and_is_scoped() -> None:
+    async def run() -> None:
+        class ConnectingCall(FakeCall):
+            def __init__(self) -> None:
+                super().__init__()
+                self.connecting = asyncio.Event()
+                self.released = asyncio.Event()
+
+            async def ensure_call(self, dial: Dial) -> CallSnapshot:
+                self.connecting.set()
+                await self.released.wait()
+                return CallSnapshot(state=CallState.DOWN)
+
+            async def end_call(self) -> CallSnapshot:
+                self.released.set()
+                return await super().end_call()
+
+        call = ConnectingCall()
+        keeper = Keeper(call=call).keeper
+        dialing = asyncio.create_task(keeper.live_toggle(attempt_id="first"))
+        await call.connecting.wait()
+        assert keeper.status().dial_attempt == "first"
+        assert not await keeper.cancel_dial("old")
+        assert await keeper.cancel_dial("first")
+        assert (await dialing).state is CallState.DOWN
+        assert keeper.status().call_id is None
+        assert keeper.status().dial_attempt is None
+        assert not await keeper.cancel_dial("first")
+        assert call.calls_ended == 1
+
+    asyncio.run(run())

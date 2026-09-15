@@ -279,6 +279,7 @@ def status_document(
 ) -> dict[str, Any]:
     return {
         "engine_version": __version__,
+        "dial_attempt": status.dial_attempt,
         **({"call_agent": asdict(status.call_agent)} if status.call_agent is not None else {}),
         "switches": status.switches.as_mapping(),
         "sessions": [
@@ -345,6 +346,7 @@ def roster_row_document(row: briefing.RosterRow) -> dict[str, Any]:
         "awaited": row.awaited,
         "focus": row.focus,
         "newest": row.newest,
+        **({"message_at": row.message_at.isoformat()} if row.message_at is not None else {}),
         "last_activity_at": (
             row.last_activity_at.isoformat() if row.last_activity_at is not None else None
         ),
@@ -364,7 +366,15 @@ def session_brief_document(brief: SessionBrief) -> dict[str, Any]:
         # what Core words that as. Carried so the structure holds every fact the
         # text was built from, which is this document's whole rule.
         "awaited": brief.awaited,
-        "newest": {"state": str(brief.newest.state), "text": brief.newest.text},
+        "newest": {
+            "state": str(brief.newest.state),
+            "text": brief.newest.text,
+            **(
+                {"occurred_at": brief.newest.occurred_at.isoformat()}
+                if brief.newest.occurred_at is not None
+                else {}
+            ),
+        },
         "decision": decision_document(brief.decision),
         "answerable_here": brief.answerable_here,
         "last_activity_at": (

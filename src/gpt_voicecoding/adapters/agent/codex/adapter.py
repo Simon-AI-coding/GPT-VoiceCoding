@@ -623,7 +623,7 @@ class CodexAgentAdapter:
         `ApprovalRequest`; this is that same fact in the seam's one inspection
         vocabulary — and since #191 it is the only way a dialog travels.
 
-        **No transcript parser for Codex, ever.** The rollout on disk is a second
+        **No transcript-derived approval state.** The rollout on disk is a second
         source answering the same question with worse evidence, and the port
         table left exactly that behind (P6, P13). What this projects is the
         request the app-server handed us, which is the thing itself.
@@ -709,6 +709,7 @@ class CodexAgentAdapter:
             progress=codex_discovery.progress_from(
                 described,
                 capture=self._turns.capture,
+                completed_at=reading.completed_at,
             ),
             last_activity=thread_tail.last_activity(described) or row.last_activity,
         )
@@ -746,7 +747,7 @@ class CodexAgentAdapter:
             assert reading.reason is not None
             raise LaneUnavailable(AgentKind.CODEX, reading.reason)
         return history_page(
-            thread_tail.visible(reading.thread),
+            thread_tail.visible(reading.thread, completed_at=reading.completed_at),
             before=before,
             count=count,
             read_at=datetime.now(UTC),
@@ -1357,7 +1358,7 @@ def _dialog_waiting(watched: WatchedThread | None) -> WaitingFor | None:
     this is that same fact, read once and shared by both, so the row and the Stop
     can never describe one dialog differently.
 
-    **No transcript parser for Codex, ever.** The rollout on disk is a second
+    **No transcript-derived approval state.** The rollout on disk is a second
     source answering the same question with worse evidence, and the port table
     left exactly that behind (P6, P13). What this projects is the request the
     app-server handed us, which is the thing itself.

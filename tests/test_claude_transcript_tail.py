@@ -301,3 +301,17 @@ class TestOurOwnRelayIsTheUserSpeaking:
         ours = relayed("可以继续")
         ours["userType"] = "internal"
         assert texts([ours]) == []
+
+
+def test_message_time_stays_with_its_record_despite_later_activity() -> None:
+    entries, _, activity = recent(
+        [said("same", at=1), said("same", at=2), worked(at=8)],
+        capture=PROGRESS_CAPTURE,
+    )
+    assert [entry.occurred_at for entry in entries] == [
+        FIRST.replace(second=1),
+        FIRST.replace(second=2),
+    ]
+    assert activity == FIRST.replace(second=8)
+    entries, _, _ = recent([said("unknown", timestamp=None)], capture=PROGRESS_CAPTURE)
+    assert entries[0].occurred_at is None

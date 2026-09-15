@@ -375,6 +375,7 @@ class Newest:
     #: to the engine log to find out what happened (#278). Absent wherever the
     #: source gave no sentence, which leaves the wording exactly as it was.
     reason: str | None = None
+    occurred_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (self.state is NewestState.SAID) != (self.text is not None):
@@ -459,6 +460,7 @@ class RosterRow:
     #: Whether this is the Focus Session. Exactly one row may carry it.
     focus: bool = False
     newest: str | None = None
+    message_at: datetime | None = None
     last_activity_at: datetime | None = None
 
 
@@ -760,7 +762,7 @@ def text(brief: SessionBrief | RosterBrief) -> str:
 
 
 def _row(session: Session, *, focus: bool, peers: Sequence[Session] = ()) -> RosterRow:
-    newest = _newest(session.progress).text
+    newest = _newest(session.progress)
     return RosterRow(
         target=session.target,
         name=session.name,
@@ -768,7 +770,8 @@ def _row(session: Session, *, focus: bool, peers: Sequence[Session] = ()) -> Ros
         state=_state(session),
         awaited=_awaited(session, peers),
         focus=focus,
-        newest=newest.split("\n", 1)[0] if newest is not None else None,
+        newest=newest.text.split("\n", 1)[0] if newest.text is not None else None,
+        message_at=newest.occurred_at,
         last_activity_at=session.last_activity,
     )
 
@@ -970,7 +973,7 @@ def _newest(progress: ProgressObservation) -> Newest:
         None,
     )
     if said is not None:
-        return Newest(state=NewestState.SAID, text=said.text)
+        return Newest(state=NewestState.SAID, text=said.text, occurred_at=said.occurred_at)
     if progress.omission is ProgressOmission.NEWEST_OVERSIZE:
         return Newest(state=NewestState.OVERSIZE)
     # History exists and this publication carried none of it — the roster

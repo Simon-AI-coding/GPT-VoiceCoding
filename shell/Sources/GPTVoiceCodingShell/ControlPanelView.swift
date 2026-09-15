@@ -77,7 +77,7 @@ private struct HomeView: View {
             ConsoleRule()
             HStack {
                 Button(shell.text(.settings)) { shell.open(.settings(.voice)) }
-                    .buttonStyle(.plain).foregroundStyle(Phosphor.accent)
+                    .buttonStyle(PlainHandButton()).foregroundStyle(Phosphor.accent)
                 Spacer()
                 Button(shell.text(.quit)) { shell.quit() }
                     .buttonStyle(ConsoleButton(destructive: true))
@@ -116,7 +116,7 @@ private struct HomeView: View {
                     Text("› " + shell.text(.telegramOff)).foregroundStyle(Phosphor.muted)
                     Spacer(minLength: 4)
                     Button(shell.text(.connectSettings)) { shell.open(.settings(.telegram)) }
-                        .buttonStyle(.plain).foregroundStyle(Phosphor.accent)
+                        .buttonStyle(PlainHandButton()).foregroundStyle(Phosphor.accent)
                 }
                 Toggle(
                     shell.text(shell.telegramConnected ? .telegramOn : .telegramOff),
@@ -195,9 +195,9 @@ private struct HomeView: View {
                             Button {
                                 shell.open(.session(row.target))
                             } label: {
-                                SessionRowView(row: row, text: shell.text)
+                                SessionRowView(row: row, text: shell.text, now: shell.messageNow)
                                     .padding(.vertical, 6)
-                            }.buttonStyle(.plain)
+                            }.buttonStyle(PlainHandButton())
                             ConsoleRule()
                         }
                     }
@@ -222,6 +222,7 @@ private struct HomeView: View {
 struct SessionRowView: View {
     let row: BriefRow
     let text: ShellText
+    var now = Date()
     var body: some View {
         HStack(spacing: 8) {
             AgentMark(agent: row.target.agent)
@@ -229,6 +230,9 @@ struct SessionRowView: View {
             Text(row.stateWord).foregroundStyle(Phosphor.state(row.state)).layoutPriority(1)
             Text("· " + row.newest).foregroundStyle(Phosphor.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            Text(text.messageAge(row.messageAt, at: now))
+                .font(Phosphor.small).monospacedDigit().foregroundStyle(Phosphor.muted)
+                .frame(width: Phosphor.messageTimeWidth, alignment: .trailing).layoutPriority(2)
         }.lineLimit(1).contentShape(Rectangle())
     }
 }
@@ -247,8 +251,15 @@ private struct SessionBriefView: View {
                 Text(brief.stateWord).foregroundStyle(Phosphor.accent)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(shell.text(.newest)).font(Phosphor.label).foregroundStyle(
-                            Phosphor.tertiary)
+                        HStack {
+                            Text(shell.text(.newest))
+                            Spacer()
+                            Text(
+                                shell.text.messageAge(
+                                    brief.messageAt, at: shell.messageNow, long: true)
+                            )
+                            .monospacedDigit()
+                        }.font(Phosphor.label).foregroundStyle(Phosphor.tertiary)
                         Text(brief.newest).font(Phosphor.prose)
                         if let prompt = brief.prompt {
                             Divider()
@@ -363,7 +374,7 @@ struct SettingsView: View {
                     } label: {
                         Text(shell.text(item.title)).frame(maxWidth: .infinity, alignment: .leading)
                             .foregroundStyle(item == group ? Phosphor.accent : Phosphor.secondary)
-                    }.buttonStyle(.plain).padding(.vertical, 4)
+                    }.buttonStyle(PlainHandButton()).padding(.vertical, 4)
                 }
             }.frame(width: Phosphor.navigationWidth)
             Divider()

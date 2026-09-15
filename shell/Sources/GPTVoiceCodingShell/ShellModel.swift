@@ -33,7 +33,7 @@ enum OnboardingStep: Int, CaseIterable {
 
 enum CodexCheck { case checking, ready, notInstalled, notLoggedIn }
 
-enum ShellConfirmation { case quit, newAgent }
+enum ShellConfirmation { case quit, newAgent, hangUp }
 enum ShellAppearance: String, CaseIterable {
     case system, dark, light
     static let preferenceKey = "appearance"
@@ -85,13 +85,45 @@ final class ShellModel {
     private static let briefInterval: TimeInterval = 2
     private(set) var page: ShellPage?
     private(set) var windowRequest = 0
+    private(set) var windowRequestedFromLamp = false
     var confirmation: ShellConfirmation?
     private var quitRequestedFromLamp = false
     var confirmationOnLamp: Bool {
-        cardVisible && confirmation == .quit && (quitRequestedFromLamp || !windowOpen)
+        cardVisible
+            && (confirmation == .hangUp
+                || (confirmation == .quit && (quitRequestedFromLamp || !windowOpen)))
     }
     var cardActionsVisible = false
     var cardQuitVisible = false
+    var lampCellHovered = false
+    var lampCellPressed = false
+    private var hangupDeadline: TimeInterval?
+    private var confirmingCallID: String?
+    var lampCellEnabled: Bool {
+        panel.engineReachable && panel.phase != .ending && (!panel.busy || panel.phase == .calling)
+    }
+    var lampHangupArmed: Bool {
+        panel.phase == .onCall && (lampCellHovered || confirmation == .hangUp)
+    }
+
+    func activateLampCell() async {
+        guard lampCellEnabled else { return }
+        switch panel.phase {
+        case .calling: await panel.cancelDial()
+        case .onCall:
+            if confirmation == .hangUp {
+                confirmation = nil
+            } else {
+                confirmation = .hangUp
+                confirmingCallID = panel.status?.callID
+                hangupDeadline = now() + Phosphor.hangupHold
+                dismissLampActions()
+            }
+        case .ready, .couldNotConnect: await panel.toggleLive()
+        case .ending: break
+        }
+    }
+
     private var lampPointerInside = false
     private var lampNotice: LampBubble?
     private var lampDeadline: TimeInterval?
@@ -119,6 +151,13 @@ final class ShellModel {
     }
 
     func updateLamp() {
+        messageNow = wallNow()
+        if confirmation == .hangUp,
+            !cardVisible || !panel.engineReachable || panel.phase != .onCall
+                || panel.status?.callID != confirmingCallID || now() >= (hangupDeadline ?? now())
+        {
+            confirmation = nil
+        }
         guard cardVisible, panel.engineReachable, panel.rosterReachable else {
             reminderBaseline = false
             lampReadRevision = panel.rosterRevision
@@ -182,15 +221,19 @@ final class ShellModel {
     }
 
     func openLampBrief(_ target: SessionAddress) {
-        open(.session(target))
+        open(.session(target), fromLamp: true)
         setLampPointer(inside: false)
     }
-    let text: ShellText
+    private(set) var text: ShellText
     private let preferences: UserDefaults
     private(set) var selectedLanguage: ShellLanguage
     private(set) var selectedAppearance: ShellAppearance
     private(set) var configuration: ShellConfiguration?
-    private(set) var pendingRestart = false
+    private var configurationPendingRestart = false
+    private var restartingLanguage: ShellLanguage?
+    var pendingRestart: Bool {
+        configurationPendingRestart || selectedLanguage.rawValue != text.language
+    }
     private(set) var savingSettings = false
     private(set) var settingsFailure: String?
     private var settingsSavedPID: Int32?
@@ -215,6 +258,8 @@ final class ShellModel {
         configuration?.telegramBound == true
             && panel.status?.switches.first { $0.name == "message" }?.on == true
     }
+    private(set) var messageNow = Date()
+    private let wallNow: () -> Date
     private let now: () -> TimeInterval
     private let sleep: (Duration) async throws -> Void
     private var poller: Task<Void, Never>?
@@ -309,6 +354,7 @@ final class ShellModel {
         loginItem: LoginItem? = nil,
         preferences: UserDefaults = .standard,
         runCommand: (@Sendable (EngineCommand) async -> InstallationReport)? = nil,
+        wallNow: @escaping () -> Date = Date.init,
         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
@@ -339,6 +385,8 @@ final class ShellModel {
             runCommand ?? { command in
                 await InstallationRunner(report: { pathOutcomes.record($0) }).run(command)
             }
+        self.wallNow = wallNow
+        self.messageNow = wallNow()
         self.now = now
         self.sleep = sleep
         preparation = nil
@@ -355,6 +403,7 @@ final class ShellModel {
         loginItem: LoginItem? = nil,
         preferences: UserDefaults = .standard,
         runCommand: (@Sendable (EngineCommand) async -> InstallationReport)? = nil,
+        wallNow: @escaping () -> Date = Date.init,
         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
@@ -366,7 +415,8 @@ final class ShellModel {
             supervisor: supervisor,
             pathOutcomes: PathOutcomes(), configurationFile: configurationFile,
             loginItem: loginItem,
-            preferences: preferences, runCommand: runCommand, now: now, sleep: sleep)
+            preferences: preferences, runCommand: runCommand, wallNow: wallNow, now: now,
+            sleep: sleep)
     }
 
     func begin(template: URL? = nil, delegateCLI: URL? = nil) async {
@@ -565,7 +615,8 @@ final class ShellModel {
         credentialFileObserver = nil
     }
 
-    func open(_ page: ShellPage) {
+    func open(_ page: ShellPage, fromLamp: Bool = false) {
+        windowRequestedFromLamp = fromLamp
         if self.page == .settings(.telegram) || self.page == .onboarding(.telegram),
             page != self.page
         {
@@ -690,7 +741,7 @@ final class ShellModel {
         do {
             configuration = try await write()
             settingsFailure = nil
-            pendingRestart = true
+            configurationPendingRestart = true
             if case .running(let pid) = health {
                 settingsSavedPID = pid
             } else {
@@ -810,16 +861,25 @@ final class ShellModel {
 
     func restartForSettings() async {
         guard pendingRestart, !savingSettings, !restartBlockedByCall else { return }
-        await supervisor.retry()
+        if configurationPendingRestart {
+            restartingLanguage = selectedLanguage
+            await supervisor.retry()
+        } else {
+            text = ShellText(language: selectedLanguage.rawValue)
+        }
     }
 
     private func refreshStatus() async {
         let queriedHealth = health
         await panel.refresh()
-        if !Task.isCancelled, pendingRestart, panel.engineReachable,
+        if !Task.isCancelled, configurationPendingRestart, panel.engineReachable,
             case .running(let pid) = queriedHealth, health == queriedHealth, pid != settingsSavedPID
         {
-            pendingRestart = false
+            configurationPendingRestart = false
+            if let restartingLanguage {
+                text = ShellText(language: restartingLanguage.rawValue)
+                self.restartingLanguage = nil
+            }
         }
     }
 
@@ -864,6 +924,10 @@ final class ShellModel {
             await stopEngine()
             NSApplication.shared.terminate(nil)
         case .newAgent: await panel.newCallAgent()
+        case .hangUp:
+            if panel.phase == .onCall, panel.status?.callID == confirmingCallID {
+                await panel.toggleLive()
+            }
         case nil: break
         }
     }

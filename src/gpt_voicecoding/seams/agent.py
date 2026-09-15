@@ -407,6 +407,8 @@ class ProgressEntry:
     #: named no `id`; a reader that finds no turns falls back to the boundary it
     #: had before (`core/briefing.py::_final_answer`).
     turn_id: str | None = None
+    #: Source message time, never the time this reading was made.
+    occurred_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int):

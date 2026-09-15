@@ -8,8 +8,9 @@ child evidence. What is left behind, deliberately: version-string equality
 (legacy disabled it in 2026-08 for the reason its own comment gives — an upgrade
 rewrites `cli_version` in every new rollout and made every post-upgrade
 transcript unreadable), host-thread filtering, path persistence, the mmap'd
-bounded-token reader, and any reading at all of a thread the daemon is attached
-to, which answers for itself.
+bounded-token reader, and transcript-based progress. The daemon answers for
+visible content; #364 supplements only exact message lifecycle timestamps from
+the path that daemon names.
 
 **Not finding one is the normal case, not an error.** Measured on 2026-08-26
 (#73): `codex` writes its rollout when the first *turn* starts, not when the
@@ -18,8 +19,8 @@ Session does — a full acceptance run watched one sit for 180 s with none. So
 treating every fresh TUI as broken.
 
 **Nothing here crosses the seam.** A `Path` and the bytes behind it stay in this
-lane; what leaves is a session id and a source word. That is legacy's own rule
-for this index, kept: "neither consumer receives a path or transcript content".
+lane; what leaves is a session id, a source word, or exact message lifecycle times.
+The original content rule remains: "neither consumer receives a path or transcript content".
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -252,3 +255,72 @@ def _named(path: Path) -> str | None:
         return None
     match = THREAD_ID_IN_NAME.search(name[len(ROLLOUT_PREFIX) : -len(ROLLOUT_SUFFIX)])
     return match.group(1) if match else None
+
+
+def message_times(thread: Mapping[str, Any]) -> dict[tuple[str, str], datetime]:
+    """Exact message lifecycle times; the daemon still selects all visible content.
+
+    Codex 0.154.0 persists item_completed with completed_at_ms but omits it
+    from thread/read. Read only the daemon-named file and join by turn/item ID,
+    never by text or file modification time. No rollout content becomes progress.
+    """
+    thread_id, path = thread.get("id"), thread.get("path")
+    if not isinstance(thread_id, str) or not isinstance(path, str):
+        return {}
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return {}
+    wanted = {
+        (turn["id"], item["id"])
+        for turn in turns
+        if isinstance(turn, Mapping) and isinstance(turn.get("id"), str)
+        if isinstance(turn.get("items"), list)
+        for item in turn["items"]
+        if isinstance(item, Mapping)
+        and isinstance(item.get("id"), str)
+        and item.get("type") in ("agentMessage", "userMessage")
+    }
+    if not wanted:
+        return {}
+    times: dict[tuple[str, str], datetime] = {}
+    try:
+        with Path(path).open(encoding="utf-8") as source:
+            first = json.loads(next(source, "{}"))
+            if (
+                not isinstance(first, Mapping)
+                or first.get("type") != SESSION_META
+                or not isinstance(first.get("payload"), Mapping)
+                or session_id_in(first.get("payload", {})) != thread_id
+            ):
+                return {}
+            for line in source:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue  # A final record may still be being appended.
+                if not isinstance(record, Mapping) or record.get("type") != "event_msg":
+                    continue
+                event = record.get("payload")
+                if not isinstance(event, Mapping) or event.get("type") != "item_completed":
+                    continue
+                item = event.get("item")
+                if (
+                    event.get("thread_id") != thread_id
+                    or not isinstance(item, Mapping)
+                    or item.get("type") not in ("AgentMessage", "UserMessage")
+                ):
+                    continue
+                turn_id, item_id = event.get("turn_id"), item.get("id")
+                if not isinstance(turn_id, str) or not isinstance(item_id, str):
+                    continue
+                key = (turn_id, item_id)
+                stamp = event.get("completed_at_ms")
+                if key not in wanted or isinstance(stamp, bool) or not isinstance(stamp, int):
+                    continue
+                try:
+                    times.setdefault(key, datetime.fromtimestamp(stamp / 1000, UTC))
+                except (OSError, OverflowError, ValueError):
+                    continue
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return times

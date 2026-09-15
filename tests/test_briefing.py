@@ -1168,3 +1168,19 @@ class TestTheMenuWording:
         assert briefing.greeting(session) == header
 
         assert briefing.greeting(session) == "gpt-voicecoding · a task — claude:abc:1234 — running"
+
+
+def test_newest_message_time_is_projected_without_using_last_activity() -> None:
+    from gpt_voicecoding.control_plane.payloads import roster_row_document, session_brief_document
+
+    message_time = datetime(2026, 9, 1, tzinfo=UTC)
+    progress = said("done")
+    progress = replace(progress, recent=(replace(progress.recent[0], occurred_at=message_time),))
+    session = row(progress=progress)
+    brief = briefing.session(session)
+    assert brief.newest.occurred_at == message_time
+    document = session_brief_document(brief)
+    assert document["newest"]["occurred_at"] == message_time.isoformat()
+    roster = briefing.roster([session], focus=None)
+    assert roster_row_document(roster.rows[0])["message_at"] == message_time.isoformat()
+    assert roster.rows[0].last_activity_at == READ_AT

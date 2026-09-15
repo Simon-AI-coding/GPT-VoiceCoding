@@ -13,7 +13,7 @@
 "finishedCount" = "%d finished";
 "call" = "Call";
 "hangUp" = "Hang up";
-"home" = "Home";
+"home" = "Control";
 "settings" = "Settings";
 "quit" = "Quit";
 "quitAsk" = "Quit? The call will end.";
@@ -78,7 +78,7 @@
 "notChosen" = "not chosen";
 "loading" = "Loading…";
 "sessionUnavailable" = "This session could not be read. Try opening it again.";
-"controlPanel" = "Open Control Panel";
+"controlPanel" = "Open Control";
 "model" = "model";
 "effort" = "effort";
 "voiceNote" = "Nine voices. One realtime model today; the picker is here for when there are more.";
@@ -94,7 +94,6 @@
 "numberRequired" = "Enter a number of seconds.";
 "launchAtLogin" = "launch at login";
 "language" = "language";
-"languageNextLaunch" = "Applies the next time you open the app.";
 "telegramToken" = "Paste the token from BotFather";
 "telegramTokenHelp" = "Make a bot with BotFather in Telegram, then paste the token it gives you.";
 "telegramValidate" = "Check token";
@@ -151,3 +150,11 @@
 "appearanceDarkHint" = "Held at dark whatever your Mac is set to.";
 "appearanceLightHint" = "Held at light whatever your Mac is set to.";
 "lampEngineDown" = "The app isn't watching your sessions.";
+
+
+"hangupAsk" = "Hang up? The call ends; your sessions keep running.";
+"messageJustNow" = "now";
+"messageSecondsAgo" = "%1$ds ago";
+"messageMinutesAgo" = "%1$dm ago";
+"messageHoursAgo" = "%1$dh ago";
+"messageDaysAgo" = "%1$dd ago";

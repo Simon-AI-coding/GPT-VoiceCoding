@@ -73,6 +73,7 @@ public struct EngineStatus: Equatable, Sendable {
     public let callAgent: CallAgentReading?
     public let switches: [SwitchReading]
     public let callID: String?
+    public let dialAttempt: String?
     public let counts: SessionCounts
     public var callIsUp: Bool { callID != nil }
 
@@ -83,6 +84,7 @@ public struct EngineStatus: Equatable, Sendable {
             document["switches"]?[name]?.bool.map { SwitchReading(name: name, on: $0) }
         }
         callID = document["call_id"]?.string
+        dialAttempt = document["dial_attempt"]?.string
         counts = SessionCounts(rows: document["sessions"]?.array ?? [])
     }
 }
@@ -119,6 +121,7 @@ public struct BriefRow: Equatable, Identifiable, Sendable {
     public let state: String
     public let stateWord: String
     public let newest: String
+    public let messageAt: Date?
     public var id: SessionAddress { target }
     fileprivate var isCounted: Bool { CountedState(state) != nil }
 
@@ -128,6 +131,7 @@ public struct BriefRow: Equatable, Identifiable, Sendable {
         state = value["state"]?.string ?? ""
         stateWord = value["state_word"]?.string ?? ""
         newest = value["newest"]?.string ?? ""
+        messageAt = messageDate(value["message_at"]?.string)
     }
 }
 
@@ -148,6 +152,7 @@ public struct SessionBriefReading: Equatable, Sendable {
     public let name: String?
     public let stateWord: String
     public let newest: String
+    public let messageAt: Date?
     public let prompt: String?
     public let options: [String]
 
@@ -155,6 +160,7 @@ public struct SessionBriefReading: Equatable, Sendable {
         name = value["name"]?.string
         stateWord = value["state_word"]?.string ?? ""
         newest = value["newest"]?["text"]?.string ?? ""
+        messageAt = messageDate(value["newest"]?["occurred_at"]?.string)
         prompt = value["decision"]?["prompt"]?.string
         options = (value["decision"]?["options"]?.array ?? []).enumerated().map { index, option in
             let description = option["description"]?.string ?? ""
@@ -246,6 +252,9 @@ public final class ControlPanel {
     public private(set) var nextCallStartsFresh = false
     public private(set) var phase: CallPhase = .ready
     public private(set) var elapsed: Int?
+    private var dialingAttempt: String?
+    private var cancellingAttempt: String?
+    private var cancelledAttempt: String?
     private var phaseStarted: TimeInterval = 0
     private let now: () -> TimeInterval
     public private(set) var roster: [BriefRow] = []
@@ -401,7 +410,12 @@ public final class ControlPanel {
         let ending = callIsUp == true
         nextCallStartsFresh = false
         setPhase(ending ? .ending : .calling)
-        let outcome = await ask(Request(action: .live)) {
+        let attempt = ending ? nil : UUID().uuidString
+        cancelledAttempt = nil
+        dialingAttempt = attempt
+        defer { dialingAttempt = nil }
+        let payload = attempt.map { ["attempt_id": JSONValue.string($0)] }
+        let outcome = await ask(Request(action: .live, payload: payload)) {
             LiveReading(state: $0["state"]?.string ?? "", callID: $0["call_id"]?.string)
         }
         // Only what the engine sent. A failed toggle leaves the last reading
@@ -410,9 +424,30 @@ public final class ControlPanel {
         if let answer = outcome.answer, answer.state == "up" {
             setPhase(.onCall)
         } else {
-            setPhase(ending ? .ready : .couldNotConnect)
+            setPhase(
+                ending
+                    || (attempt != nil
+                        && (cancellingAttempt == attempt || cancelledAttempt == attempt)
+                        && outcome.answer?.state == "down")
+                    ? .ready : .couldNotConnect)
         }
         await refresh()
+        lastFailure = outcome.failure
+    }
+
+    public func cancelDial() async {
+        guard phase == .calling, cancellingAttempt == nil,
+            let attempt = dialingAttempt ?? status?.dialAttempt
+        else { return }
+        cancellingAttempt = attempt
+        defer { cancellingAttempt = nil }
+        let outcome = await ask(Request(action: .live, payload: ["cancel_dial": .string(attempt)]))
+        {
+            $0["cancelled"]?.bool == true
+        }
+        if outcome.answer == true { cancelledAttempt = attempt }
+        await refresh()
+        if outcome.answer == true { setPhase(callIsUp == true ? .onCall : .ready) }
         lastFailure = outcome.failure
     }
 
@@ -454,7 +489,11 @@ public final class ControlPanel {
     }
 
     private func reconcilePhase() {
-        guard !phase.resolving else { return }
+        guard !busy else { return }
+        if status?.dialAttempt != nil {
+            setPhase(.calling)
+            return
+        }
         if phase == .couldNotConnect, now() - phaseStarted < 6 { return }
         setPhase(callIsUp == true ? .onCall : .ready)
     }
@@ -524,4 +563,13 @@ public struct SeamReading: Equatable, Sendable, Identifiable {
         loaded = value["loaded"]?.string ?? ""
         detail = value["detail"]?.string ?? ""
     }
+}
+
+private func messageDate(_ value: String?) -> Date? {
+    guard let value else { return nil }
+    let format = ISO8601DateFormatter()
+    format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = format.date(from: value) { return date }
+    format.formatOptions = [.withInternetDateTime]
+    return format.date(from: value)
 }

@@ -244,3 +244,10 @@ class TestLastActivity:
     def test_a_number_no_calendar_can_hold_is_no_time_either(self) -> None:
         """A field that moved to milliseconds would arrive as one of these."""
         assert moment(10**30) is None
+
+
+def test_message_without_source_time_does_not_borrow_thread_or_turn_time() -> None:
+    document = thread(turn(spoke("done")), updatedAt=MEASURED_SECONDS)
+    document["turns"][0].update(startedAt=MEASURED_SECONDS - 10, completedAt=MEASURED_SECONDS)
+    entries, _ = recent(document, capture=PROGRESS_CAPTURE)
+    assert entries[0].occurred_at is None

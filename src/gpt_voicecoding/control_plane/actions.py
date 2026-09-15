@@ -228,7 +228,14 @@ class ControlPlane:
         self, payload: Mapping[str, Any], reader: Reader | None = None
     ) -> dict[str, Any]:
         """The Live Toggle. One action, and every surface calls this one."""
-        return payloads.call_document(await self._core.live_toggle())
+        if "cancel_dial" in payload:
+            return {
+                "cancelled": await self._core.cancel_dial(
+                    payloads.read_text(payload, "cancel_dial")
+                )
+            }
+        attempt_id = payloads.read_text(payload, "attempt_id") if "attempt_id" in payload else None
+        return payloads.call_document(await self._core.live_toggle(attempt_id=attempt_id))
 
     async def _relay(
         self, payload: Mapping[str, Any], reader: Reader | None = None

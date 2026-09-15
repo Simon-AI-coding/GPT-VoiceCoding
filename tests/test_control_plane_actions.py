@@ -92,9 +92,10 @@ class Surface:
         max_bytes: int = 65_536,
         page_entries: int = CorePolicy().history_page_entries,
         assistant: bool = False,
+        call: FakeCall | None = None,
     ) -> None:
         self.agent = FakeAgent()
-        self.call = FakeCall()
+        self.call = call or FakeCall()
         self.channel = FakeCompanionChannel()
         self.state = BridgeState(
             switches=Switchboard(), sessions=SessionRegistry(), relays=RelayQueue()
@@ -1857,3 +1858,56 @@ class TestTelegramBinding:
             assert wire.sent() == ["Binding confirmed."]
 
         asyncio.run(scenario())
+
+
+def test_live_cancel_is_scoped_and_does_not_wait_for_the_dial_response() -> None:
+    from gpt_voicecoding.seams.call import CallSnapshot, CallStarted, CallState
+
+    async def run() -> None:
+        class RacingCall(FakeCall):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.released = asyncio.Event()
+                self.first = True
+
+            async def ensure_call(self, dial):
+                if not self.first:
+                    return await super().ensure_call(dial)
+                self.first = False
+                self.entered.set()
+                await self.released.wait()
+                return CallSnapshot(state=CallState.UP, call_id="cancelled-call")
+
+            async def end_call(self):
+                result = await super().end_call()
+                self.released.set()
+                return result
+
+        call = RacingCall()
+        surface = Surface(duty=False, call=call)
+        dial = asyncio.create_task(
+            surface.plane.handle(Request(action=Action.LIVE, payload={"attempt_id": "first"}))
+        )
+        await call.entered.wait()
+        status = await surface.plane.handle(Request(action=Action.STATUS))
+        assert status.data["dial_attempt"] == "first"
+        cancelled = await surface.plane.handle(
+            Request(action=Action.LIVE, payload={"cancel_dial": "first"})
+        )
+        assert cancelled.data["cancelled"] is True
+        assert (await dial).data["state"] == "down"
+        await surface.core.keeper.heard(CallStarted(call_id="cancelled-call"))
+        assert surface.core.status().call_id is None
+        retry = await surface.plane.handle(
+            Request(action=Action.LIVE, payload={"attempt_id": "second"})
+        )
+        assert retry.data["state"] == "up"
+        stale = await surface.plane.handle(
+            Request(action=Action.LIVE, payload={"cancel_dial": "first"})
+        )
+        assert stale.data["cancelled"] is False
+        assert surface.core.status().call_id == retry.data["call_id"]
+        assert call.calls_ended == 1
+
+    asyncio.run(run())

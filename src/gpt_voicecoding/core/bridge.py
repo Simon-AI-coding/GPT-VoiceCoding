@@ -374,6 +374,7 @@ class Status:
     #: deliberately not copied onto the roster row.
     reply_windows: Mapping[SessionTarget, ReplyWindow] = field(default_factory=dict)
     call_agent: CallAgent | None = None
+    dial_attempt: str | None = None
 
 
 class RosterBriefer:
@@ -547,6 +548,7 @@ class BridgeCore:
             lanes=self._state.sessions.lane_errors(),
             degraded_lanes=self._state.sessions.lane_degradations(),
             call_id=keeping.call_id,
+            dial_attempt=keeping.dial_attempt,
             call_agent=self._call.call_agent,
             cool_down_remaining=keeping.cool_down_remaining,
             dial_owed=keeping.dial_owed,
@@ -754,7 +756,7 @@ class BridgeCore:
             raise BridgeCoreError("end the call before forgetting its Call Agent")
         self._call.forget_call_agent()
 
-    async def live_toggle(self) -> CallSnapshot:
+    async def live_toggle(self, *, attempt_id: str | None = None) -> CallSnapshot:
         """The one action: end the call the system owns, or start one if none is up.
 
         **Never gated, by any switch.** The Live Toggle is a control-plane
@@ -772,7 +774,11 @@ class BridgeCore:
         surface holding its own call state is how two toggles once opened two
         calls.
         """
-        return await self.keeper.live_toggle()
+        return await self.keeper.live_toggle(attempt_id=attempt_id)
+
+    async def cancel_dial(self, attempt_id: str) -> bool:
+        """The user's cancellation is scoped to the dial they saw."""
+        return await self.keeper.cancel_dial(attempt_id)
 
     def _dial(self, hand_over: tuple[HandoverItem, ...]) -> Dial:
         """What a call this hub opens is opened on: two audiences and a hand-over.

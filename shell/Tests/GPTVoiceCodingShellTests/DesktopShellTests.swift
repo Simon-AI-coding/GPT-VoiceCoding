@@ -7,6 +7,48 @@ import Testing
 
 @MainActor
 @Suite struct DesktopShellTests {
+    @Test func controlWindowUsesLampScreenAndKeepsItsTopWhenContentChanges() {
+        let screen = NSRect(x: -1440, y: 100, width: 1440, height: 900)
+        let lamp = NSRect(x: -100, y: 900, width: 72, height: 26)
+        let initial = DesktopWindows.controlFrame(
+            NSRect(x: 0, y: 0, width: 480, height: 350),
+            height: 350, anchor: lamp, screen: screen)
+        #expect(initial.maxX == lamp.maxX)
+        #expect(initial.maxY == lamp.minY - Phosphor.bubbleGap)
+        #expect(screen.contains(initial))
+        let taller = DesktopWindows.controlFrame(initial, height: 600, anchor: nil, screen: screen)
+        #expect(taller.maxY == initial.maxY)
+        #expect(taller.minX == initial.minX)
+        let oversized = DesktopWindows.controlFrame(
+            initial, height: 1500, anchor: lamp, screen: screen)
+        #expect(screen.contains(oversized))
+        #expect(oversized.height == screen.height)
+    }
+
+    @Test func messageAgeUsesOneUnitAndNeverInventsMissingTime() {
+        let text = ShellText(language: "en")
+        let stamp = Date(timeIntervalSince1970: 1_000_000)
+        for (seconds, expected) in [
+            (0, "now"), (9, "now"), (10, "10s"), (59, "59s"), (60, "1m"), (3600, "1h"),
+            (86400, "1d"), (691200, "8d"),
+        ] {
+            #expect(
+                text.messageAge(stamp, at: stamp.addingTimeInterval(Double(seconds))) == expected)
+        }
+        #expect(text.messageAge(nil, at: stamp) == "—")
+        #expect(text.messageAge(stamp, at: stamp.addingTimeInterval(-10)) == "now")
+        #expect(text.messageAge(stamp, at: stamp.addingTimeInterval(60), long: true) == "1m ago")
+        let chinese = ShellText(language: "zh-Hans")
+        for (seconds, short, detail) in [
+            (0, "now", "刚刚"), (10, "10s", "10秒前"), (60, "1m", "1分钟前"),
+            (3600, "1h", "1小时前"), (691200, "8d", "8天前"),
+        ] {
+            let current = stamp.addingTimeInterval(Double(seconds))
+            #expect(chinese.messageAge(stamp, at: current) == short)
+            #expect(chinese.messageAge(stamp, at: current, long: true) == detail)
+        }
+    }
+
     @Test func theReadingRegionKeepsDiagonalTravelIntoTheWiderBubble() {
         let lamp = NSRect(x: 228, y: 400, width: 72, height: 26)
         let bubble = NSRect(x: 20, y: 320, width: 280, height: 72)

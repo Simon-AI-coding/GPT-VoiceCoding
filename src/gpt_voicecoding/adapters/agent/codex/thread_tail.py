@@ -10,8 +10,9 @@ Session the shared daemon does not hold has no turns to read: its rollout is on
 disk, but reading it would be a second source answering the same question with
 worse evidence, and the port table left that behind explicitly ("no rollout
 reading for daemon-attached threads" — and for unattached ones, no manufactured
-progress at all). Such a row carries explicit `not_read` progress, never "read
-and found nothing".
+progress at all). #364 reads only exact lifecycle timestamps for daemon-selected
+items, without changing content selection. An unattached row carries explicit
+`not_read` progress, never "read and found nothing".
 
 **Against legacy** (ADR 0010, `CLAUDE.md`). The item selection is **ported**
 whole from `legacy@1d32845:bridge/codex.py:1465-1520`: `agentMessage` is what
@@ -53,6 +54,7 @@ field exists for.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -105,6 +107,7 @@ def recent(
     thread: Mapping[str, Any],
     *,
     capture: ProgressCapture,
+    completed_at: Mapping[tuple[str, str], datetime] | None = None,
 ) -> tuple[tuple[ProgressEntry, ...], ProgressOmission]:
     """The newest of what this thread said, and whether anything older was dropped.
 
@@ -112,10 +115,14 @@ def recent(
     what a `thread/read` answers when turns were not asked for, and a caller that
     took that as an error would turn the cheap roster read into a failure.
     """
-    return capture.select(visible(thread))
+    return capture.select(visible(thread, completed_at=completed_at))
 
 
-def visible(thread: Mapping[str, Any]) -> tuple[ProgressEntry, ...]:
+def visible(
+    thread: Mapping[str, Any],
+    *,
+    completed_at: Mapping[tuple[str, str], datetime] | None = None,
+) -> tuple[ProgressEntry, ...]:
     """Every entry this thread shows, oldest first and numbered (#171).
 
     The whole list, before anything trims it — what `recent` hands its capture
@@ -136,6 +143,10 @@ def visible(thread: Mapping[str, Any]) -> tuple[ProgressEntry, ...]:
         turn_id = _turn_id(turn.get(TURN_ID))
         for item in items:
             entry = _entry(item, ordinal=len(entries), turn_id=turn_id)
+            if entry is not None and completed_at is not None:
+                item_id = item.get("id")
+                if isinstance(turn_id, str) and isinstance(item_id, str):
+                    entry = replace(entry, occurred_at=completed_at.get((turn_id, item_id)))
             if entry is not None:
                 entries.append(entry)
     return tuple(entries)

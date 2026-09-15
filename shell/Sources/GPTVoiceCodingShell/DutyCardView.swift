@@ -19,7 +19,8 @@ struct DutyCardView: View {
             : failed ? Phosphor.danger : lit ? Phosphor.accent : Phosphor.ruleStrong
     }
     private var cellFill: Color {
-        !watching
+        if shell.lampHangupArmed { return Phosphor.danger }
+        return !watching
             ? .clear
             : failed
                 ? Phosphor.danger
@@ -28,6 +29,7 @@ struct DutyCardView: View {
     private var pulses: Bool { watching && (shell.panel.phase == .calling || ending) }
     private var glyph: LampGlyph {
         if !watching { return .off }
+        if shell.lampHangupArmed { return .ending }
         switch shell.panel.phase {
         case .ready: return .ready
         case .calling: return .calling
@@ -37,7 +39,8 @@ struct DutyCardView: View {
         }
     }
     private var glyphInk: Color {
-        !watching
+        if shell.lampHangupArmed { return Phosphor.dangerInk }
+        return !watching
             ? Phosphor.muted
             : failed
                 ? Phosphor.dangerInk
@@ -60,7 +63,7 @@ struct DutyCardView: View {
             } else {
                 cell
             }
-            slot.frame(width: Phosphor.lampSlot)
+            slot.frame(width: Phosphor.lampSlot).pointingHand()
         }
         .frame(height: Phosphor.lampHeight - Phosphor.lampEdge * 2)
         .padding(Phosphor.lampEdge)
@@ -124,6 +127,8 @@ struct DutyCardView: View {
                 }.frame(height: 2)
             }
         }.frame(width: Phosphor.lampCell)
+            .scaleEffect(shell.lampCellPressed ? Phosphor.lampPressedScale : 1)
+            .pointingHand(enabled: shell.lampCellEnabled)
     }
 
     @ViewBuilder private var slot: some View {
@@ -203,7 +208,7 @@ struct LampActionsView: View {
                         Text(shell.text(shell.panel.phase == .onCall ? .hangUp : .call))
                     }.font(Phosphor.small.weight(.medium)).padding(.horizontal, 10)
                         .frame(height: Phosphor.lampHeight).contentShape(Rectangle())
-                }.buttonStyle(.plain)
+                }.buttonStyle(PlainHandButton())
                     .foregroundStyle(
                         shell.panel.phase.resolving || shell.panel.busy
                             || !shell.panel.engineReachable
@@ -215,16 +220,16 @@ struct LampActionsView: View {
                             || !shell.panel.engineReachable)
                 divider
                 action(.home) {
-                    shell.open(.home)
+                    shell.open(.home, fromLamp: true)
                     shell.dismissLampActions()
                 }
                 divider
                 action(.settings) {
-                    shell.open(.settings(.voice))
+                    shell.open(.settings(.voice), fromLamp: true)
                     shell.dismissLampActions()
                 }
             }
-        }.frame(height: Phosphor.lampHeight)
+        }.fixedSize(horizontal: true, vertical: true).frame(height: Phosphor.lampHeight)
             .background(Phosphor.window, in: RoundedRectangle(cornerRadius: Phosphor.lampRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: Phosphor.lampRadius)
@@ -240,7 +245,7 @@ struct LampActionsView: View {
             Text(shell.text(copy)).font(Phosphor.small).padding(.horizontal, 10)
                 .frame(height: Phosphor.lampHeight).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).foregroundStyle(ink)
+        .buttonStyle(PlainHandButton()).foregroundStyle(ink)
     }
 }
 
@@ -262,7 +267,7 @@ struct LampBubbleView: View {
             } label: {
                 surface.contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PlainHandButton())
         } else {
             surface
         }
@@ -284,6 +289,12 @@ struct LampBubbleView: View {
                             Text(row.stateWord).font(Phosphor.small).foregroundStyle(
                                 Phosphor.state(row.state)
                             ).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text(shell.text.messageAge(row.messageAt, at: shell.messageNow))
+                                .font(Phosphor.small).monospacedDigit().foregroundStyle(
+                                    Phosphor.muted
+                                )
+                                .fixedSize().layoutPriority(2)
                         }
                         Text(row.newest).font(Phosphor.prose).foregroundStyle(Phosphor.tertiary)
                             .lineLimit(3).multilineTextAlignment(.leading)
@@ -300,20 +311,26 @@ struct LampBubbleView: View {
                 HStack(spacing: 8) {
                     Text(shell.text(.lampEngineDown)).font(Phosphor.prose).foregroundStyle(
                         Phosphor.secondary)
-                    Button(shell.text(.diagnostics)) { shell.open(.settings(.diagnostics)) }
-                        .font(Phosphor.small).buttonStyle(.plain).foregroundStyle(Phosphor.accent)
-                        .fixedSize()
+                    Button(shell.text(.diagnostics)) {
+                        shell.open(.settings(.diagnostics), fromLamp: true)
+                    }
+                    .font(Phosphor.small).buttonStyle(PlainHandButton()).foregroundStyle(
+                        Phosphor.accent
+                    )
+                    .fixedSize()
                 }
             case .confirmation:
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(shell.text(.quitAsk)).font(Phosphor.prose).foregroundStyle(
+                    Text(shell.text(shell.confirmation == .hangUp ? .hangupAsk : .quitAsk)).font(
+                        Phosphor.prose
+                    ).foregroundStyle(
                         Phosphor.secondary)
                     HStack(spacing: 6) {
                         Button(shell.text(.keepCall)) {
                             Task { await shell.resolveConfirmation(accept: false) }
                         }
                         .buttonStyle(LampConfirmationButton()).keyboardShortcut(.defaultAction)
-                        Button(shell.text(.quit)) {
+                        Button(shell.text(shell.confirmation == .hangUp ? .hangUp : .quit)) {
                             Task { await shell.resolveConfirmation(accept: true) }
                         }
                         .buttonStyle(LampConfirmationButton(destructive: true))
@@ -346,6 +363,6 @@ private struct LampConfirmationButton: ButtonStyle {
                 RoundedRectangle(cornerRadius: Phosphor.controlRadius)
                     .strokeBorder(destructive ? .clear : Phosphor.ruleStrong)
             )
-            .opacity(configuration.isPressed ? 0.7 : 1)
+            .opacity(configuration.isPressed ? 0.7 : 1).pointingHand()
     }
 }

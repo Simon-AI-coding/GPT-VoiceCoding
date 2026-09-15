@@ -430,3 +430,87 @@ class TestThePerTargetRead:
         assert row.progress.availability is ProgressAvailability.NOT_READ
         assert row.lifecycle is SessionLifecycle.LIVE
         assert row.target.session_id == THREAD
+
+
+def test_source_message_times_follow_exact_items_through_the_existing_read_and_cache(tmp_path):
+    import json
+
+    from gpt_voicecoding.adapters.agent.codex.discovery import progress_from, read_thread
+    from gpt_voicecoding.adapters.agent.codex.thread_tail import visible
+
+    source = tmp_path / "thread.jsonl"
+    stamp = 1_789_422_780_112
+
+    def event(item_id, completed, *, thread_id=THREAD, turn_id="turn", kind="AgentMessage"):
+        return {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "completed_at_ms": completed,
+                "item": {"type": kind, "id": item_id},
+            },
+        }
+
+    records = [
+        {"type": "session_meta", "payload": {"id": THREAD}},
+        event("first", stamp),
+        event("second", stamp + 1000),
+        event("third", True),
+        event("first", stamp + 8000, turn_id="another"),
+        event("second", stamp + 9000, thread_id="another"),
+        event("tool", stamp + 12000, kind="CommandExecution"),
+    ]
+    source.write_text("".join(json.dumps(r) + "\n" for r in records) + '{"type":')
+    document = dict(thread(THREAD, cwd=WORKSPACE), updatedAt=MEASURED_SECONDS, path=str(source))
+    daemon = TurnedDaemon(
+        {THREAD: document},
+        {
+            THREAD: [
+                {
+                    "id": "turn",
+                    "items": [
+                        dict(spoke("same"), id="first"),
+                        dict(spoke("same"), id="second"),
+                        dict(spoke("without time"), id="third"),
+                    ],
+                }
+            ]
+        },
+    )
+
+    async def run():
+        cache = TurnCache(progress_capture=PROGRESS_CAPTURE)
+        progress = await cache.progress_for(daemon, document)
+        times = [entry.occurred_at for entry in progress.recent]
+        assert times == [datetime.fromtimestamp(n / 1000, UTC) for n in (stamp, stamp + 1000)] + [
+            None
+        ]
+        assert await cache.progress_for(daemon, document) == progress
+        assert len(daemon.deep) == 1
+        reading = await read_thread(daemon, THREAD, with_turns=True)
+        assert [
+            entry.occurred_at
+            for entry in visible(
+                reading.thread,
+                completed_at=reading.completed_at,
+            )
+        ] == times
+        assert (
+            progress_from(
+                reading.thread,
+                capture=PROGRESS_CAPTURE,
+                completed_at=reading.completed_at,
+            ).recent
+            == progress.recent
+        )
+        source.write_text(json.dumps({"type": "session_meta", "payload": {"id": "wrong"}}) + "\n")
+        reading = await read_thread(daemon, THREAD, with_turns=True)
+        assert not reading.completed_at
+        source.unlink()
+        reading = await read_thread(daemon, THREAD, with_turns=True)
+        assert reading.thread is not None
+        assert not reading.completed_at
+
+    asyncio.run(run())

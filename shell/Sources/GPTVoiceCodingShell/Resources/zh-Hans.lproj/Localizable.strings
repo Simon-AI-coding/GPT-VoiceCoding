@@ -13,7 +13,7 @@
 "finishedCount" = "%d 个已完成";
 "call" = "拨号";
 "hangUp" = "挂断";
-"home" = "主页";
+"home" = "控制台";
 "settings" = "设置";
 "quit" = "退出";
 "quitAsk" = "退出？通话将会结束。";
@@ -78,7 +78,7 @@
 "notChosen" = "未选择";
 "loading" = "正在读取…";
 "sessionUnavailable" = "无法读取此会话。请尝试重新打开。";
-"controlPanel" = "打开控制面板";
+"controlPanel" = "打开控制台";
 "model" = "模型";
 "effort" = "思考强度";
 "voiceNote" = "九种声音，目前有一个实时模型；以后有更多模型时可在这里选择。";
@@ -94,7 +94,6 @@
 "numberRequired" = "请输入秒数。";
 "launchAtLogin" = "登录时启动";
 "language" = "语言";
-"languageNextLaunch" = "下次打开应用时生效。";
 "telegramToken" = "粘贴 BotFather 给你的 token";
 "telegramTokenHelp" = "在 Telegram 中找 BotFather 创建机器人，再粘贴它给你的 token。";
 "telegramValidate" = "检查 token";
@@ -151,3 +150,11 @@
 "appearanceDarkHint" = "固定使用深色，不受 Mac 外观设置影响。";
 "appearanceLightHint" = "固定使用浅色，不受 Mac 外观设置影响。";
 "lampEngineDown" = "应用未在监看你的会话。";
+
+
+"hangupAsk" = "挂断？通话将结束，会话会继续运行。";
+"messageJustNow" = "刚刚";
+"messageSecondsAgo" = "%1$d秒前";
+"messageMinutesAgo" = "%1$d分钟前";
+"messageHoursAgo" = "%1$d小时前";
+"messageDaysAgo" = "%1$d天前";

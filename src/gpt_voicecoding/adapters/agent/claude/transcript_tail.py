@@ -224,7 +224,13 @@ def _entry(record: Mapping[str, Any], *, ordinal: int) -> ProgressEntry | None:
         text = relay_payload(visible_text(content))
     else:
         return None
-    return ProgressEntry(ordinal=ordinal, role=role, text=text) if text.strip() else None
+    return (
+        ProgressEntry(
+            ordinal=ordinal, role=role, text=text, occurred_at=_moment(record.get("timestamp"))
+        )
+        if text.strip()
+        else None
+    )
 
 
 def _moment(stamp: Any) -> datetime | None:

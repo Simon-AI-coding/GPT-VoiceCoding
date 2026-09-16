@@ -69,80 +69,17 @@ already binds. Codex is read and written through the shared `codex app-server` t
 starts and your own terminals join, which is the same process the Live Call's realtime route
 rides.
 
-```mermaid
-flowchart LR
-  subgraph terminals["Your own terminals"]
-    cc["Claude Code Session"]
-    cx["Codex Session"]
-  end
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <img alt="Your terminals, codex app-server, the engine with Bridge Core at its centre, and the Live Call, Telegram, menu-bar app and bridgectl it reaches" src="docs/images/architecture-light.svg">
+</picture>
 
-  appserver["codex app-server<br/>started by this product,<br/>joined by your Sessions"]
+What happens when a session stops, whether you answer on the call or on Telegram:
 
-  subgraph engine["The engine"]
-    core["Bridge Core<br/>every policy, one source of truth"]
-    agents["Agent adapters"]
-    callad["Call adapter"]
-    chan["Companion Channel adapter"]
-    plane["Control plane<br/>JSON over a Unix socket"]
-    core --- agents
-    core --- callad
-    core --- chan
-    core --- plane
-  end
-
-  live["Live Call<br/>Voice speaks, Call Agent acts"]
-  tg["Telegram"]
-  shell["Menu-bar app<br/>Duty Lamp, Control Panel"]
-  ctl["bridgectl"]
-
-  cc <-->|"hooks, roster, inbox socket"| agents
-  cx --- appserver
-  appserver --- agents
-  appserver -->|"realtime route"| callad
-  callad --- live
-  chan --- tg
-  plane --- shell
-  plane --- ctl
-```
-
-What happens when a session stops:
-
-```mermaid
-sequenceDiagram
-  participant S as Your Session
-  participant C as Bridge Core
-  participant T as Telegram
-  participant K as Call Keeper
-  participant V as Voice
-  participant A as Call Agent
-  participant U as You
-
-  S->>C: stops, waiting on a decision
-  C->>C: writes the reading to the roster
-  C->>T: Stop Notice, as an Anchor you can reply to
-  C->>K: wake
-  K->>V: dials, briefed from the roster as it stands
-  V->>U: speaks the Session Brief
-  U->>V: "use email login, and give me the steps"
-  V->>A: hands the job over
-  A->>C: relay
-  C->>S: Answer Relay
-```
-
-Or, without the call:
-
-```mermaid
-sequenceDiagram
-  participant T as Telegram
-  participant U as You
-  participant C as Bridge Core
-  participant S as Your Session
-
-  T->>U: Stop Notice
-  U->>T: replies to it
-  T->>C: inbound text, naming the Anchor's Session
-  C->>S: Answer Relay
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/session-stops-dark.svg">
+  <img alt="Sequence: a session stops, Bridge Core sends a Stop Notice and wakes the Call Keeper, and your answer comes back as an Answer Relay either through the call or through a Telegram reply" src="docs/images/session-stops-light.svg">
+</picture>
 
 The Voice has no tools. It speaks from what the engine hands it and passes anything that reads
 as a job to the Call Agent, which is the only half on the call that can run a control-plane verb.

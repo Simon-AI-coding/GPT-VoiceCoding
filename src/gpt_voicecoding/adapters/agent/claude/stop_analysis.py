@@ -484,7 +484,7 @@ def _groups(tool_input: Any) -> list[_QuestionGroup]:
                     continue
                 label = option.get("label")
                 if isinstance(label, str) and label.strip():
-                    text, is_recommended = _split_recommendation(label.strip())
+                    text, is_recommended = split_recommendation(label.strip())
                     raw_description = option.get("description")
                     description = (
                         raw_description.strip()
@@ -507,7 +507,7 @@ def _groups(tool_input: Any) -> list[_QuestionGroup]:
     return groups
 
 
-def _split_recommendation(label: str) -> tuple[str, bool]:
+def split_recommendation(label: str) -> tuple[str, bool]:
     """The option's spoken words, and whether it is the marked recommendation."""
     if label.lower().endswith(RECOMMENDED_MARKER):
         text = label[: -len(RECOMMENDED_MARKER)].strip()

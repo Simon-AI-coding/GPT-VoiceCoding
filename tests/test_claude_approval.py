@@ -30,6 +30,7 @@ import os
 import shutil
 import socket
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,33 @@ async def hook_in_flight(
     return task
 
 
+def decide_against_one_frame(
+    root: Path, payload: dict[str, Any], frame: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Run the real hook against an engine that answers with exactly `frame`.
+
+    A stand-in engine rather than the listener, because the listener never
+    writes a malformed frame — and the hook must still read one as silence.
+    """
+    path = root / "fake-engine.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+
+    def engine() -> None:
+        connection, _ = server.accept()
+        with connection:
+            connection.recv(MAX_HOOK_REQUEST_BYTES)
+            connection.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+            connection.recv(4096)
+
+    with server, ThreadPoolExecutor(max_workers=1) as pool:
+        served = pool.submit(engine)
+        decision = decide(payload, environment(path, root))
+        served.result(timeout=2.0)
+    return decision
+
+
 async def park_from_claude_code(
     listener: ApprovalListener, payload: dict[str, Any]
 ) -> asyncio.StreamWriter:
@@ -219,19 +247,22 @@ class TestWhatTheHookPrints:
         assert inner["behavior"] == DENY_BEHAVIOR
         assert inner["message"].strip()
 
-    def test_a_question_answer_is_denial_prose_with_the_framed_words(self) -> None:
-        assert hook_decision(
-            ApprovalVerdict.DENY,
-            message="Ruling: tabs",
-        ) == {
+    def test_a_question_answer_is_an_allow_carrying_the_answered_input(self) -> None:
+        """Measured on 2.1.273 (#371): the terminal shows the answer, not a denial."""
+        answered = {"questions": [group("Tabs or spaces?", "spaces", "tabs")], "answers": {}}
+
+        assert hook_decision(ApprovalVerdict.ALLOW, updated_input=answered) == {
             "hookSpecificOutput": {
                 "hookEventName": HOOK_EVENT,
-                "decision": {
-                    "behavior": DENY_BEHAVIOR,
-                    "message": "Ruling: tabs",
-                },
+                "decision": {"behavior": ALLOW_BEHAVIOR, "updatedInput": answered},
             }
         }
+
+    def test_an_answered_input_never_rides_a_denial(self) -> None:
+        decision = hook_decision(ApprovalVerdict.DENY, updated_input={"answers": {}})
+
+        assert decision is not None
+        assert "updatedInput" not in decision["hookSpecificOutput"]["decision"]
 
     def test_ask_prints_nothing_at_all(self) -> None:
         """The locked never-deny rule, as a wire fact.
@@ -247,7 +278,7 @@ class TestWhatTheHookPrints:
 
         2.1.238 accepts `updatedPermissions` on an allow, which would write a
         session-scoped rule, and `updatedInput`, which would rewrite the call the
-        user said yes to. Neither may ever appear.
+        user said yes to. Neither may ever appear on a permission verdict.
         """
         for verdict in (
             ApprovalVerdict.ALLOW,
@@ -963,11 +994,12 @@ def group(question: str, *labels: str, multi: bool = False) -> dict[str, Any]:
 class TestAQuestionRidesTheHeldHook:
     """`AskUserQuestion` is typed as a question on the shared hook route.
 
-    Measured on 2.1.246 (#77): the tool raises a `PermissionRequest`, and a hook
-    `deny` carrying a message is consumed by the Session *as the user's answer*.
-    #128 therefore parks it under Claude's `prompt_id` when present, or a
-    listener-private key otherwise, so the next Answer Relay can use the held
-    hook as its private transport and never the permission route.
+    Measured on 2.1.246 (#77): the tool raises a `PermissionRequest`. Measured
+    on 2.1.273 (#371): a hook `allow` whose `updatedInput` carries `answers` is
+    consumed by the Session *as the user's answer*, with no error styling. #128
+    parks it under Claude's `prompt_id` when present, or a listener-private key
+    otherwise, so the next Answer Relay can use the held hook as its private
+    transport and never the permission route.
     """
 
     def test_a_question_payload_projects_the_whole_question(self) -> None:
@@ -1004,14 +1036,18 @@ class TestAQuestionRidesTheHeldHook:
 
         receipt, decision = asyncio.run(scenario())
 
+        asked = group("Tabs or spaces?", "spaces", "tabs")
         assert (receipt.outcome, decision) == (
             Delivery.DELIVERED,
             {
                 "hookSpecificOutput": {
                     "hookEventName": HOOK_EVENT,
                     "decision": {
-                        "behavior": DENY_BEHAVIOR,
-                        "message": "Ruling: tabs",
+                        "behavior": ALLOW_BEHAVIOR,
+                        "updatedInput": {
+                            "questions": [asked],
+                            "answers": {"Tabs or spaces?": "tabs"},
+                        },
                     },
                 }
             },
@@ -1117,7 +1153,143 @@ class TestAQuestionRidesTheHeldHook:
         decision = asyncio.run(scenario())
 
         assert decision is not None
-        assert decision["hookSpecificOutput"]["decision"]["message"] == "Ruling:   use a hybrid  "
+        assert decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {
+            "Tabs or spaces?": "  use a hybrid  "
+        }
+
+    def test_a_multi_question_call_hears_the_words_under_every_question(
+        self, socket_root: Path
+    ) -> None:
+        """One utterance, several questions: each is answered with those words.
+
+        Canonicalised against each question's own labels, so a label spoken for
+        one question does not become a claimed choice under another.
+        """
+
+        async def scenario():
+            listener = ApprovalListener(
+                settings=settings_for(socket_root),
+                resolve=lambda _: TARGET,
+                emit=Sink().emit,
+                pid=49,
+            )
+            await listener.start()
+            try:
+                hook = await hook_in_flight(
+                    listener,
+                    socket_root,
+                    question_dialog(
+                        group("Tabs or spaces?", "spaces", "tabs"),
+                        group("Which base?", "main", "develop"),
+                    ),
+                )
+                receipt = await listener.answer_question("p-1", "TABS", request_id=RequestId("r-m"))
+                return receipt, await hook
+            finally:
+                await listener.aclose()
+
+        receipt, decision = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert decision is not None
+        assert decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {
+            "Tabs or spaces?": "tabs",
+            "Which base?": "TABS",
+        }
+
+    def test_an_offered_label_is_answered_with_the_label_as_written(
+        self, socket_root: Path
+    ) -> None:
+        """The spoken label has no mark; the answer names the label the Session wrote.
+
+        Claude Code reads an answer that is one of the offered labels as a plain
+        choice (`Your questions have been answered`), and that test compares the
+        label exactly, `(recommended)` and all.
+        """
+
+        async def scenario():
+            listener = ApprovalListener(
+                settings=settings_for(socket_root),
+                resolve=lambda _: TARGET,
+                emit=Sink().emit,
+                pid=50,
+            )
+            await listener.start()
+            try:
+                hook = await hook_in_flight(
+                    listener,
+                    socket_root,
+                    question_dialog(group("Which base?", "main (Recommended)", "develop")),
+                )
+                await listener.answer_question("p-1", " Main ", request_id=RequestId("r-rec"))
+                return await hook
+            finally:
+                await listener.aclose()
+
+        decision = asyncio.run(scenario())
+
+        assert decision is not None
+        assert decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {
+            "Which base?": "main (Recommended)"
+        }
+
+    def test_a_question_with_no_text_to_answer_under_is_refused_unwritten(
+        self, socket_root: Path
+    ) -> None:
+        """`answers` is keyed by the question's text, so none means no answer to give.
+
+        Refused before anything is written, so the hook stays parked and the
+        dialog on screen keeps the question.
+        """
+
+        async def scenario():
+            listener = ApprovalListener(
+                settings=settings_for(socket_root),
+                resolve=lambda _: TARGET,
+                emit=Sink().emit,
+                pid=51,
+            )
+            await listener.start()
+            try:
+                await hook_in_flight(
+                    listener,
+                    socket_root,
+                    question_dialog(group("", "spaces", "tabs")),
+                )
+                receipt = await listener.answer_question("p-1", "tabs", request_id=RequestId("r-0"))
+                return receipt, listener.question_answerable(TARGET)
+            finally:
+                await listener.aclose()
+
+        receipt, answerable = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.FAILED
+        assert receipt.reason.strip()
+        assert answerable is True
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            {"type": "approval_verdict", "verdict": "allow", "answer": 7},
+            {"type": "approval_verdict", "verdict": "deny", "answer": "tabs"},
+        ],
+        ids=["answer-not-text", "answer-on-a-denial"],
+    )
+    def test_a_malformed_answer_frame_is_silence(
+        self, socket_root: Path, frame: dict[str, Any]
+    ) -> None:
+        assert (
+            decide_against_one_frame(
+                socket_root, question_dialog(group("Tabs or spaces?", "spaces", "tabs")), frame
+            )
+            is None
+        )
+
+    def test_an_answer_frame_for_a_permission_dialog_is_silence(self, socket_root: Path) -> None:
+        """An answer rewrites a question's input and nothing else's."""
+        frame = {"type": "approval_verdict", "verdict": "allow", "answer": "yes"}
+
+        assert decide_against_one_frame(socket_root, dialog(), frame) is None
 
     def test_the_session_s_own_mark_on_a_label_is_read_as_one(self) -> None:
         """`AskUserQuestion` has no recommendation field; the mark is in the label.
@@ -1215,7 +1387,9 @@ class TestAQuestionRidesTheHeldHook:
         assert answerable is True
         assert receipt.outcome is Delivery.DELIVERED
         assert decision is not None
-        assert decision["hookSpecificOutput"]["decision"]["message"] == "Ruling: tabs"
+        assert decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {
+            "Tabs or spaces?": "tabs"
+        }
         assert [event.window for event in windows] == [ReplyWindow.OPEN, ReplyWindow.CLOSED]
 
     def test_a_question_is_parked_without_entering_the_approval_relay(

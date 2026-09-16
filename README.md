@@ -6,13 +6,9 @@
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-111111)
 ![Licence](https://img.shields.io/badge/licence-MIT-111111)
 
-<!-- PENDING ASSET: the demo video. Drag scratch/demo-recorder/out/take.tvuVMJ/demo.mp4
-     into any GitHub comment box, then replace this whole comment with the
-     https://github.com/user-attachments/... URL it returns, on a line of its own with
-     no Markdown around it, followed by:
+https://github.com/user-attachments/assets/a0ea108c-8c5b-45a1-b966-877a05650c65
 
-     *Recorded unattended; the narration and the spoken lines are synthesized speech.*
--->
+*Recorded unattended; the narration and the spoken lines are synthesized speech.*
 
 One voice call covers every Claude Code and Codex session on your Mac: it tells you which one
 stopped and what it stopped on, and carries your spoken answer back into it. The call rides

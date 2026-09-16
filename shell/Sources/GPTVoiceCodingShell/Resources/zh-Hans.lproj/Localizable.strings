@@ -19,7 +19,7 @@
 "quitAsk" = "退出？通话将会结束。";
 "keepCall" = "继续通话";
 "notWatching" = "未在监控";
-"engineDown" = "应用目前没有在关注你的会话。";
+"engineDown" = "应用目前没有在监控你的会话。";
 "openDiagnostics" = "打开诊断";
 "callID" = "通话 %@";
 "callAgent" = "后台 agent";

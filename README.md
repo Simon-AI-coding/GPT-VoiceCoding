@@ -30,10 +30,11 @@ stopped and what it stopped on, and carries your spoken answer back into it. The
 
 ## Screenshots
 
-| | |
-|---|---|
-| ![The Duty Lamp](docs/images/duty-lamp.png)<br>The Duty Lamp sits above everything and counts what is waiting on you. Hovering it offers Hang up, Control and Settings, and shows the session that moved last. | ![The Control Panel](docs/images/control-panel.png)<br>The Control Panel during a call: the three switches, the Call Agent's model and context use, the counts, and every live session. |
-| ![Settings](docs/images/settings.png)<br>Settings. Nine voices to pick the Live Call's from, and the realtime model behind it. | ![Telegram](docs/images/telegram.png)<br>Telegram. A stop notice you can reply to, `/sessions` drawn as buttons, and the bot's own command menu. |
+![The Duty Lamp, Settings, the Control Panel and Telegram](docs/images/showcase.png)
+
+The Duty Lamp floats above everything and counts what is waiting on you, with Settings below it.
+In the middle is the Control Panel during a call. On the right is Telegram, where you reply to a
+stop notice and `/sessions` comes back as buttons.
 
 ## Install
 

@@ -48,7 +48,7 @@ def test_build_progress_does_not_report_failed_work_as_done(capsys):
     assert ": done" not in capsys.readouterr().out
 
 
-def test_shell_resources_and_source_revision_travel_in_the_bundle(tmp_path, monkeypatch):
+def test_shell_resources_version_and_source_revision_travel_in_the_bundle(tmp_path, monkeypatch):
     built = tmp_path / "products"
     built.mkdir()
     (built / inputs.SHELL_PRODUCT).write_bytes(MACH_O)
@@ -66,11 +66,33 @@ def test_shell_resources_and_source_revision_travel_in_the_bundle(tmp_path, monk
     bundle_run.assemble(plan)
     info = plistlib.loads((plan.app / "Contents/Info.plist").read_bytes())
     assert info["CFBundleVersion"] == "abc1234"
+    assert info["CFBundleShortVersionString"] == inputs.product_version()
     assert info["ShellResourceBundle"] == resources.name
     for mark in resources.glob("*.svg"):
         assert (
             plan.app / inputs.RESOURCES / resources.name / mark.name
         ).read_bytes() == mark.read_bytes()
+
+
+def test_the_product_version_is_read_from_pyproject(tmp_path):
+    written = tmp_path / "pyproject.toml"
+    written.write_text('[project]\nname = "gpt-voicecoding"\nversion = "7.8.9"\n')
+
+    assert inputs.product_version(written) == "7.8.9"
+
+
+def test_a_pyproject_without_a_version_stops_the_build(tmp_path):
+    written = tmp_path / "pyproject.toml"
+    written.write_text('[project]\nname = "gpt-voicecoding"\n')
+
+    with pytest.raises(inputs.InputError, match="version"):
+        inputs.product_version(written)
+
+
+def test_the_shell_plist_does_not_carry_its_own_version():
+    shipped = plistlib.loads(inputs.INFO_PLIST.read_bytes())
+
+    assert "CFBundleShortVersionString" not in shipped
 
 
 def make_engine_tree(root: Path) -> None:

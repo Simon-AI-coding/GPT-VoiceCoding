@@ -17,6 +17,8 @@ Read ``CONTEXT.md`` for the vocabulary and ``docs/adr/`` for the decisions befor
 changing any of it.
 """
 
+from gpt_voicecoding import _version
+
 __all__ = ["__version__"]
 
-__version__ = "0.0.0"
+__version__ = _version.read()

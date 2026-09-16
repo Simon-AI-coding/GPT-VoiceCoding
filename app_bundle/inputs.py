@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import platform
 import plistlib
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -175,6 +176,10 @@ ENTITLEMENTS = REPO_ROOT / "app_bundle" / "engine.entitlements"
 #: Where the shell's identity lives, and the only place it lives.
 INFO_PLIST = REPO_ROOT / "shell" / "Resources" / "Info.plist"
 
+#: Where the product's version is written, and the only place it is written.
+#: `Info.plist` carries no version of its own; the build stamps this one in.
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+
 #: The SwiftPM product the shell builds.
 SHELL_PRODUCT = "GPTVoiceCodingShell"
 SHELL_PACKAGE = REPO_ROOT / "shell"
@@ -209,3 +214,12 @@ def identity(plist: Path = INFO_PLIST) -> BundleIdentity:
         executable=read["CFBundleExecutable"],
         name=read["CFBundleName"],
     )
+
+
+def product_version(pyproject: Path = PYPROJECT) -> str:
+    """The product's version, as `pyproject.toml` writes it. Never invents a value."""
+    with pyproject.open("rb") as handle:
+        version = tomllib.load(handle).get("project", {}).get("version")
+    if not version:
+        raise InputError(f"{pyproject} does not say [project] version")
+    return version

@@ -30,6 +30,7 @@
 | [0028](0028-the-duty-card-is-the-at-computer-surface.md) | The Duty Card is the at-computer surface; the Control Panel is a window behind it, and the menu bar is a menu |
 | [0029](0029-the-control-window-owns-its-height.md) | The Control Window owns its height; nothing outside it measures content |
 | [0030](0030-each-live-call-audio-crossing-has-one-owner.md) | Each Live Call audio crossing has one owner: the speaker keeps listening continuous, the microphone keeps speaking fresh — **no bare buffer, no fixed prebuffer** |
+| [0031](0031-one-version-and-releases-cut-from-it.md) | One version, written in `pyproject.toml`; a workflow cuts the Release when it changes, and the installer builds the latest Release |
 
 0008 (headless direct-child launcher) and 0009 (a launch carries its Opening Instruction) were removed with the launcher when v1.0 became a bridge over Sessions the user starts ([#67](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/67), [#68](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/68)); they return with the launch map, from git history.
 

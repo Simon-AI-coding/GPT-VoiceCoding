@@ -264,6 +264,7 @@ def assemble(plan: BuildPlan) -> None:
             ],
             why="packaging the app icon",
         )
+    identity["CFBundleShortVersionString"] = inputs.product_version()
     identity["CFBundleVersion"] = run(
         ["git", "rev-parse", "--short", "HEAD"],
         why="reading the source revision",

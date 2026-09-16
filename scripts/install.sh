@@ -17,15 +17,38 @@ curl -fsIL --connect-timeout 10 --max-time 30 https://pypi.org/simple/ >/dev/nul
     fail 'Allow HTTPS access to PyPI, then run this command again.'
 
 repository=https://github.com/Simon-AI-coding/GPT-VoiceCoding
-printf '%s\n' 'Preparing the source checkout…'
 product=${repository##*/}
+
+# What to build: the latest Release, unless GPT_VOICECODING_REF names a tag or a
+# branch (e.g. GPT_VOICECODING_REF=main). The override is for the owner and
+# testers; the README does not advertise it.
+ref=${GPT_VOICECODING_REF:-}
+if [ -z "$ref" ]; then
+    printf '%s\n' 'Finding the latest release…'
+    ref=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${repository#https://github.com/}/releases/latest" |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) ||
+        fail 'Could not find a release on GitHub. Check your connection and run this command again in a few minutes.'
+fi
+
+printf '%s\n' "Preparing the source checkout for ${ref}…"
 source_directory="$HOME/Library/Application Support/$product/source"
 mkdir -p "$(dirname "$source_directory")"
 if [ -d "$source_directory/.git" ]; then
-    git -C "$source_directory" pull --ff-only
+    git -C "$source_directory" fetch --quiet --tags origin
 else
-    git clone "$repository.git" "$source_directory"
+    git clone --quiet "$repository.git" "$source_directory"
 fi
+# A tag builds as tagged; a branch builds as GitHub has it now, not as last fetched.
+if git -C "$source_directory" rev-parse --verify --quiet "refs/tags/$ref^{commit}" >/dev/null; then
+    target="refs/tags/$ref"
+elif git -C "$source_directory" rev-parse --verify --quiet "refs/remotes/origin/$ref^{commit}" >/dev/null; then
+    target="refs/remotes/origin/$ref"
+else
+    fail "There is no release or branch named $ref."
+fi
+git -C "$source_directory" -c advice.detachedHead=false checkout --quiet --detach "$target" ||
+    fail "Could not switch $source_directory to $ref. If you changed files there, move them away and run this command again."
 
 "$source_directory/scripts/build-app.sh"
 bundle_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$source_directory/shell/Resources/Info.plist")

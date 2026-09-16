@@ -1157,13 +1157,18 @@ class TestAQuestionRidesTheHeldHook:
             "Tabs or spaces?": "  use a hybrid  "
         }
 
-    def test_a_multi_question_call_hears_the_words_under_every_question(
-        self, socket_root: Path
+    @pytest.mark.parametrize(
+        "second", ["Which base?", ""], ids=["both-have-text", "one-has-no-text"]
+    )
+    def test_a_multi_question_call_gets_the_words_as_one_response(
+        self, socket_root: Path, second: str
     ) -> None:
-        """One utterance, several questions: each is answered with those words.
+        """One reply, several questions: the Session reads it whole and decides.
 
-        Canonicalised against each question's own labels, so a label spoken for
-        one question does not become a claimed choice under another.
+        Measured on 2.1.273: `response` reaches the model as `The user
+        responded: <words>`, and it split "tabs for the first, main for the
+        second" across its two questions correctly. `answers` stays empty, so no
+        question is credited with words meant for another.
         """
 
         async def scenario():
@@ -1180,10 +1185,12 @@ class TestAQuestionRidesTheHeldHook:
                     socket_root,
                     question_dialog(
                         group("Tabs or spaces?", "spaces", "tabs"),
-                        group("Which base?", "main", "develop"),
+                        group(second, "main", "develop"),
                     ),
                 )
-                receipt = await listener.answer_question("p-1", "TABS", request_id=RequestId("r-m"))
+                receipt = await listener.answer_question(
+                    "p-1", "tabs for the first, main for the second", request_id=RequestId("r-m")
+                )
                 return receipt, await hook
             finally:
                 await listener.aclose()
@@ -1192,10 +1199,13 @@ class TestAQuestionRidesTheHeldHook:
 
         assert receipt.outcome is Delivery.DELIVERED
         assert decision is not None
-        assert decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {
-            "Tabs or spaces?": "tabs",
-            "Which base?": "TABS",
-        }
+        updated = decision["hookSpecificOutput"]["decision"]["updatedInput"]
+        assert updated["response"] == "tabs for the first, main for the second"
+        assert "answers" not in updated
+        assert [question["question"] for question in updated["questions"]] == [
+            "Tabs or spaces?",
+            second,
+        ]
 
     def test_an_offered_label_is_answered_with_the_label_as_written(
         self, socket_root: Path

@@ -109,14 +109,16 @@ as `answer` beside `verdict: "allow"`; the hook, which already holds the call's 
 stdin, builds `answers` (`approval.answered_input`). `Ruling: ` and the frame it named are retired:
 there is no error wrapper left for a prefix to be read under.
 
-- **Canonicalisation moves to the hook** and stays inside the adapter. Per question, words that
-  match one of that question's labels — ignoring case, spacing and the `(recommended)` mark —
+- **Canonicalisation moves to the hook** and stays inside the adapter. For a lone question, words
+  that match one of its labels — ignoring case, spacing and the `(recommended)` mark —
   become the label exactly as the Session wrote it, which is the comparison Claude Code makes
   before calling the answers a plain choice. Anything else is sent verbatim.
-- **One utterance answers every question in a call.** The words carry no per-question split, so
-  each question with text receives them whole, canonicalised against its own labels. A call with no
-  question text has no key to put the words under; the engine refuses that Relay before writing, and
-  the dialog on screen keeps the question.
+- **A call with several questions gets the words as its `response`**, and no `answers`. The words
+  carry no per-question split, so the Session reads them whole — `The user responded: <words>` —
+  and decides which part answers which question. Measured on 2.1.273: a reply of "第一个用 tabs，第二个用
+  main" to a two-question call was split correctly by the model. No question is credited with words
+  meant for another. A lone question with no text has no key to put the words under; the engine
+  refuses that Relay before writing, and the dialog on screen keeps the question.
 - **Permission verdicts are unchanged**: plain `allow`, or `deny` with `DENIED_BY_VOICE`, and never
   `updatedInput` or `updatedPermissions`. The hook ignores an `answer` on any frame but an `allow`
   for an `AskUserQuestion`, and prints nothing for it.

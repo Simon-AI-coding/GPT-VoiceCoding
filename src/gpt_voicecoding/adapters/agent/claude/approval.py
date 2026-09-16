@@ -161,38 +161,36 @@ def hook_decision(
 
 
 def answered_input(payload: Mapping[str, Any], words: str) -> dict[str, Any] | None:
-    """One `AskUserQuestion` call's input with the user's words as its `answers`.
+    """One `AskUserQuestion` call's input with the user's words as its answer.
 
-    `None` for anything that is not a question with at least one question text
-    to answer under, because Claude Code keys `answers` by that exact text.
+    `None` for anything this cannot answer: not a question, or a lone question
+    with no text, since Claude Code keys `answers` by that exact text.
 
-    **One utterance answers every question in the call.** A spoken or typed reply
-    arrives as one string with no per-question split, so each question gets it
-    whole and the model reads it against each. Per question, words that match
-    one of *that* question's labels (ignoring case, spacing and the
-    `(recommended)` mark) become the label exactly as written. Claude Code
-    treats an all-label answer as a plain choice (`Your questions have been
-    answered`); anything else is delivered verbatim and read as free text
-    (`The user answered`).
+    **One question: the words are its `answers` entry.** Words that match one of
+    its labels (ignoring case, spacing and the `(recommended)` mark) become the
+    label exactly as written; Claude Code treats that as a plain choice (`Your
+    questions have been answered`). Anything else is sent verbatim and read as
+    free text (`The user answered`).
+
+    **Several questions: the words are the call's `response`.** A spoken or
+    typed reply is one string with nothing saying which part answers which
+    question, so the Session gets it whole (`The user responded: <words>`) and
+    decides. Measured on 2.1.273: it split "tabs for the first, main for the
+    second" across its two questions correctly. `answers` is left out, so no
+    question is credited with words meant for another.
     """
-    if payload.get(TOOL_NAME_FIELD) != stop_analysis.QUESTION_TOOL:
+    asked = _asked(payload)
+    if asked is None:
         return None
-    tool_input = payload.get(TOOL_INPUT_FIELD)
-    if not isinstance(tool_input, Mapping):
+    tool_input, questions = asked
+    if len(questions) > 1:
+        return {**tool_input, stop_analysis.RESPONSE_FIELD: words}
+    (question,) = questions
+    text = question.get(stop_analysis.QUESTION_FIELD)
+    if not isinstance(text, str) or not text.strip():
         return None
-    questions = tool_input.get(stop_analysis.QUESTIONS_FIELD)
-    if not isinstance(questions, list):
-        return None
-    answers: dict[str, str] = {}
-    for question in questions:
-        if not isinstance(question, Mapping):
-            continue
-        text = question.get(stop_analysis.QUESTION_FIELD)
-        if isinstance(text, str) and text.strip():
-            answers[text] = _as_offered(question.get(stop_analysis.OPTIONS_FIELD), words)
-    if not answers:
-        return None
-    return {**tool_input, stop_analysis.ANSWERS_FIELD: answers}
+    answer = _as_offered(question.get(stop_analysis.OPTIONS_FIELD), words)
+    return {**tool_input, stop_analysis.ANSWERS_FIELD: {text: answer}}
 
 
 def answerable(payload: Mapping[str, Any]) -> bool:
@@ -202,6 +200,22 @@ def answerable(payload: Mapping[str, Any]) -> bool:
     refuses exactly the answers the hook could not deliver.
     """
     return answered_input(payload, "") is not None
+
+
+def _asked(
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]] | None:
+    """An `AskUserQuestion` call's input and its readable questions, or `None`."""
+    if payload.get(TOOL_NAME_FIELD) != stop_analysis.QUESTION_TOOL:
+        return None
+    tool_input = payload.get(TOOL_INPUT_FIELD)
+    if not isinstance(tool_input, Mapping):
+        return None
+    listed = tool_input.get(stop_analysis.QUESTIONS_FIELD)
+    questions = [q for q in listed if isinstance(q, Mapping)] if isinstance(listed, list) else []
+    if not questions:
+        return None
+    return tool_input, questions
 
 
 def _as_offered(options: Any, words: str) -> str:
@@ -426,8 +440,8 @@ class _Waiting:
         #: permission. Parsed once, here, when the payload arrives: two parses of
         #: one message are two answers that can disagree.
         self.question = question
-        #: Whether the question carries a text `answers` can be keyed by, read
-        #: off the same payload by the same builder the hook will use.
+        #: Whether the hook can answer this question at all, read off the same
+        #: payload by the same builder the hook will use.
         self.keyed = keyed
         #: Set once a verdict has been written to this hook. It is what tells the
         #: connection's own task that the end it is about to see is an ordinary
@@ -640,9 +654,9 @@ class ApprovalListener:
 
         The words travel as spoken; the hook matches them to the offered labels
         (`answered_input`), because it holds the call's input and this does not.
-        A question with no text is refused before anything is written, since
-        `answers` has no key to put the words under, and the dialog on screen
-        keeps it.
+        A lone question with no text is refused before anything is written,
+        since `answers` has no key to put the words under, and the dialog on
+        screen keeps it.
         """
         waiting = self._waiting.get(question_id)
         if waiting is None or waiting.question is None:

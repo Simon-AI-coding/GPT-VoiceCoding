@@ -72,6 +72,7 @@ OPTIONS_FIELD: Final = "options"
 LABEL_FIELD: Final = "label"
 DESCRIPTION_FIELD: Final = "description"
 ANSWERS_FIELD: Final = "answers"
+RESPONSE_FIELD: Final = "response"
 
 #: The input fields a Claude permission request may be summarised from, in the
 #: order they are preferred. Each is a short human-facing string the product

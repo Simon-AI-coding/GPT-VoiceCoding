@@ -241,6 +241,25 @@ Record the build revision, machine, language and observed result for each step.
 A skipped or blocked physical check stays unverified; test-suite success never
 fills it in.
 
+## Releasing (ADR 0031)
+
+The version is written once, as `version` in `pyproject.toml`. The engine reads it from there
+(or from the installed metadata), and the build stamps it into the app's
+`CFBundleShortVersionString`, beside the git revision in `CFBundleVersion`. Diagnostics shows the
+two together, e.g. `1.0.0 · 1a2b3c4`.
+
+To release, open a PR that changes that one line, e.g. `1.0.0` → `1.1.0`, and merge it. When CI
+passes on `main`, `.github/workflows/release.yml` runs `scripts/cut_release.py`, which tags
+`v1.1.0` at that commit and creates the GitHub Release with generated notes. A push that leaves
+the version alone does nothing. The version must be plain `MAJOR.MINOR.PATCH`.
+
+The install command builds the latest Release. To build something else, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Simon-AI-coding/GPT-VoiceCoding/main/scripts/install.sh | GPT_VOICECODING_REF=main sh
+curl -fsSL https://raw.githubusercontent.com/Simon-AI-coding/GPT-VoiceCoding/main/scripts/install.sh | GPT_VOICECODING_REF=v1.0.0 sh
+```
+
 ## Before a release: the microphone
 
 The one part a machine cannot finish. macOS shows the TCC prompt to a person.

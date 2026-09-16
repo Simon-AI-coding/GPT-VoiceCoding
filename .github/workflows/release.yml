@@ -1,0 +1,43 @@
+name: Release
+
+# A Release is cut from `pyproject.toml`'s version, once, after CI has passed on
+# the push to `main` that carries it. Releasing is a PR that bumps the version;
+# nobody tags by hand. The decision lives in `scripts/cut_release.py`, under the
+# test suite, rather than in this file.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Two runs must not both see "no tag yet" and race to create it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # A pull request's CI also runs on `main`'s workflow file; only a green push
+    # to `main` itself may release.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    # Nothing here needs macOS: it reads a TOML file and calls git and gh.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Release this commit's version if it is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python scripts/cut_release.py "$HEAD_SHA"

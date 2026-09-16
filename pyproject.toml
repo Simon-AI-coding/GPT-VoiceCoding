@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gpt-voicecoding"
-version = "0.0.0"
+version = "1.0.0"
 description = "Voice-controlling terminal coding agents through a realtime voice call."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,7 +12,7 @@ requires-python = ">=3.12"
 authors = [{ name = "Simon-AI-coding" }]
 keywords = ["voice", "coding-agent", "claude-code", "codex", "realtime"]
 classifiers = [
-  "Development Status :: 1 - Planning",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: MacOS X",
   "License :: OSI Approved :: MIT License",
   "Operating System :: MacOS :: MacOS X",

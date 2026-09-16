@@ -66,7 +66,7 @@ existed before the field, which is what keeps the Companion Channel byte for
 byte unchanged. An unrecognised value is `malformed_request`, naming the values
 there are. The engine sets it, in the `bridgectl` invocation it generates for
 the Call Agent (`--reader voice`); the Companion Channel's `/` grammar never
-does ([#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302),
+does ([#302](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/302),
 ADR 0016 as amended).
 
 ```json
@@ -220,7 +220,7 @@ not protocol 6's: that one was a second rendering of the roster, and this one
 answers with Briefing's own text and adds only labels.
 
 Protocol 10 adds the optional `reader` field described under **Request**
-([#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302)). A
+([#302](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/302)). A
 protocol-9 engine accepts the same request and ignores the field, answering a
 page fitted to this wire alone — which codex then cuts on the way to the Voice,
 silently and in the middle. So a surface has to be able to tell the two apart
@@ -229,7 +229,7 @@ at 9, and no gate on the field is added on the Python side: `bridgectl` ships
 inside the engine's own package, so the two move together.
 
 `launch` and `close` were the eighth and ninth until protocol 4. They are parked
-with the code behind them ([#72](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/72)):
+with the code behind them ([#72](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/72)):
 v1.0 is a bridge over the Sessions the user starts, so nothing here brings one
 into existence or ends one. Their two error codes, `launch_failed` and
 `close_failed`, went with them. A surface still sending either action is

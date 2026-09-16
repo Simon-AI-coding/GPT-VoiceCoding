@@ -1,6 +1,6 @@
 # 2. The control plane is never gated by switches
 
-Date: 2026-08-19 · Status: Accepted · Source: [legacy ADR 0006](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/blob/main/docs/adr/0006-the-control-plane-is-never-gated-by-switches.md), re-affirmed in [#18](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/18)
+Date: 2026-08-19 · Status: Accepted · Source: [legacy ADR 0006](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/blob/main/docs/adr/0006-the-control-plane-is-never-gated-by-switches.md), re-affirmed in [#18](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/18)
 
 A user who switched Duty off from the Companion Channel could never switch it back on remotely — locked out by the switch meant to protect them. Per-switch exemption lists were rejected as special-casing that rots.
 

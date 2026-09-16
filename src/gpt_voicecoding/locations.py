@@ -10,7 +10,7 @@ where the state file's answer used to live alone.
 
 So it lives here: a leaf that imports nothing from this package and that every
 layer may import. A second spelling of one of these paths is the shape of
-[#47](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/47), where
+[#47](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/47), where
 the control-plane socket path is built independently in Swift and in Python with
 no test holding the two together.
 

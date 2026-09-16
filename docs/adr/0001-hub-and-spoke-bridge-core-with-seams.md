@@ -1,12 +1,12 @@
 # 1. Bridge Core is a hub; everything else is a deep module behind a seam
 
-Date: 2026-08-20 · Status: Accepted · Source: [module map and seams](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/18)
+Date: 2026-08-20 · Status: Accepted · Source: [module map and seams](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/18)
 
-The reference implementation let policy leak into mechanism: Stop Notice delivery was hard-wired to one GUI socket ([#15](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/15)), and nothing owned "exactly one call is up" ([#16](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/16)).
+The reference implementation let policy leak into mechanism: Stop Notice delivery was hard-wired to one GUI socket ([#15](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/15)), and nothing owned "exactly one call is up" ([#16](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/16)).
 
 ## Decision
 
-**`core` — Bridge Core — owns all policy**: Stop Notice escalation, Relay queueing against the Reply Window, the one-call invariant, switch adjudication. (The Approval budget and its fallback were on this list until [#191](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/191) withdrew both — a held hook's life is the wire's, per ADR 0015 as amended — and the split itself is unchanged by that.) Everything else is a deep module reached through a seam:
+**`core` — Bridge Core — owns all policy**: Stop Notice escalation, Relay queueing against the Reply Window, the one-call invariant, switch adjudication. (The Approval budget and its fallback were on this list until [#191](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/191) withdrew both — a held hook's life is the wire's, per ADR 0015 as amended — and the split itself is unchanged by that.) Everything else is a deep module reached through a seam:
 
 | Seam | Adapters |
 | --- | --- |
@@ -27,7 +27,7 @@ Splitting principles:
 
 The engine is one Python asyncio process, a direct child of the menu-bar shell (ADR 0005). Bridge Core memory is the single source of truth; the durable subset is written by one internal storage component and read by nothing else.
 
-Seam responsibilities the verbs encode: Reply-Window queueing is Bridge Core policy — adapters deliver, never queue. Classifying inbound Companion Channel text (control command / Answer Relay / delegation) is Bridge Core's job. The Reply Window level is *asked for* synchronously at registration and only its changes are reported afterwards, because an event raised before the roster holds the Session is dropped and never repeated ([#27](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/27)). Seam verbs extend only through a ruling with a use case behind it.
+Seam responsibilities the verbs encode: Reply-Window queueing is Bridge Core policy — adapters deliver, never queue. Classifying inbound Companion Channel text (control command / Answer Relay / delegation) is Bridge Core's job. The Reply Window level is *asked for* synchronously at registration and only its changes are reported afterwards, because an event raised before the roster holds the Session is dropped and never repeated ([#27](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/27)). Seam verbs extend only through a ruling with a use case behind it.
 
 ## Consequences
 

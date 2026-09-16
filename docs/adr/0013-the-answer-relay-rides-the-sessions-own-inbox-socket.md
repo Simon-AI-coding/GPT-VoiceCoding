@@ -1,8 +1,8 @@
 # 13. The Claude Answer Relay rides the Session's own inbox socket, and an accepted write is not a receipt
 
-Date: 2026-08-26 · Status: Accepted · Amended by [ADR 0015](0015-a-held-question-opens-the-reply-window.md) · Source: [#71](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/71), built in [#77](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/77)
+Date: 2026-08-26 · Status: Accepted · Amended by [ADR 0015](0015-a-held-question-opens-the-reply-window.md) · Source: [#71](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/71), built in [#77](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/77)
 
-v1.0 is a bridge over the Sessions the user already started ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67)), and the route ADR 0006 chose cannot reach one: a channel server is spawned from a plugin manifest at launch, so it exists only in Sessions this product started. Claude Code has since grown an inbox socket of its own, bound by default for every Session. The documented external ingress routes are channels — a research preview requiring a startup `--channels` selector, which means taking over the user's `claude` command — and `-p --input-format stream-json`, which is not an interactive Session at all. Neither reaches a Session started by hand.
+v1.0 is a bridge over the Sessions the user already started ([#67](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/67)), and the route ADR 0006 chose cannot reach one: a channel server is spawned from a plugin manifest at launch, so it exists only in Sessions this product started. Claude Code has since grown an inbox socket of its own, bound by default for every Session. The documented external ingress routes are channels — a research preview requiring a startup `--channels` selector, which means taking over the user's `claude` command — and `-p --input-format stream-json`, which is not an interactive Session at all. Neither reaches a Session started by hand.
 
 ## Decision
 
@@ -36,8 +36,8 @@ ADR 0006 is superseded. ADR 0007 was already superseded by ADR 0011, which is th
 
 ## Amendment 2026-09-05: decision 3 stands, and the Voice says what a relayed answer is not
 
-Source: [#234](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/234), from the
-[#198](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/198) full run
+Source: [#234](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/234), from the
+[#198](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/198) full run
 `20260904T202319Z`.
 
 Decision 3 was written from what upstream enforces on a *permission* dialog. The full runs put the
@@ -88,14 +88,14 @@ authority — it is what the first generation did, launching every Session throu
 with a `--channels` selector (`legacy@1d32845:bridge/claude.py:472-476`, serving
 `legacy@1d32845:claude-channel/channel.mjs`) — and it is **dropped, because** it requires wrapping
 the user's `claude` command, which
-[#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67) /
-[#68](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/68) and
+[#67](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/67) /
+[#68](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/68) and
 [ADR 0020](0020-a-codex-session-is-a-daemon-thread-a-terminal-vouches-for.md) refuse: this product
 bridges Sessions the user already started. An upstream ingress that a registered external process
 could be treated as the user through would settle it, and 2.1.261 documents none.
 
 The acceptance `live call` `detail` phase depended on the compliant reading, so it is re-specified
 against this amendment in
-[#238](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/238): the extra Session asks
+[#238](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/238): the extra Session asks
 through `AskUserQuestion`, the answer rides the held-hook route, and the phase grades the dictated
 reply as `newest` without resting on a model's reading of the wrapper.

@@ -9,7 +9,7 @@ description = "Voice-controlling terminal coding agents through a realtime voice
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
-authors = [{ name = "okqixiaobao727-design" }]
+authors = [{ name = "Simon-AI-coding" }]
 keywords = ["voice", "coding-agent", "claude-code", "codex", "realtime"]
 classifiers = [
   "Development Status :: 1 - Planning",
@@ -46,8 +46,8 @@ voice = ["aiortc>=1.9", "av>=12", "sounddevice>=0.4",
 acceptance = ["telethon>=1.41"]
 
 [project.urls]
-Homepage = "https://github.com/okqixiaobao727-design/GPT-VoiceCoding"
-Issues = "https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues"
+Homepage = "https://github.com/Simon-AI-coding/GPT-VoiceCoding"
+Issues = "https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues"
 
 [project.scripts]
 bridgectl = "gpt_voicecoding.cli:main"

@@ -16,7 +16,7 @@ curl -fsIL --connect-timeout 10 --max-time 30 https://github.com >/dev/null 2>&1
 curl -fsIL --connect-timeout 10 --max-time 30 https://pypi.org/simple/ >/dev/null 2>&1 ||
     fail 'Allow HTTPS access to PyPI, then run this command again.'
 
-repository=https://github.com/okqixiaobao727-design/GPT-VoiceCoding
+repository=https://github.com/Simon-AI-coding/GPT-VoiceCoding
 printf '%s\n' 'Preparing the source checkout…'
 product=${repository##*/}
 source_directory="$HOME/Library/Application Support/$product/source"

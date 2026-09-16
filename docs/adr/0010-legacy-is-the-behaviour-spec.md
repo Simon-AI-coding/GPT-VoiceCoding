@@ -1,6 +1,6 @@
 # 10. The seam architecture stays, and the first generation is the behaviour spec it must satisfy
 
-Date: 2026-08-25 · Status: Accepted · Source: [#58](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/58)
+Date: 2026-08-25 · Status: Accepted · Source: [#58](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/58)
 
 This repository was built in two days from an architecture spec. In the four days after, twenty-three bug tickets were found by a human against the real environment while the suite stayed green — most describing behaviour the first generation already had. The build issues were derived from the seams, and nothing pointed a builder at the code that proved what the product must do.
 

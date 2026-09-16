@@ -1,6 +1,6 @@
 # Stock-plus-Overlay probe review
 
-Prepared for [the stock-plus-overlay tracer task](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/299). Simon approved the revised Call Agent text on 2026-09-08. The current revisions have not been live-tested.
+Prepared for [the stock-plus-overlay tracer task](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/299). Simon approved the revised Call Agent text on 2026-09-08. The current revisions have not been live-tested.
 
 Source: `openai/codex`, `rust-v0.153.4`, commit `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`, `codex-rs/prompts/templates/realtime/`. These began as probe inputs; on 2026-09-08 Simon had them installed in the shipping catalogue (`core/instructions/{voice,agent}.py`), whose rendered text is the two files here plus the two Overlay paragraphs recorded under **Installed** below.
 
@@ -104,7 +104,7 @@ The two measured runs kept `realtime_start.md` whole, added the Relayed Instruct
 
 One Engine tools section adds the runtime invocation and shared calling rules, followed by one entry per tool. Each entry has one usage form from the seam's `USAGE` table and its decision rules. The repeated command card and separate “How you run them” section are removed.
 
-- `brief` owns current status, newest content and current decision details. This preserves the behavioral distinction required by [the wrong-tool bug](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/277), while Simon's new instruction supersedes its old split between the command card and the usage paragraph.
+- `brief` owns current status, newest content and current decision details. This preserves the behavioral distinction required by [the wrong-tool bug](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/277), while Simon's new instruction supersedes its old split between the command card and the usage paragraph.
 - `history` owns requesting a page and requesting older pages. The tool already limits page size and returns a concrete `--before` continuation in `control_plane/commands.py:_history_lines`; the prompt uses that returned value instead of restating page size and calculating a minimum ordinal. Fetching more pages remains conditional on the user's request.
 - `relay` owns the single Relayed Instruction rule and the meaning of delivery receipts. The older overlapping “do not add a decision” paragraph is removed because that constraint is in the Relayed Instruction rule.
 - `approve` and `live` each own their purpose and invocation. The hang-up requirement appears only with `live`.
@@ -132,7 +132,7 @@ The Voice set renders with codex's headings (ADR 0018 as amended); the Call Agen
 
 ## The kept and corrected rows are rules
 
-Since [#300](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/300), every row above marked `kept` or `corrected` — excluding blank lines and headings, which state no obligation — carries a rule in `core/instructions/catalogue.py`: id `voice.stock.*` or `agent.stock.*`, `source` the codex tag, template and line (`codex@rust-v0.153.4:backend_prompt.md:25`), `gist` the line exactly as the generator renders it, which for a corrected row is the correction. The reason stays here; the catalogue holds no reason column. `removed` rows gain no rule and stay rows here alone: the catalogue records what is owed, not what was declined.
+Since [#300](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/300), every row above marked `kept` or `corrected` — excluding blank lines and headings, which state no obligation — carries a rule in `core/instructions/catalogue.py`: id `voice.stock.*` or `agent.stock.*`, `source` the codex tag, template and line (`codex@rust-v0.153.4:backend_prompt.md:25`), `gist` the line exactly as the generator renders it, which for a corrected row is the correction. The reason stays here; the catalogue holds no reason column. `removed` rows gain no rule and stay rows here alone: the catalogue records what is owed, not what was declined.
 
 The generators claim those ids on the blocks that say them, and `InstructionSet` refuses a set that claims a stock line without carrying it word for word — so a line deleted from a block fails generation even though the block still claims every id it ever did. The tag lives in exactly one place, `catalogue.STOCK_TEXT_VERSION`.
 

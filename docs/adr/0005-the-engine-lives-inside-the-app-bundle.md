@@ -1,6 +1,6 @@
 # 5. The engine lives inside the app bundle, because that is what earns the microphone grant
 
-Date: 2026-08-20 · Status: Accepted · Source: [packaging research](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/14), [TCC attribution probe](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/issues/24)
+Date: 2026-08-20 · Status: Accepted · Source: [packaging research](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/14), [TCC attribution probe](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/issues/24)
 
 macOS TCC attaches the microphone grant to whoever owns the process. The legacy LaunchAgent daemon put it on the bare `python3.12` path. The probe showed the grant lands on the bundle id whenever the executable is *inside* the `.app`, and collapses to the binary path outside it — launchd versus direct spawn makes no difference.
 

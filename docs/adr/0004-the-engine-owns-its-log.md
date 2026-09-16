@@ -1,6 +1,6 @@
 # 4. The engine owns its log, so rotation can rename rather than truncate
 
-Date: 2026-08-18 · Status: Accepted · Source: [legacy ADR 0004](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/blob/main/docs/adr/0004-bounded-log-files.md) (measurement), amended in [#4](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/4) and [#33](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/33)
+Date: 2026-08-18 · Status: Accepted · Source: [legacy ADR 0004](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/blob/main/docs/adr/0004-bounded-log-files.md) (measurement), amended in [#4](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/4) and [#33](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/33)
 
 The legacy log grew ~1 GB/month, 98% one inherited-environment `libmalloc` line, and could not be rotated because a shell redirect owned the descriptor. Copy-truncate loses lines written between the copy and the truncate.
 

@@ -1,8 +1,8 @@
 # 11. The Claude hooks are a fingerprinted block in the user's settings file
 
-Date: 2026-08-25 · Status: Accepted · Source: [#71](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/71)
+Date: 2026-08-25 · Status: Accepted · Source: [#71](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/71)
 
-v1.0 is a bridge over every Session the user starts ([#67](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/67)), so nothing can be injected at launch and ADR 0007's `--plugin-dir` no longer reaches the Sessions that matter. Approval has no other route: upstream enforces that a peer message is never the user's approval, so the inbox socket that carries the Answer Relay can never carry a verdict. Two user-scope mechanisms remain — a plugin named in `enabledPlugins`, or a block in the config directory's `settings.json` — and both were probed live on Claude Code 2.1.245 in `~/.claude-b`, where #71 records the runs.
+v1.0 is a bridge over every Session the user starts ([#67](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/67)), so nothing can be injected at launch and ADR 0007's `--plugin-dir` no longer reaches the Sessions that matter. Approval has no other route: upstream enforces that a peer message is never the user's approval, so the inbox socket that carries the Answer Relay can never carry a verdict. Two user-scope mechanisms remain — a plugin named in `enabledPlugins`, or a block in the config directory's `settings.json` — and both were probed live on Claude Code 2.1.245 in `~/.claude-b`, where #71 records the runs.
 
 ## Decision
 

@@ -40,7 +40,7 @@ stopped and what it stopped on, and carries your spoken answer back into it. The
 On an Apple Silicon Mac:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/okqixiaobao727-design/GPT-VoiceCoding/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Simon-AI-coding/GPT-VoiceCoding/main/scripts/install.sh | sh
 ```
 
 It builds an ad-hoc-signed app from source, puts it in `/Applications` and opens it. There is no

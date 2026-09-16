@@ -64,6 +64,15 @@ QUESTION_TOOL: Final = "AskUserQuestion"
 #: this marker has no recommendation to report.
 RECOMMENDED_MARKER: Final = "(recommended)"
 
+#: `AskUserQuestion`'s own input fields, as its tool schema names them. Read
+#: here to announce a question, and by the approval hook to answer one.
+QUESTIONS_FIELD: Final = "questions"
+QUESTION_FIELD: Final = "question"
+OPTIONS_FIELD: Final = "options"
+LABEL_FIELD: Final = "label"
+DESCRIPTION_FIELD: Final = "description"
+ANSWERS_FIELD: Final = "answers"
+
 #: The input fields a Claude permission request may be summarised from, in the
 #: order they are preferred. Each is a short human-facing string the product
 #: already writes for a person to read. The arguments proper — `command`,
@@ -469,24 +478,24 @@ def _groups(tool_input: Any) -> list[_QuestionGroup]:
     """
     if not isinstance(tool_input, Mapping):
         return []
-    questions = tool_input.get("questions")
+    questions = tool_input.get(QUESTIONS_FIELD)
     if not isinstance(questions, list):
         return []
     groups: list[_QuestionGroup] = []
     for question in questions:
         if not isinstance(question, Mapping):
             continue
-        prompt = question.get("question")
+        prompt = question.get(QUESTION_FIELD)
         options: list[Option] = []
-        raw = question.get("options")
+        raw = question.get(OPTIONS_FIELD)
         if isinstance(raw, list):
             for option in raw:
                 if not isinstance(option, Mapping):
                     continue
-                label = option.get("label")
+                label = option.get(LABEL_FIELD)
                 if isinstance(label, str) and label.strip():
                     text, is_recommended = split_recommendation(label.strip())
-                    raw_description = option.get("description")
+                    raw_description = option.get(DESCRIPTION_FIELD)
                     description = (
                         raw_description.strip()
                         if isinstance(raw_description, str) and raw_description.strip()

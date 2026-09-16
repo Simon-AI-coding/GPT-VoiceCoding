@@ -178,26 +178,37 @@ def answered_input(payload: Mapping[str, Any], words: str) -> dict[str, Any] | N
     if payload.get(TOOL_NAME_FIELD) != stop_analysis.QUESTION_TOOL:
         return None
     tool_input = payload.get(TOOL_INPUT_FIELD)
-    questions = tool_input.get(QUESTIONS_FIELD) if isinstance(tool_input, Mapping) else None
+    if not isinstance(tool_input, Mapping):
+        return None
+    questions = tool_input.get(stop_analysis.QUESTIONS_FIELD)
     if not isinstance(questions, list):
         return None
     answers: dict[str, str] = {}
     for question in questions:
         if not isinstance(question, Mapping):
             continue
-        text = question.get(QUESTION_FIELD)
+        text = question.get(stop_analysis.QUESTION_FIELD)
         if isinstance(text, str) and text.strip():
-            answers[text] = _as_offered(question.get(OPTIONS_FIELD), words)
+            answers[text] = _as_offered(question.get(stop_analysis.OPTIONS_FIELD), words)
     if not answers:
         return None
-    return {**tool_input, ANSWERS_FIELD: answers}
+    return {**tool_input, stop_analysis.ANSWERS_FIELD: answers}
+
+
+def answerable(payload: Mapping[str, Any]) -> bool:
+    """Whether `answered_input` can answer this dialog at all.
+
+    The same reading of the same payload the hook will make, so the engine
+    refuses exactly the answers the hook could not deliver.
+    """
+    return answered_input(payload, "") is not None
 
 
 def _as_offered(options: Any, words: str) -> str:
     """The offered label these words name, as written, or the words unchanged."""
     spoken = _comparable(words)
     for option in options if isinstance(options, list) else ():
-        label = option.get(LABEL_FIELD) if isinstance(option, Mapping) else None
+        label = option.get(stop_analysis.LABEL_FIELD) if isinstance(option, Mapping) else None
         if not isinstance(label, str) or not label.strip():
             continue
         unmarked, _ = stop_analysis.split_recommendation(label.strip())
@@ -261,13 +272,6 @@ REASON_FIELD: Final = "reason"
 #: The user's words on a verdict that answers a question. The engine sends them
 #: as spoken; the hook holds the call's input and builds `answers` from it.
 ANSWER_FIELD: Final = "answer"
-
-#: `AskUserQuestion`'s own input fields, as its tool schema names them.
-QUESTIONS_FIELD: Final = "questions"
-QUESTION_FIELD: Final = "question"
-OPTIONS_FIELD: Final = "options"
-LABEL_FIELD: Final = "label"
-ANSWERS_FIELD: Final = "answers"
 
 #: The registration's own fields. `transcript_path` is the one that earns this
 #: hook its place (#71): Claude Code's own registry does not carry it, and it
@@ -792,7 +796,7 @@ class ApprovalListener:
                 writer,
                 permission=request,
                 question=question,
-                keyed=answered_input(payload, "") is not None,
+                keyed=answerable(payload),
             )
             self._waiting[approval_id] = waiting
             if question is not None:

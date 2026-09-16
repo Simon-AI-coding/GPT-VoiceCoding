@@ -1,6 +1,6 @@
 # 18. One dial, two audiences: the Voice hears prose, the Call Agent hears its rules
 
-Date: 2026-09-01 · Status: Accepted · Source: [#177](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/177), evidence [#175](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/175) and [#179](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/179)
+Date: 2026-09-01 · Status: Accepted · Source: [#177](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/177), evidence [#175](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/175) and [#179](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/179)
 
 A codex v3 realtime call is two models: the **Voice** the user hears, and the **Call
 Agent** behind it — the only half with tools. `thread/realtime/start` addresses them
@@ -19,7 +19,7 @@ all.
 not the slot.** `CallAdapter.ensure_call(dial: Dial)` replaces `ensure_call(instructions:
 str)`. `Dial` is a frozen carrier of three fields: `voice` — prose for the Voice;
 `agent` — prose for the Call Agent; `hand_over` — the Briefing's dial-time items (ADR
-0017, [#166](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/166)). The
+0017, [#166](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/166)). The
 realtime adapter alone maps them to `prompt`, `realtimeStartInstructions` and
 `initialItems` (`role: "developer"`); Bridge Core never learns a codex field name. A
 `Dial` refuses an empty `voice` or `agent` text at construction — sending no `prompt`
@@ -34,10 +34,10 @@ is capped at 8,192 bytes, well inside the 8,192 estimated tokens codex allows th
 (see the amendment below); the voice set keeps this engine's own 8,000-byte cap, which
 codex does not impose (the `prompt` slot is unbudgeted) and which stands as the measure of
 "terse". Which rule belongs to which audience, and what each says, is
-[#173](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/173)'s work,
+[#173](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/173)'s work,
 rule by rule against the 0901 flow — nothing is carried over unread.
 
-*Amended 2026-09-03 after [#215](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/215).*
+*Amended 2026-09-03 after [#215](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/215).*
 The byte budgets above were first justified as "a byte is the floor of a token". That
 over-states the margin, and it named the wrong counter. Nothing counts tokens on this
 path: codex's own app-server rejects an over-budget request before the backend sees it,
@@ -56,7 +56,7 @@ claim the wire as their reason.
 paragraphs — no headings, bullets, code or key-value text (Simon, 2026-09-01: 控制 voice
 一定要用自然语言而不是代码语言). The agent set may keep its structure.
 
-*Amended 2026-09-08 after [#289](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/289).*
+*Amended 2026-09-08 after [#289](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/289).*
 The paragraph above misread the 2026-09-01 instruction. It was about how the Voice is
 **spoken to and fed** — the user talks to it and the Briefing hands it facts in natural
 language, never in code-like text — not about the format of the prompt that shapes it.
@@ -79,7 +79,7 @@ caller varies them: `delegationAckFiller` off (the backend's own "好，等我�
 is the wordiness Round 1 Q9 removed), `codexResponsesAsItems` on with a prefix, and
 `includeStartupContext` **off**.
 
-*Amended 2026-09-01 after [#179](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/179).*
+*Amended 2026-09-01 after [#179](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/179).*
 `includeStartupContext` was left at its default pending that probe; the default is **on**,
 and what it includes is up to 5,300 tokens of the current thread's history, a scan of the
 user's forty most recent local codex threads and a local workspace map, appended to the
@@ -95,7 +95,7 @@ invisibly and were spoken. On this evidence the switch does not buy observabilit
 adapter must not be built expecting it to. What the Call Agent says is reachable, if at all,
 through the `[BACKEND] `-prefixed `user` messages codex's own Voice prompt describes
 (`prompts/templates/realtime/backend_prompt.md:40-41`) — a carrier no ticket has examined.
-Sizing that is [#173](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/173)'s
+Sizing that is [#173](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/173)'s
 to inherit.
 
 **No `HandoffRequested` event.** The Voice's hand-off to the Call Agent
@@ -104,7 +104,7 @@ stays as it is. A voice hang-up is the Call Agent running `bridgectl live` — t
 executes off a request it can see, and the model's own claim to have hung up (observed
 live, #175 run 3) is trusted by nothing.
 
-*Confirmed 2026-09-01 by [#179](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/179).*
+*Confirmed 2026-09-01 by [#179](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/179).*
 Told in `realtimeStartInstructions` that `bridgectl live` ends the call, the Call Agent ran
 it on **3 of 3** spoken requests, four to five seconds after each hand-off. The rule reaches
 the acting half and is obeyed; the Voice never needs to know the verb exists. So the event

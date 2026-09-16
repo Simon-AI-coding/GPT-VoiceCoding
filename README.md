@@ -6,13 +6,9 @@
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-111111)
 ![Licence](https://img.shields.io/badge/licence-MIT-111111)
 
-<!-- PENDING ASSET: the demo video. Drag scratch/demo-recorder/out/take.tvuVMJ/demo.mp4
-     into any GitHub comment box, then replace this whole comment with the
-     https://github.com/user-attachments/... URL it returns, on a line of its own with
-     no Markdown around it, followed by:
+https://github.com/user-attachments/assets/a0ea108c-8c5b-45a1-b966-877a05650c65
 
-     *Recorded unattended; the narration and the spoken lines are synthesized speech.*
--->
+*Recorded unattended; the narration and the spoken lines are synthesized speech.*
 
 One voice call covers every Claude Code and Codex session on your Mac: it tells you which one
 stopped and what it stopped on, and carries your spoken answer back into it. The call rides
@@ -30,17 +26,18 @@ stopped and what it stopped on, and carries your spoken answer back into it. The
 
 ## Screenshots
 
-| | |
-|---|---|
-| ![The Duty Lamp](docs/images/duty-lamp.png)<br>The Duty Lamp sits above everything and counts what is waiting on you. Hovering it offers Hang up, Control and Settings, and shows the session that moved last. | ![The Control Panel](docs/images/control-panel.png)<br>The Control Panel during a call: the three switches, the Call Agent's model and context use, the counts, and every live session. |
-| ![Settings](docs/images/settings.png)<br>Settings. Nine voices to pick the Live Call's from, and the realtime model behind it. | ![Telegram](docs/images/telegram.png)<br>Telegram. A stop notice you can reply to, `/sessions` drawn as buttons, and the bot's own command menu. |
+![The Duty Lamp, Settings, the Control Panel and Telegram](docs/images/showcase.png)
+
+The Duty Lamp floats above everything and counts what is waiting on you, with Settings below it.
+In the middle is the Control Panel during a call. On the right is Telegram, where you reply to a
+stop notice and `/sessions` comes back as buttons.
 
 ## Install
 
 On an Apple Silicon Mac:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/okqixiaobao727-design/GPT-VoiceCoding/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Simon-AI-coding/GPT-VoiceCoding/main/scripts/install.sh | sh
 ```
 
 It builds an ad-hoc-signed app from source, puts it in `/Applications` and opens it. There is no
@@ -68,80 +65,17 @@ already binds. Codex is read and written through the shared `codex app-server` t
 starts and your own terminals join, which is the same process the Live Call's realtime route
 rides.
 
-```mermaid
-flowchart LR
-  subgraph terminals["Your own terminals"]
-    cc["Claude Code Session"]
-    cx["Codex Session"]
-  end
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <img alt="Your terminals, codex app-server, the engine with Bridge Core at its centre, and the Live Call, Telegram, menu-bar app and bridgectl it reaches" src="docs/images/architecture-light.svg">
+</picture>
 
-  appserver["codex app-server<br/>started by this product,<br/>joined by your Sessions"]
+What happens when a session stops, whether you answer on the call or on Telegram:
 
-  subgraph engine["The engine"]
-    core["Bridge Core<br/>every policy, one source of truth"]
-    agents["Agent adapters"]
-    callad["Call adapter"]
-    chan["Companion Channel adapter"]
-    plane["Control plane<br/>JSON over a Unix socket"]
-    core --- agents
-    core --- callad
-    core --- chan
-    core --- plane
-  end
-
-  live["Live Call<br/>Voice speaks, Call Agent acts"]
-  tg["Telegram"]
-  shell["Menu-bar app<br/>Duty Lamp, Control Panel"]
-  ctl["bridgectl"]
-
-  cc <-->|"hooks, roster, inbox socket"| agents
-  cx --- appserver
-  appserver --- agents
-  appserver -->|"realtime route"| callad
-  callad --- live
-  chan --- tg
-  plane --- shell
-  plane --- ctl
-```
-
-What happens when a session stops:
-
-```mermaid
-sequenceDiagram
-  participant S as Your Session
-  participant C as Bridge Core
-  participant T as Telegram
-  participant K as Call Keeper
-  participant V as Voice
-  participant A as Call Agent
-  participant U as You
-
-  S->>C: stops, waiting on a decision
-  C->>C: writes the reading to the roster
-  C->>T: Stop Notice, as an Anchor you can reply to
-  C->>K: wake
-  K->>V: dials, briefed from the roster as it stands
-  V->>U: speaks the Session Brief
-  U->>V: "use email login, and give me the steps"
-  V->>A: hands the job over
-  A->>C: relay
-  C->>S: Answer Relay
-```
-
-Or, without the call:
-
-```mermaid
-sequenceDiagram
-  participant T as Telegram
-  participant U as You
-  participant C as Bridge Core
-  participant S as Your Session
-
-  T->>U: Stop Notice
-  U->>T: replies to it
-  T->>C: inbound text, naming the Anchor's Session
-  C->>S: Answer Relay
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/session-stops-dark.svg">
+  <img alt="Sequence: a session stops, Bridge Core sends a Stop Notice and wakes the Call Keeper, and your answer comes back as an Answer Relay either through the call or through a Telegram reply" src="docs/images/session-stops-light.svg">
+</picture>
 
 The Voice has no tools. It speaks from what the engine hands it and passes anything that reads
 as a job to the Call Agent, which is the only half on the call that can run a control-plane verb.

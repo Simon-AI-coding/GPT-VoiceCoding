@@ -14,7 +14,7 @@ holds it open for as long as the scheduler says. `tests/codex_fake.py` bound
 that way, and on a loaded CI runner the codex adapter — which polls for the
 socket file and checks its mode the instant it appears — landed inside the
 window and refused a socket that was about to be made private
-([#116](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/116)).
+([#116](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/116)).
 The refusal was correct. The bind was not.
 
 So the mode comes from the umask at creation time, and the socket is never

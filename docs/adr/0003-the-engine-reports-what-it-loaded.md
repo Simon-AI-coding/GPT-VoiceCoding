@@ -1,6 +1,6 @@
 # 3. The engine reports what it loaded, and liveness checks read that answer
 
-Date: 2026-08-19 · Status: Accepted · Source: [legacy ADR 0003](https://github.com/okqixiaobao727-design/GPT-VoiceCoding-legacy/blob/main/docs/adr/0003-companion-channel-liveness-is-verifiable.md) (full failure account)
+Date: 2026-08-19 · Status: Accepted · Source: [legacy ADR 0003](https://github.com/Simon-AI-coding/GPT-VoiceCoding-legacy/blob/main/docs/adr/0003-companion-channel-liveness-is-verifiable.md) (full failure account)
 
 The Companion Channel was dead for a day while every guard said nothing: `status` echoed the config file the client had just read, and a reachable daemon proved only that some daemon answered.
 
@@ -14,4 +14,4 @@ The check is level-triggered with three outcomes: **pass** (configured and loade
 
 This is the rule for every seam with a pluggable adapter; `verify` is a seam verb for this reason.
 
-**Amended by [#159](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/159): `MANUAL` is structurally unavailable to an adapter that reports a real loaded implementation.** A far side that is uninstalled rather than unconfigured therefore reports `FAIL`: the adapter is configured and loaded, and the machine does not have what it needs to reach that far side.
+**Amended by [#159](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/159): `MANUAL` is structurally unavailable to an adapter that reports a real loaded implementation.** A far side that is uninstalled rather than unconfigured therefore reports `FAIL`: the adapter is configured and loaded, and the machine does not have what it needs to reach that far side.

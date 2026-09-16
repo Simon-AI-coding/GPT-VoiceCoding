@@ -1,6 +1,6 @@
 # 15. A held question opens the Reply Window
 
-Date: 2026-08-28 · Status: Accepted · Source: [#128](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/128)
+Date: 2026-08-28 · Status: Accepted · Source: [#128](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/128)
 
 The public capability is the **Answer Relay**: it carries the user's own words, including an answer to a Session's question. The transport is selected inside the Claude adapter. Ordinary words use the Session inbox; while the listener still holds the exact `AskUserQuestion` prompt, the same `answer_relay` verb writes a framed denial message back through that hook because Claude consumes the message as the tool result. The Approval Relay remains only a permission verdict of `allow`, `deny`, or `ask`; questions never enter its pipeline, Control Plane document, command grammar, or Control Panel.
 
@@ -16,7 +16,7 @@ Legacy classification is per behaviour, as ruled by the Advisor for #128. Answer
 
 ## Amendment 2026-09-01: the engine keeps no clock on a held hook
 
-Source: [#172](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/172), under map [#164](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/164).
+Source: [#172](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/172), under map [#164](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/164).
 
 This ADR gave a parked question a hold ceiling: `CorePolicy.approval_budget_seconds`, passed
 through `BridgeCore.tick` into `sweep_question_budget`, so the listener would pop an expired
@@ -43,7 +43,7 @@ silence is the on-screen dialog's — not as engine policy.
 
 ## Amendment 2026-09-10: the frame is worded for a reader who is told it failed
 
-Source: [#328](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/328).
+Source: [#328](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/328).
 
 This ADR settled that an answer rides the held hook as a framed denial, because Claude
 consumes a denial's message as the `AskUserQuestion` tool result. What it did not record is

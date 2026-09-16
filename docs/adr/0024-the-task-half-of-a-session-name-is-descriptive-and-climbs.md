@@ -47,7 +47,7 @@ facts and the resolved project name; the module lives in Bridge Core (ADR 0001:
 `core` imports no adapter), which calls it and stores the result and the rung it
 came from.
 
-## Amendment 2026-09-09: an absolute path is refused as a first-words candidate (map [#310](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/310), [#317](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/317))
+## Amendment 2026-09-09: an absolute path is refused as a first-words candidate (map [#310](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/310), [#317](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/317))
 
 On 2026-09-09 seven crew workers were first named by the floor — `306-306-ed` and its siblings — and then **climbed to a path**: their first prompt was a slash command whose argument begins with a file path, cleaning stripped the wrapper to that argument, and forty characters of it, `/Users/simon/Documents/coding/GPT-VoiceC`, outranked the derived name for the rest of the day. The ladder did exactly what this document says; the candidate was the problem.
 

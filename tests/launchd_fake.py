@@ -6,7 +6,7 @@ ordinary import and goes through `sys.path` — where the name `conftest` is not
 unique, because `tests/acceptance/` has one too. With only `[dev]` installed the
 acceptance conftest is `importorskip`ped, its directory never reaches `sys.path`,
 and the bare name resolves here. Install `[acceptance]` and it resolves *there*
-instead, and the whole unit suite dies at collection ([#93](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/93)).
+instead, and the whole unit suite dies at collection ([#93](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/93)).
 
 So the rule this file exists to keep: **a test module never imports a
 `conftest`.** Anything two test files share lives in a module with a name of its

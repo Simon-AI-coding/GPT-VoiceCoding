@@ -59,7 +59,7 @@ instead of the developer's own route.
 live in `launchd_fake.py`, because a test module that imports a `conftest` by
 name is importing whichever `conftest` reached `sys.path` first — and with the
 `[acceptance]` extra installed that is `tests/acceptance/conftest.py`, not this
-one ([#93](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/93)).
+one ([#93](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/93)).
 `tests/test_layout.py` holds the rule so it cannot come back.
 """
 

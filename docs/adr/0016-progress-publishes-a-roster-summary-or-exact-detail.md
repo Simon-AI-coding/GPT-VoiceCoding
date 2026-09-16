@@ -1,6 +1,6 @@
 # 16. Progress publishes one observation as a roster summary or exact detail
 
-Date: 2026-08-30 · Status: Accepted · Source: [#76](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/76), whose Advisor Q2 bound is superseded by Simon on 2026-08-30
+Date: 2026-08-30 · Status: Accepted · Source: [#76](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/76), whose Advisor Q2 bound is superseded by Simon on 2026-08-30
 
 Issue #76 made one `Progress` value serve three jobs: the normalized fact read from
 Claude or Codex, the compact value stored on every Session roster row, and the exact
@@ -162,7 +162,7 @@ stands; what changes is that omission is represented honestly.
 
 ## Amendment 2026-09-01: a third publication, the History page
 
-Source: [#171](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/171), under map [#164](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/164).
+Source: [#171](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/171), under map [#164](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/164).
 
 The 0901 flow asks for history the user can page through by voice — "the last five,
 then the five before those". The exact `progress` publication above cannot answer it: it
@@ -211,7 +211,7 @@ whole-entry rule and the exact one-Session read remain adapted as above.
 ## Amendment 2026-09-06: one surface may cut what it lays out
 
 Source: [ADR 0021](0021-the-companion-channel-is-a-surface-the-user-replies-on.md) §5, from
-[#251](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/251).
+[#251](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/251).
 
 The whole-or-omitted rule above governs what Core reads, carries and hands across a seam, and it
 is unchanged there: the structured brief a Stop Notice is laid out from still holds the newest
@@ -223,9 +223,9 @@ is marked where it happens, never silent, and this is the only place a text is c
 
 ## Amendment 2026-09-09: a publication ceiling is chosen by the wire the reader is on
 
-Source: [#302](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/302), the decision in
-[#298](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/298), under the map
-[#283](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/283). Evidence:
+Source: [#302](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/302), the decision in
+[#298](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/298), under the map
+[#283](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/283). Evidence:
 `docs/research/2026-09-07-realtime-output-budget.md`.
 
 One observation, a publication per **wire**. The rule above bounds a publication by the line it

@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 824" width="880" height="824" role="img">
+  <title>What happens when a session stops</title>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+    .bg { fill: #0d1117; }
+    .text { fill: #e6edf3; }
+    .dim { fill: #7d8590; }
+    .accent { fill: #f0a030; }
+    .card { fill: #131a22; stroke: #2d3540; stroke-width: 1; }
+    .core { fill: #131a22; stroke: #f0a030; stroke-width: 1.5; }
+    .group { fill: none; stroke: #3d4652; stroke-width: 1; stroke-dasharray: 4 4; }
+    .line { fill: none; stroke: #343c47; stroke-width: 1.5; }
+    .flow { fill: none; stroke: #f0a030; stroke-width: 1.5; stroke-linecap: round;
+             stroke-dasharray: 2 14; animation: flow linear infinite; }
+    .flow.back { animation-name: flow-back; }
+    .lifeline { stroke: #343c47; stroke-width: 1; stroke-dasharray: 3 5; }
+    @keyframes flow { from { stroke-dashoffset: 16; } to { stroke-dashoffset: 0; } }
+    @keyframes flow-back { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 16; } }
+    .pulse { fill: none; stroke: #f0a030; stroke-width: 3; stroke-linecap: round; }
+    .label-bg { fill: #0d1117; }
+    @keyframes pulse0 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse1 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -80; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -80; opacity: 0; } } @keyframes pulse2 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -596; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -596; opacity: 0; } } @keyframes pulse3 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse4 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -236; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -236; opacity: 0; } } @keyframes pulse5 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse6 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse7 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse8 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -236; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -236; opacity: 0; } } @keyframes pulse9 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse10 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } } @keyframes pulse11 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -596; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -596; opacity: 0; } } @keyframes pulse12 { 0% { stroke-dashoffset: 10; opacity: 1; } 6.92% { stroke-dashoffset: -116; opacity: 1; } 6.93%, 100% { stroke-dashoffset: -116; opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .flow, .pulse { animation: none; } }
+  </style>
+  <defs>
+    <pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#1c232c"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#343c47"/>
+    </marker>
+    <marker id="arrow-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7"
+            markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#343c47"/>
+    </marker>
+    <filter id="glow" x="-30%" y="-60%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+  <rect width="880" height="824" rx="14" class="bg"/>
+  <rect width="880" height="824" rx="14" fill="url(#dots)"/>
+  <line x1="80" y1="90" x2="80" y2="800" class="lifeline"/>
+  <line x1="200" y1="90" x2="200" y2="800" class="lifeline"/>
+  <line x1="320" y1="90" x2="320" y2="800" class="lifeline"/>
+  <line x1="440" y1="90" x2="440" y2="800" class="lifeline"/>
+  <line x1="560" y1="90" x2="560" y2="800" class="lifeline"/>
+  <line x1="680" y1="90" x2="680" y2="800" class="lifeline"/>
+  <line x1="800" y1="90" x2="800" y2="800" class="lifeline"/>
+  <rect x="170" y="326" width="690" height="218" rx="10" class="group"/>
+  <rect x="170" y="592" width="690" height="138" rx="10" class="group"/>
+  <text x="40" y="30" class="dim" font-size="11" font-weight="400" text-anchor="start" letter-spacing="1">gpt-voicecoding</text>
+  <text x="840" y="30" class="dim" font-size="11" font-weight="400" text-anchor="end" letter-spacing="1">a session stops</text>
+  <rect x="28" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="80.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">session</text>
+  <g opacity="0.55" filter="url(#glow)"><rect x="148" y="56" width="104" height="34" rx="10" fill="#f0a030"/></g>
+  <rect x="148" y="56" width="104" height="34" rx="8" class="core"/>
+  <text x="200.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">bridge core</text>
+  <rect x="268" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="320.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">call keeper</text>
+  <rect x="388" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="440.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">call agent</text>
+  <rect x="508" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="560.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">voice</text>
+  <rect x="628" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="680.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">you</text>
+  <rect x="748" y="56" width="104" height="34" rx="8" class="card"/>
+  <text x="800.0" y="77.5" class="text" font-size="13" font-weight="600" text-anchor="middle" letter-spacing="0">telegram</text>
+  <path d="M80,136 L196,136" class="line" marker-end="url(#arrow)"/>
+  <rect x="40.2" y="117" width="199.6" height="15" rx="3" class="label-bg"/>
+  <text x="140.0" y="128" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">stops, waiting on a decision</text>
+  <path d="M80,136 L196,136" class="pulse" style="stroke-dasharray: 10 136; animation: pulse0 11.700000000000001s linear 0.00s infinite; opacity: 0"/>
+  <path d="M200,176 L228,176 Q234,176 234,182 L234,186 Q234,192 228,192 L204,192" class="line" marker-end="url(#arrow)"/>
+  <text x="244" y="188" class="dim" font-size="11" font-weight="400" text-anchor="start" letter-spacing="0">writes the reading to the roster</text>
+  <path d="M200,176 L228,176 Q234,176 234,182 L234,186 Q234,192 228,192 L204,192" class="pulse" style="stroke-dasharray: 10 100; animation: pulse1 11.700000000000001s linear 0.90s infinite; opacity: 0"/>
+  <path d="M200,232 L796,232" class="line" marker-end="url(#arrow)"/>
+  <rect x="353.29999999999995" y="213" width="293.40000000000003" height="15" rx="3" class="label-bg"/>
+  <text x="500.0" y="224" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">stop notice, as an anchor you can reply to</text>
+  <path d="M200,232 L796,232" class="pulse" style="stroke-dasharray: 10 616; animation: pulse2 11.700000000000001s linear 1.80s infinite; opacity: 0"/>
+  <path d="M200,272 L316,272" class="line" marker-end="url(#arrow)"/>
+  <rect x="240.6" y="253" width="38.8" height="15" rx="3" class="label-bg"/>
+  <text x="260.0" y="264" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">wake</text>
+  <path d="M200,272 L316,272" class="pulse" style="stroke-dasharray: 10 136; animation: pulse3 11.700000000000001s linear 2.70s infinite; opacity: 0"/>
+  <path d="M320,360 L556,360" class="line" marker-end="url(#arrow)"/>
+  <rect x="289.95" y="341" width="300.1" height="15" rx="3" class="label-bg"/>
+  <text x="440.0" y="352" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">dials, briefed from the roster as it stands</text>
+  <path d="M320,360 L556,360" class="pulse" style="stroke-dasharray: 10 256; animation: pulse4 11.700000000000001s linear 3.60s infinite; opacity: 0"/>
+  <path d="M560,400 L676,400" class="line" marker-end="url(#arrow)"/>
+  <rect x="533.6" y="381" width="172.8" height="15" rx="3" class="label-bg"/>
+  <text x="620.0" y="392" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">speaks the session brief</text>
+  <path d="M560,400 L676,400" class="pulse" style="stroke-dasharray: 10 136; animation: pulse5 11.700000000000001s linear 4.50s infinite; opacity: 0"/>
+  <path d="M680,440 L564,440" class="line" marker-end="url(#arrow)"/>
+  <rect x="480.0" y="421" width="280.0" height="15" rx="3" class="label-bg"/>
+  <text x="620.0" y="432" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">"use email login, and give me the steps"</text>
+  <path d="M680,440 L564,440" class="pulse" style="stroke-dasharray: 10 136; animation: pulse6 11.700000000000001s linear 5.40s infinite; opacity: 0"/>
+  <path d="M560,480 L444,480" class="line" marker-end="url(#arrow)"/>
+  <rect x="433.7" y="461" width="132.60000000000002" height="15" rx="3" class="label-bg"/>
+  <text x="500.0" y="472" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">hands the job over</text>
+  <path d="M560,480 L444,480" class="pulse" style="stroke-dasharray: 10 136; animation: pulse7 11.700000000000001s linear 6.30s infinite; opacity: 0"/>
+  <path d="M440,520 L204,520" class="line" marker-end="url(#arrow)"/>
+  <rect x="297.25" y="501" width="45.5" height="15" rx="3" class="label-bg"/>
+  <text x="320.0" y="512" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">relay</text>
+  <path d="M440,520 L204,520" class="pulse" style="stroke-dasharray: 10 256; animation: pulse8 11.700000000000001s linear 7.20s infinite; opacity: 0"/>
+  <rect x="182" y="317" width="101" height="18" class="bg"/>
+  <text x="190" y="330" class="accent" font-size="12" font-weight="600" text-anchor="start" letter-spacing="0">on the call</text>
+  <path d="M800,626 L684,626" class="line" marker-end="url(#arrow)"/>
+  <rect x="697.15" y="607" width="85.7" height="15" rx="3" class="label-bg"/>
+  <text x="740.0" y="618" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">stop notice</text>
+  <path d="M800,626 L684,626" class="pulse" style="stroke-dasharray: 10 136; animation: pulse9 11.700000000000001s linear 8.10s infinite; opacity: 0"/>
+  <path d="M680,666 L796,666" class="line" marker-end="url(#arrow)"/>
+  <rect x="690.45" y="647" width="99.10000000000001" height="15" rx="3" class="label-bg"/>
+  <text x="740.0" y="658" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">replies to it</text>
+  <path d="M680,666 L796,666" class="pulse" style="stroke-dasharray: 10 136; animation: pulse10 11.700000000000001s linear 9.00s infinite; opacity: 0"/>
+  <path d="M800,706 L204,706" class="line" marker-end="url(#arrow)"/>
+  <rect x="356.65" y="687" width="286.7" height="15" rx="3" class="label-bg"/>
+  <text x="500.0" y="698" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">inbound text, naming the anchor's session</text>
+  <path d="M800,706 L204,706" class="pulse" style="stroke-dasharray: 10 616; animation: pulse11 11.700000000000001s linear 9.90s infinite; opacity: 0"/>
+  <rect x="182" y="583" width="220" height="18" class="bg"/>
+  <text x="190" y="596" class="accent" font-size="12" font-weight="600" text-anchor="start" letter-spacing="0">or on telegram</text>
+  <text x="299.5" y="596" class="dim" font-size="11" font-weight="400" text-anchor="start" letter-spacing="0">no call needed</text>
+  <path d="M200,764 L84,764" class="line" marker-end="url(#arrow)"/>
+  <rect x="93.8" y="745" width="92.4" height="15" rx="3" class="label-bg"/>
+  <text x="140.0" y="756" class="dim" font-size="11" font-weight="400" text-anchor="middle" letter-spacing="0">answer relay</text>
+  <path d="M200,764 L84,764" class="pulse" style="stroke-dasharray: 10 136; animation: pulse12 11.700000000000001s linear 10.80s infinite; opacity: 0"/>
+</svg>

@@ -1,6 +1,6 @@
 # 17. A missed call is briefed from a fresh reading, never from replayed events
 
-Date: 2026-09-01 · Status: Accepted · Source: [#165](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/165) Q5/Q10, [#167](https://github.com/okqixiaobao727-design/GPT-VoiceCoding/issues/167)
+Date: 2026-09-01 · Status: Accepted · Source: [#165](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/165) Q5/Q10, [#167](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/167)
 
 Two calls a minute is worse than one call late. The reference implementation had no
 cool-down at all and recorded the incident that shape produces: a Stop Notice arriving

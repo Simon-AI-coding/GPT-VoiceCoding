@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fakes import PROGRESS_CAPTURE, capture_for
+from gpt_voicecoding.adapters.agent.claude.inbox import RELAY_SENDER_NAME, SOURCE_HINT, enveloped
 from gpt_voicecoding.adapters.agent.claude.stop_analysis import QUESTION_TOOL
 from gpt_voicecoding.adapters.agent.claude.transcript_tail import recent
 from gpt_voicecoding.seams.agent import ProgressOmission, ProgressRole
@@ -219,13 +220,25 @@ def relayed(
     at: int = 0,
     origin_from: str = "uds:/tmp/cc-socks/vc-relay-60460.sock",
     text: str | None = None,
+    wrapped: bool = True,
 ) -> dict[str, Any]:
     """One Answer Relay of ours, in the shape Claude Code really recorded it.
 
     Every field is copied from a real delivery — run `20260903T233723Z`,
     `二号工位`, `~/.claude/projects/…/1a6d8d85-….jsonl` record 61, the one the
-    ticket's symptom was read from.
+    ticket's symptom was read from. `wrapped` adds what #372's envelope added on
+    2.1.273 (brainstorming session `ae52b929-….jsonl` record 175): the payload
+    is `inbox.enveloped`, and `origin` gains `name` and `body`.
     """
+    origin: dict[str, Any] = {
+        "kind": "peer",
+        "from": origin_from,
+        "msg_id": "6877a163-f973-4342-8011-54c75b543f1d",
+    }
+    if wrapped:
+        origin["name"] = RELAY_SENDER_NAME
+        origin["body"] = f"{payload}\n\n{SOURCE_HINT}"
+        payload = enveloped(payload, sender=origin_from)
     return {
         "type": "user",
         "isSidechain": False,
@@ -233,11 +246,7 @@ def relayed(
         "isMeta": True,
         "promptSource": "system",
         "timestamp": stamp(at),
-        "origin": {
-            "kind": "peer",
-            "from": origin_from,
-            "msg_id": "6877a163-f973-4342-8011-54c75b543f1d",
-        },
+        "origin": origin,
         "message": {
             "role": "user",
             "content": text
@@ -265,6 +274,15 @@ class TestOurOwnRelayIsTheUserSpeaking:
             (1, ProgressRole.USER, "可以继续"),
             (2, ProgressRole.ASSISTANT, "那我就接着往下做。"),
         ]
+
+    def test_a_relay_sent_before_the_envelope_is_still_the_words(self) -> None:
+        """History reaches back past #372, to Relays that carried bare words."""
+        assert texts([relayed("可以继续", wrapped=False)]) == ["可以继续"]
+
+    def test_neither_the_envelope_nor_the_source_hint_reaches_history(self) -> None:
+        words = '第一行\n\n第二行 "引号" </cross-session-message> 结尾'
+
+        assert texts([relayed(words)]) == [words]
 
     def test_an_earlier_engine_process_relay_is_still_ours(self) -> None:
         """The address carries a pid and a configurable directory; the shape is ours."""

@@ -68,8 +68,8 @@ from typing import Any
 
 from gpt_voicecoding.adapters.agent.claude.approval import (
     ACK_TYPE,
+    ANSWER_FIELD,
     MAX_HOOK_REQUEST_BYTES,
-    MESSAGE_FIELD,
     PROMPT_ID_FIELD,
     REQUEST_TYPE,
     SESSION_ID_FIELD,
@@ -78,6 +78,7 @@ from gpt_voicecoding.adapters.agent.claude.approval import (
     TYPE_FIELD,
     VERDICT_FIELD,
     VERDICT_TYPE,
+    answered_input,
     hook_decision,
 )
 from gpt_voicecoding.adapters.agent.claude.bootstrap import (
@@ -119,12 +120,13 @@ def request_for(payload: Mapping[str, Any]) -> dict[str, Any] | None:
 def ask_engine(
     request: dict[str, Any], *, path: Path, dial_timeout: float
 ) -> tuple[ApprovalVerdict, str | None]:
-    """One dialog out, one verdict back. Every failure answers `ASK`.
+    """One dialog out, one verdict back, with the answer words for a question.
 
-    A refusal, a closed socket, a reply about something else and a reply that is
-    not JSON all mean the same thing here — nobody is going to answer this by
-    voice — and they mean it in the one direction that cannot hurt: back to the
-    human, who is looking at the dialog right now.
+    Every failure answers `ASK`. A refusal, a closed socket, a reply about
+    something else and a reply that is not JSON all mean the same thing here —
+    nobody is going to answer this by voice — and they mean it in the one
+    direction that cannot hurt: back to the human, who is looking at the dialog
+    right now.
     """
     try:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -182,7 +184,11 @@ def _one_line(connection: socket.socket) -> bytes:
 
 
 def _verdict_in(line: bytes) -> tuple[ApprovalVerdict, str | None]:
-    """The engine's answer, or `ASK` for anything that is not exactly one."""
+    """The engine's verdict and the user's answer words, or `ASK` for anything else.
+
+    Words ride only an `allow`: an answer is the one verdict that rewrites the
+    call's input, and any other pairing is a frame the engine never builds.
+    """
     if not line.strip():
         return ApprovalVerdict.ASK, None
     try:
@@ -195,8 +201,12 @@ def _verdict_in(line: bytes) -> tuple[ApprovalVerdict, str | None]:
         verdict = ApprovalVerdict(document.get(VERDICT_FIELD))
     except ValueError:
         return ApprovalVerdict.ASK, None
-    message = document.get(MESSAGE_FIELD)
-    return verdict, message if isinstance(message, str) else None
+    if ANSWER_FIELD not in document:
+        return verdict, None
+    answer = document[ANSWER_FIELD]
+    if not isinstance(answer, str) or verdict is not ApprovalVerdict.ALLOW:
+        return ApprovalVerdict.ASK, None
+    return verdict, answer
 
 
 def decide(payload: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any] | None:
@@ -211,8 +221,14 @@ def decide(payload: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, 
     request = request_for(payload)
     if request is None:
         return None
-    verdict, message = ask_engine(request, path=path, dial_timeout=dial_timeout_in(environ))
-    return hook_decision(verdict, message=message)
+    verdict, answer = ask_engine(request, path=path, dial_timeout=dial_timeout_in(environ))
+    if answer is None:
+        return hook_decision(verdict)
+    # An answer the dialog cannot take is not a yes to anything else.
+    answered = answered_input(payload, answer)
+    if answered is None:
+        return None
+    return hook_decision(verdict, updated_input=answered)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -85,3 +85,45 @@ misleads is the next person to open this repository, which is who this amendment
 Unchanged: the framed denial itself (#128 — an answer is not a fourth `ApprovalVerdict` kind), the
 canonicalisation boundary above, and `approval_ack` as the only positive delivery proof. Nothing
 here may be re-graded on what a terminal renders.
+
+## Amendment 2026-09-17: an answer is an `allow` carrying `answers`
+
+Source: [#371](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/371). Supersedes the
+2026-09-10 amendment, and the "framed denial" wording in this ADR's opening and canonicalisation
+paragraphs.
+
+**There is another shape, and it is measured live.** On Claude Code 2.1.273 a throwaway
+`PermissionRequest` hook answered an `AskUserQuestion` with `{"behavior": "allow", "updatedInput":
+{...the call's input..., "answers": {"<question text>": "<words>"}}}`. The hooks reference documents
+this: of `answers` it says *"Claude doesn't set this field; supply it via `updatedInput` to answer
+programmatically"*. The transcript records `hook_permission_decision: allow`, the terminal prints
+`User answered Claude's questions` and `Allowed by PermissionRequest hook` with no error styling, and
+the model reads `The user answered: …` — or `Your questions have been answered: …` when every answer
+is an offered label — and acts on free text as readily as on a label. The rejection text the
+previous amendment relied on names the two *behaviours*, and an `allow` with `updatedInput` is one
+of them. A `strict` permission kind (presumably `--restricted`, not verified) refuses any changed
+input, and the dialog then stays on screen for the human.
+
+So the held hook now answers with that shape. The engine's verdict frame carries the user's words
+as `answer` beside `verdict: "allow"`; the hook, which already holds the call's input from its
+stdin, builds `answers` (`approval.answered_input`). `Ruling: ` and the frame it named are retired:
+there is no error wrapper left for a prefix to be read under.
+
+- **Canonicalisation moves to the hook** and stays inside the adapter. For a lone question, words
+  that match one of its labels — ignoring case, spacing and the `(recommended)` mark —
+  become the label exactly as the Session wrote it, which is the comparison Claude Code makes
+  before calling the answers a plain choice. Anything else is sent verbatim.
+- **A call with several questions gets the words as its `response`**, and no `answers`. The words
+  carry no per-question split, so the Session reads them whole — `The user responded: <words>` —
+  and decides which part answers which question. Measured on 2.1.273: a reply of "第一个用 tabs，第二个用
+  main" to a two-question call was split correctly by the model. No question is credited with words
+  meant for another. A lone question with no text has no key to put the words under; the engine
+  refuses that Relay before writing, and the dialog on screen keeps the question.
+- **Permission verdicts are unchanged**: plain `allow`, or `deny` with `DENIED_BY_VOICE`, and never
+  `updatedInput` or `updatedPermissions`. The hook ignores an `answer` on any frame but an `allow`
+  for an `AskUserQuestion`, and prints nothing for it.
+
+Unchanged: an answer is still not a fourth `ApprovalVerdict` kind at the seam (#128),
+`approval_ack` is still the only positive delivery proof, and a late answer is still refused rather
+than falling through to the inbox. `PROVEN_AGAINST_VERSION` stays where it is; this was a measurement
+of the answer shape, not a re-measurement of the whole route.

@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from gpt_voicecoding.adapters.agent.claude.inbox import RELAY_SENDER_NAME
 from gpt_voicecoding.adapters.agent.claude.stop_analysis import (
     QUESTION_TOOL,
     SUMMARY_MAX_CHARS,
@@ -756,6 +757,13 @@ class TestWaitingOnAnotherSession:
 
         assert found.kind is WaitingKind.PEER
         assert found.awaiting == PEER_NAME
+
+    def test_a_session_named_like_our_relays_is_still_told_apart_from_them(self) -> None:
+        """#372: a Relay wears `RELAY_SENDER_NAME`; only the reply socket says it is ours."""
+        waiting = [sent("t1", RELAY_SENDER_NAME), delivered("t1")]
+
+        assert analyse([*waiting, relayed("any news?")]).kind is WaitingKind.PEER
+        assert analyse([*waiting, peer_wrote(name=RELAY_SENDER_NAME)]).kind is WaitingKind.NONE
 
     def test_a_question_the_user_must_answer_outranks_a_peer_send(self) -> None:
         """Only the user can end a question; the peer send is behind it."""

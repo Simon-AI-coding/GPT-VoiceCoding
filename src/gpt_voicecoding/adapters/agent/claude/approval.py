@@ -21,8 +21,8 @@ arrived at independently, for the same reason.
 At the seam, permissions use the Approval Relay's `allow`, `deny`, or `ask`.
 Questions use the Answer Relay's ordinary words; the Claude adapter selects this
 hook instead of the inbox while the exact prompt remains parked. At the wire,
-that answer is a denial whose framed message Claude consumes as the question's
-tool result. `ask` is the one verdict said by saying nothing.
+that answer is an `allow` whose `updatedInput` carries the words as the call's
+`answers` (#371). `ask` is the one verdict said by saying nothing.
 
 **The wire keeps the only clock (ADR 0015, amended by #191).** A parked entry
 lives exactly as long as the hook holding it: Claude Code ends that hook at the
@@ -126,22 +126,113 @@ PROMPT_ID_FIELD: Final = "prompt_id"
 # `PROVEN_AGAINST_VERSION` is deliberately not moved by this: that pin covers the
 # whole route including the live `--plugin-dir` load, and a string read is not
 # that measurement.
-def hook_decision(verdict: ApprovalVerdict, *, message: str | None = None) -> dict[str, Any] | None:
+#
+# **A third shape, measured live on 2.1.273** (#371): `allow` with an
+# `updatedInput` is accepted, and re-checked against the deny / ask rules. For
+# `AskUserQuestion` that is the documented way to answer: the hooks reference
+# says of `answers` *"supply it via `updatedInput` to answer programmatically"*.
+# The terminal then shows `User answered Claude's questions` and the model reads
+# `The user answered`. A `strict` permission kind (presumably `--restricted`, not
+# verified) refuses any changed input, and the dialog then stays on screen.
+def hook_decision(
+    verdict: ApprovalVerdict, *, updated_input: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
     """What the hook prints for one verdict, or `None` when it prints nothing.
 
-    Neither `updatedInput` nor `updatedPermissions` ever appears. The first would
-    rewrite the call the user was asked about, so their yes would be a yes to
-    something else; the second is a session-scoped rule, and the locked ceiling
-    for a spoken grant is one call.
+    `updatedPermissions` never appears: it is a session-scoped rule, and the
+    locked ceiling for a spoken grant is one call.
+
+    `updatedInput` appears only on an `allow` that answers a question, built by
+    `answered_input`. On a permission it would rewrite the call the user was
+    asked about, so their yes would be a yes to something else. On
+    `AskUserQuestion` the rewrite *is* the answer: `answers` is the one field
+    the model never sets.
     """
     if verdict is ApprovalVerdict.ASK:
         return None
-    decision: dict[str, Any] = (
-        {"behavior": ALLOW_BEHAVIOR}
-        if verdict is ApprovalVerdict.ALLOW
-        else {"behavior": DENY_BEHAVIOR, "message": message or DENIED_BY_VOICE}
-    )
+    decision: dict[str, Any]
+    if verdict is ApprovalVerdict.ALLOW:
+        decision = {"behavior": ALLOW_BEHAVIOR}
+        if updated_input is not None:
+            decision["updatedInput"] = dict(updated_input)
+    else:
+        decision = {"behavior": DENY_BEHAVIOR, "message": DENIED_BY_VOICE}
     return {"hookSpecificOutput": {"hookEventName": HOOK_EVENT, "decision": decision}}
+
+
+def answered_input(payload: Mapping[str, Any], words: str) -> dict[str, Any] | None:
+    """One `AskUserQuestion` call's input with the user's words as its answer.
+
+    `None` for anything this cannot answer: not a question, or a lone question
+    with no text, since Claude Code keys `answers` by that exact text.
+
+    **One question: the words are its `answers` entry.** Words that match one of
+    its labels (ignoring case, spacing and the `(recommended)` mark) become the
+    label exactly as written; Claude Code treats that as a plain choice (`Your
+    questions have been answered`). Anything else is sent verbatim and read as
+    free text (`The user answered`).
+
+    **Several questions: the words are the call's `response`.** A spoken or
+    typed reply is one string with nothing saying which part answers which
+    question, so the Session gets it whole (`The user responded: <words>`) and
+    decides. Measured on 2.1.273: it split "tabs for the first, main for the
+    second" across its two questions correctly. `answers` is left out, so no
+    question is credited with words meant for another.
+    """
+    asked = _asked(payload)
+    if asked is None:
+        return None
+    tool_input, questions = asked
+    if len(questions) > 1:
+        return {**tool_input, stop_analysis.RESPONSE_FIELD: words}
+    (question,) = questions
+    text = question.get(stop_analysis.QUESTION_FIELD)
+    if not isinstance(text, str) or not text.strip():
+        return None
+    answer = _as_offered(question.get(stop_analysis.OPTIONS_FIELD), words)
+    return {**tool_input, stop_analysis.ANSWERS_FIELD: {text: answer}}
+
+
+def answerable(payload: Mapping[str, Any]) -> bool:
+    """Whether `answered_input` can answer this dialog at all.
+
+    The same reading of the same payload the hook will make, so the engine
+    refuses exactly the answers the hook could not deliver.
+    """
+    return answered_input(payload, "") is not None
+
+
+def _asked(
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]] | None:
+    """An `AskUserQuestion` call's input and its readable questions, or `None`."""
+    if payload.get(TOOL_NAME_FIELD) != stop_analysis.QUESTION_TOOL:
+        return None
+    tool_input = payload.get(TOOL_INPUT_FIELD)
+    if not isinstance(tool_input, Mapping):
+        return None
+    listed = tool_input.get(stop_analysis.QUESTIONS_FIELD)
+    questions = [q for q in listed if isinstance(q, Mapping)] if isinstance(listed, list) else []
+    if not questions:
+        return None
+    return tool_input, questions
+
+
+def _as_offered(options: Any, words: str) -> str:
+    """The offered label these words name, as written, or the words unchanged."""
+    spoken = _comparable(words)
+    for option in options if isinstance(options, list) else ():
+        label = option.get(stop_analysis.LABEL_FIELD) if isinstance(option, Mapping) else None
+        if not isinstance(label, str) or not label.strip():
+            continue
+        unmarked, _ = stop_analysis.split_recommendation(label.strip())
+        if spoken in (_comparable(label), _comparable(unmarked)):
+            return label
+    return words
+
+
+def _comparable(text: str) -> str:
+    return " ".join(text.split()).casefold()
 
 
 # -- the wire between the hook process and this engine -------------------
@@ -190,34 +281,11 @@ CWD_FIELD: Final = "cwd"
 TOOL_NAME_FIELD: Final = "tool_name"
 TOOL_INPUT_FIELD: Final = "tool_input"
 VERDICT_FIELD: Final = "verdict"
-MESSAGE_FIELD: Final = "message"
 REASON_FIELD: Final = "reason"
 
-#: Claude consumes a denied `AskUserQuestion` call's message as the tool result,
-#: and a denial is the only shape that carries one — re-measured on 2.1.267 for
-#: #328, whose own rejection text still enumerates `{"behavior": "allow"}` and
-#: `{"behavior": "deny", "message": ...}` and nothing else. So this route's
-#: success is rendered as its failure: the terminal prints the answer in error
-#: styling, and the model receives it wrapped as a failed tool result.
-#:
-#: **This prefix is the whole of the remedy that reaches the model.** The framing
-#: around it belongs to Claude Code; the sentence inside it is ours. It is what
-#: the model reads first under that wrapper, so it is what decides whether the
-#: answer is acted on or discarded as an error to route around.
-#:
-#: `Ruling` earns the slot three ways. It is **positive** — a phrasing like *this
-#: is not an error* steers by prohibition, which makes the forbidden reading more
-#: available rather than less. It is **already this repo's word**, carried by the
-#: ADRs and by #128's own ruling, so the model meets it in the code, the docs and
-#: the tracker alike. And it is **narrow**: it settles the question that was
-#: asked and claims nothing about the exchange, where *final* would suppress the
-#: follow-up a Session is sometimes right to ask.
-#:
-#: It names neither the user nor this product, and the frame is no thinner for
-#: it: both are already carried, by the `AskUserQuestion` call this answers and
-#: by the channel the words arrived on. Its one remaining job is to be read
-#: correctly under an error tag, which is the job it is worded for.
-QUESTION_ANSWER_PREFIX: Final = "Ruling: "
+#: The user's words on a verdict that answers a question. The engine sends them
+#: as spoken; the hook holds the call's input and builds `answers` from it.
+ANSWER_FIELD: Final = "answer"
 
 #: The registration's own fields. `transcript_path` is the one that earns this
 #: hook its place (#71): Claude Code's own registry does not carry it, and it
@@ -347,6 +415,7 @@ class _Waiting:
         "acknowledged",
         "answered",
         "gone",
+        "keyed",
         "permission",
         "question",
         "target",
@@ -360,6 +429,7 @@ class _Waiting:
         *,
         permission: ApprovalRequest | None = None,
         question: WaitingFor | None = None,
+        keyed: bool = False,
     ) -> None:
         if (permission is None) == (question is None):
             raise ValueError("a parked hook is exactly one permission or question")
@@ -370,6 +440,9 @@ class _Waiting:
         #: permission. Parsed once, here, when the payload arrives: two parses of
         #: one message are two answers that can disagree.
         self.question = question
+        #: Whether the hook can answer this question at all, read off the same
+        #: payload by the same builder the hook will use.
+        self.keyed = keyed
         #: Set once a verdict has been written to this hook. It is what tells the
         #: connection's own task that the end it is about to see is an ordinary
         #: goodbye rather than a human winning the race.
@@ -570,33 +643,36 @@ class ApprovalListener:
             approval_id,
             verdict,
             request_id=request_id,
-            message=None,
+            answer=None,
             question_only=False,
         )
 
     async def answer_question(
         self, question_id: str, words: str, *, request_id: RequestId
     ) -> DeliveryReceipt:
-        """Carry the user's words into the exact question hook still parked."""
+        """Carry the user's words into the exact question hook still parked.
+
+        The words travel as spoken; the hook matches them to the offered labels
+        (`answered_input`), because it holds the call's input and this does not.
+        A lone question with no text is refused before anything is written,
+        since `answers` has no key to put the words under, and the dialog on
+        screen keeps it.
+        """
         waiting = self._waiting.get(question_id)
         if waiting is None or waiting.question is None:
             if question_id in self._answered_elsewhere:
                 return _failed(request_id, "that question was answered elsewhere")
             return _failed(request_id, f"no question {question_id} is answerable on this Session")
-        collapsed = " ".join(words.split())
-        canonical = next(
-            (
-                option.text
-                for option in waiting.question.options
-                if " ".join(option.text.split()).casefold() == collapsed.casefold()
-            ),
-            words,
-        )
+        if not waiting.keyed:
+            return _failed(
+                request_id,
+                "the question on screen has no text to answer under; answer it in the terminal",
+            )
         return await self._answer(
             question_id,
-            ApprovalVerdict.DENY,
+            ApprovalVerdict.ALLOW,
             request_id=request_id,
-            message=QUESTION_ANSWER_PREFIX + canonical,
+            answer=words,
             question_only=True,
         )
 
@@ -606,10 +682,10 @@ class ApprovalListener:
         verdict: ApprovalVerdict,
         *,
         request_id: RequestId,
-        message: str | None,
+        answer: str | None,
         question_only: bool,
     ) -> DeliveryReceipt:
-        """Pop one parked hook first, then carry one framed wire decision."""
+        """Pop one parked hook first, then carry one wire decision."""
         waiting = self._waiting.pop(approval_id, None)
         if waiting is None:
             if approval_id in self._answered_elsewhere:
@@ -632,7 +708,7 @@ class ApprovalListener:
             reason="handed back to the on-screen dialog, which still holds it",
         )
         try:
-            await self._write_verdict(waiting, verdict, message=message)
+            await self._write_verdict(waiting, verdict, answer=answer)
         except (OSError, ConnectionError) as broken:
             self._answered_elsewhere.add(approval_id)
             if verdict is ApprovalVerdict.ASK:
@@ -653,12 +729,12 @@ class ApprovalListener:
         return DeliveryReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
 
     async def _write_verdict(
-        self, waiting: _Waiting, verdict: ApprovalVerdict, *, message: str | None = None
+        self, waiting: _Waiting, verdict: ApprovalVerdict, *, answer: str | None = None
     ) -> None:
         """Put one verdict on one hook's connection. Raises if it did not go."""
         frame: dict[str, Any] = {TYPE_FIELD: VERDICT_TYPE, VERDICT_FIELD: str(verdict)}
-        if message is not None:
-            frame[MESSAGE_FIELD] = message
+        if answer is not None:
+            frame[ANSWER_FIELD] = answer
         await self._reply(waiting.writer, frame)
         waiting.answered.set()
 
@@ -729,7 +805,13 @@ class ApprovalListener:
             else:
                 approval_id = str(uuid.uuid4())
                 request = request_from(payload, target=target, approval_id=approval_id)
-            waiting = _Waiting(target, writer, permission=request, question=question)
+            waiting = _Waiting(
+                target,
+                writer,
+                permission=request,
+                question=question,
+                keyed=answerable(payload),
+            )
             self._waiting[approval_id] = waiting
             if question is not None:
                 self._released_questions.pop(target, None)

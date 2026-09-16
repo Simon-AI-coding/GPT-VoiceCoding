@@ -49,6 +49,7 @@ from gpt_voicecoding.adapters.agent.claude.inbox import (
     REPLY_SOCKET_PREFIX,
     WRAPPER_HEADERS,
     WRAPPER_TAIL_OPENINGS,
+    unenveloped,
 )
 from gpt_voicecoding.seams.agent import Option, WaitingFor, WaitingKind
 
@@ -62,6 +63,16 @@ QUESTION_TOOL: Final = "AskUserQuestion"
 #: Nothing else in the call says which option is recommended, so a call without
 #: this marker has no recommendation to report.
 RECOMMENDED_MARKER: Final = "(recommended)"
+
+#: `AskUserQuestion`'s own input fields, as its tool schema names them. Read
+#: here to announce a question, and by the approval hook to answer one.
+QUESTIONS_FIELD: Final = "questions"
+QUESTION_FIELD: Final = "question"
+OPTIONS_FIELD: Final = "options"
+LABEL_FIELD: Final = "label"
+DESCRIPTION_FIELD: Final = "description"
+ANSWERS_FIELD: Final = "answers"
+RESPONSE_FIELD: Final = "response"
 
 #: The input fields a Claude permission request may be summarised from, in the
 #: order they are preferred. Each is a short human-facing string the product
@@ -468,24 +479,24 @@ def _groups(tool_input: Any) -> list[_QuestionGroup]:
     """
     if not isinstance(tool_input, Mapping):
         return []
-    questions = tool_input.get("questions")
+    questions = tool_input.get(QUESTIONS_FIELD)
     if not isinstance(questions, list):
         return []
     groups: list[_QuestionGroup] = []
     for question in questions:
         if not isinstance(question, Mapping):
             continue
-        prompt = question.get("question")
+        prompt = question.get(QUESTION_FIELD)
         options: list[Option] = []
-        raw = question.get("options")
+        raw = question.get(OPTIONS_FIELD)
         if isinstance(raw, list):
             for option in raw:
                 if not isinstance(option, Mapping):
                     continue
-                label = option.get("label")
+                label = option.get(LABEL_FIELD)
                 if isinstance(label, str) and label.strip():
-                    text, is_recommended = _split_recommendation(label.strip())
-                    raw_description = option.get("description")
+                    text, is_recommended = split_recommendation(label.strip())
+                    raw_description = option.get(DESCRIPTION_FIELD)
                     description = (
                         raw_description.strip()
                         if isinstance(raw_description, str) and raw_description.strip()
@@ -507,7 +518,7 @@ def _groups(tool_input: Any) -> list[_QuestionGroup]:
     return groups
 
 
-def _split_recommendation(label: str) -> tuple[str, bool]:
+def split_recommendation(label: str) -> tuple[str, bool]:
     """The option's spoken words, and whether it is the marked recommendation."""
     if label.lower().endswith(RECOMMENDED_MARKER):
         text = label[: -len(RECOMMENDED_MARKER)].strip()
@@ -617,6 +628,10 @@ def relay_payload(text: str) -> str:
     that changed — silently truncates or drops what the user said. Losing the
     user's words is the failure this ticket exists to end, so the doubt is spent
     on saying too much rather than too little.
+
+    Inside the wrapper, a Relay since #372 is an envelope holding the words and
+    the source hint (`inbox.enveloped`); both are ours and both are stripped. A
+    payload that is not an envelope — a Relay sent before #372 — is the words.
     """
     header, newline, remainder = text.partition("\n")
     if not newline or header not in WRAPPER_HEADERS:
@@ -624,7 +639,8 @@ def relay_payload(text: str) -> str:
     payload, separator, tail = remainder.rpartition("\n\n")
     if not separator or not tail.startswith(WRAPPER_TAIL_OPENINGS):
         return text
-    return payload
+    words = unenveloped(payload)
+    return payload if words is None else words
 
 
 def is_pipeline_noise(record: Mapping[str, Any], content: Any) -> bool:

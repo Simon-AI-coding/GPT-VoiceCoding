@@ -1,6 +1,8 @@
 # GPT-VoiceCoding
 
-**for Claude Code & Codex**
+**A macOS menu-bar app for voice control of Claude Code and Codex**
+
+**English** · [简体中文](./README.zh-CN.md)
 
 ![macOS](https://img.shields.io/badge/macOS-only-111111)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-111111)
@@ -8,12 +10,11 @@
 
 https://github.com/user-attachments/assets/a0ea108c-8c5b-45a1-b966-877a05650c65
 
-*Recorded unattended; the narration and the spoken lines are synthesized speech.*
-
-One voice call covers every Claude Code and Codex session on your Mac: it tells you which one
-stopped and what it stopped on, and carries your spoken answer back into it. The call rides
-`codex app-server`'s realtime route, so it runs on the ChatGPT account you already signed
-`codex` into, and there is no API key to supply.
+One voice call covers every Claude Code and Codex session on your Mac. When a session stops, it
+calls you: you hear which session stopped and what it stopped on, and your spoken answer goes back
+into that session. Away from the desk, you answer on Telegram. The call uses OpenAI's GPT-Live
+voice model through `codex app-server`'s realtime route, so it runs on the ChatGPT account you
+signed `codex` into and you don't need an OpenAI API key.
 
 ## How it works
 

@@ -1,6 +1,6 @@
 # GPT-VoiceCoding
 
-**用语音操控 Claude Code 和 Codex 的 macOS 菜单栏应用**
+**一个 macOS 菜单栏应用：Claude Code 或 Codex 的会话停下时，它会出声告诉你，再把你的回答（语音或 Telegram 消息）送回那个会话**
 
 [English](./README.md) · **简体中文**
 
@@ -8,9 +8,11 @@
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-111111)
 ![Licence](https://img.shields.io/badge/licence-MIT-111111)
 
+我不想一直守在屏幕前看编程 agent 干活，更想起来走动走动。我手上通常同时跑着好几个 Claude Code 和 Codex 会话，其中一个停下来时，我想知道是哪个、停在哪儿，然后用平常说话的方式让它接着做：跟 GPT-Live 聊，或者在 Telegram 上回一句。
+
 https://github.com/user-attachments/assets/a0ea108c-8c5b-45a1-b966-877a05650c65
 
-一通语音电话，照看你 Mac 上所有的 Claude Code 和 Codex 会话。某个会话停下来，它就给你打电话：你会听到是哪个会话停了、停在什么地方，你开口回答，这句话会送回那个会话。不在电脑前时，在 Telegram 上回复也行。通话用的是 OpenAI 的 GPT-Live 语音模型，走 `codex app-server` 的实时通道，所以用的就是你登录 `codex` 的 ChatGPT 账号，不需要 OpenAI API key。
+一通语音电话，照看你 Mac 上所有的 Claude Code 和 Codex 会话，每个回答都会送回它该去的那个会话。通话用的是 OpenAI 的 GPT-Live 语音模型，走 `codex app-server` 的实时通道，所以用的就是你登录 `codex` 的 ChatGPT 账号，不需要 OpenAI API key。
 
 ## 工作原理
 

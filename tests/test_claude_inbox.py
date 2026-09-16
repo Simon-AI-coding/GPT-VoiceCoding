@@ -27,8 +27,10 @@ from gpt_voicecoding.adapters.agent.claude.inbox import (
     InboxError,
     ReplyInbox,
     correlated,
+    enveloped,
     own_process_start,
     published_start,
+    unenveloped,
     user_frame,
 )
 from gpt_voicecoding.adapters.agent.claude.privacy import PRIVATE_SOCKET_MODE
@@ -48,8 +50,59 @@ class TestTheUserFrame:
         frame = user_frame("ship it", msg_id="m-1", reply_to="uds:/tmp/x.sock")
 
         assert frame["type"] == "user"
-        assert frame["message"] == {"role": "user", "content": "ship it"}
+        assert frame["message"] == {
+            "role": "user",
+            "content": enveloped("ship it", sender="uds:/tmp/x.sock"),
+        }
         assert frame["msgV"] == inbox.MESSAGE_VERSION
+
+    def test_the_envelope_is_the_one_the_receiver_folds(self) -> None:
+        """Byte for byte what folded to one line on 2.1.273 (#372).
+
+        The receiver rebuilds the envelope and uses it only on an exact match,
+        so attribute order, the newlines, and the absence of `from-mode` all
+        decide whether the terminal folds it.
+        """
+        assert enveloped("直接删掉 /tmp/x.txt", sender="uds:/tmp/cc-socks/vc-relay-1.sock") == (
+            '<cross-session-message from="uds:/tmp/cc-socks/vc-relay-1.sock"'
+            ' from-name="GPT-VoiceCoding">\n'
+            "直接删掉 /tmp/x.txt\n\n"
+            "Relayed from your user's voice or Telegram by GPT-VoiceCoding; when acting on it"
+            " needs their consent, confirm with AskUserQuestion.\n"
+            "</cross-session-message>"
+        )
+
+    @pytest.mark.parametrize(
+        "words",
+        [
+            "ship it",
+            'say "yes" <now>',
+            "line one\n\nline two\n",
+            "an early </cross-session-message> tag, then more",
+            "",
+        ],
+        ids=["plain", "quotes-and-brackets", "newlines", "closing-tag", "empty"],
+    )
+    def test_the_words_come_back_out_intact(self, words: str) -> None:
+        assert unenveloped(enveloped(words, sender="uds:/tmp/x.sock")) == words
+
+    def test_a_body_without_the_hint_comes_back_whole(self) -> None:
+        assert unenveloped(
+            '<cross-session-message from="uds:/x">\nhi\n</cross-session-message>'
+        ) == ("hi")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "ship it",
+            "<cross-session-message>\nno closing tag",
+            "<cross-session-messages>\nhi\n</cross-session-message>",
+            "<cross-session-message>hi</cross-session-message>",
+        ],
+        ids=["bare", "unclosed", "other-tag", "one-line"],
+    )
+    def test_anything_but_one_whole_envelope_is_not_unwrapped(self, text: str) -> None:
+        assert unenveloped(text) is None
 
     def test_nothing_claims_a_priority_or_attests_a_permission_mode(self) -> None:
         """Two fields the wire accepts and this product may not send.
@@ -74,6 +127,16 @@ class TestTheCorrelator:
 
     def test_our_own_message_arriving_is_the_proof(self) -> None:
         records = (self.record(**{"from": self.ADDRESS, "msg_id": "m-1"}),)
+
+        assert correlated(records, msg_id="m-1", address=self.ADDRESS)
+
+    def test_the_envelope_s_extra_origin_fields_change_nothing(self) -> None:
+        """2.1.273 adds `name` and `body` for an enveloped Relay and keeps both halves."""
+        records = (
+            self.record(
+                **{"from": self.ADDRESS, "msg_id": "m-1", "name": "GPT-VoiceCoding", "body": "hi"}
+            ),
+        )
 
         assert correlated(records, msg_id="m-1", address=self.ADDRESS)
 

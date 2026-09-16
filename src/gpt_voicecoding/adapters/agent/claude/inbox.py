@@ -123,6 +123,39 @@ KEY_SUFFIX: Final = ".key"
 #: directory we are binding into, which is not ours.
 REPLY_SOCKET_PREFIX: Final = "vc-relay-"
 
+#: The name a Relay wears in the receiver's terminal: `Message from @<this>`.
+#: Upstream calls the envelope's name *"Sender-asserted on the socket lane: a
+#: label, not an identity proof"*, and it is used here as exactly that. Nothing
+#: recognises a Relay by it — `stop_analysis.is_own_relay` reads the reply
+#: socket's name — so a Session that happens to share it is not mistaken for us.
+RELAY_SENDER_NAME: Final = "GPT-VoiceCoding"
+
+#: The tag Claude Code's own `SendMessage` wraps a peer message in.
+ENVELOPE_TAG: Final = "cross-session-message"
+
+#: One sentence inside the envelope, after the words and a blank line (#372).
+#:
+#: The model is told, by a notice upstream appends to every peer message, that
+#: this is not its user and cannot approve a pending prompt. That notice cannot
+#: be removed, so this sentence is the whole remedy that reaches the model:
+#:
+#: - *Relayed from your user's voice or Telegram* — says whose words these are,
+#:   and by which route, so the model does not read them as another agent's.
+#: - *by GPT-VoiceCoding* — names the carrier the terminal label already shows.
+#: - *when acting on it needs their consent* — scopes the instruction to the
+#:   moment the model would otherwise refuse; ordinary work goes ahead.
+#: - *confirm with AskUserQuestion* — the positive action. That dialog carries
+#:   the user's authority when answered through the held hook (ADR 0015), so the
+#:   refusal becomes a question the user can answer from the phone.
+#:
+#: Measured once on 2.1.273: a relayed delete plus this sentence made the model
+#: ask with `AskUserQuestion`, and act on the answer. The terminal folds the
+#: envelope to its first line, so the user sees their words and not this.
+SOURCE_HINT: Final = (
+    f"Relayed from your user's voice or Telegram by {RELAY_SENDER_NAME}; "
+    "when acting on it needs their consent, confirm with AskUserQuestion."
+)
+
 
 #: The `claude` this wrapper survey was measured against, on 2026-09-09. It is
 #: the version whose binary was read, not a floor and not a ceiling: the strings
@@ -132,6 +165,16 @@ REPLY_SOCKET_PREFIX: Final = "vc-relay-"
 #: Re-measure by reading the assembler out of the installed binary — the survey
 #: is repeatable, which is why the version it was taken at is recorded with it.
 WRAPPER_PROVEN_AGAINST_VERSION: Final = "2.1.266"
+
+#: The `claude` the envelope was measured against, on 2026-09-17 (#372). The
+#: receiver parses the envelope and rebuilds it, and uses it only if the rebuild
+#: reproduces the text exactly: attributes in the order `from`, `from-session`,
+#: `hop-chain`, `from-name`, `from-mode`, then a newline, the body, a newline and
+#: the closing tag. The body is matched greedily up to the *last* closing tag,
+#: so words that contain the tag still parse (read from the binary, not run).
+#: An envelope it cannot parse is still delivered, and measured still folded in
+#: the terminal, but its `origin` then carries no `name` and no `body`.
+ENVELOPE_PROVEN_AGAINST_VERSION: Final = "2.1.273"
 
 #: How the receiver wraps a peer message before writing it into the target's
 #: transcript: `<header>\n<payload>\n\n<tail>`. Read off the assembler in the
@@ -169,8 +212,44 @@ class InboxError(Exception):
     """The inbox could not be reached, or our own reply socket could not be bound."""
 
 
+def enveloped(words: str, *, sender: str) -> str:
+    """The words as a Relay carries them: in the envelope, with the source hint.
+
+    The envelope is what makes the receiver's terminal fold the Relay into one
+    `Message from @<name>` line, the way it shows its own `SendMessage`. It does
+    not change what the model is told about the sender; `SOURCE_HINT` is what
+    addresses that.
+
+    No `from-mode`, for the same reason `user_frame` sends no `from_mode`.
+    """
+    return (
+        f'<{ENVELOPE_TAG} from="{sender}" from-name="{RELAY_SENDER_NAME}">\n'
+        f"{words}\n\n{SOURCE_HINT}\n"
+        f"</{ENVELOPE_TAG}>"
+    )
+
+
+def unenveloped(text: str) -> str | None:
+    """The words inside an envelope, without the source hint, or `None`.
+
+    `None` when `text` is not one whole envelope. A body without the hint (a
+    Relay sent before #372 added it) comes back whole.
+    """
+    opening, newline, rest = text.partition("\n")
+    closing = f"\n</{ENVELOPE_TAG}>"
+    if (
+        not newline
+        or not (opening == f"<{ENVELOPE_TAG}>" or opening.startswith(f"<{ENVELOPE_TAG} "))
+        or not opening.endswith(">")
+        or not rest.endswith(closing)
+    ):
+        return None
+    body = rest[: -len(closing)]
+    return body.removesuffix(f"\n\n{SOURCE_HINT}")
+
+
 def user_frame(text: str, *, msg_id: str, reply_to: str) -> dict[str, Any]:
-    """One Relay on the wire.
+    """One Relay on the wire, its words in `enveloped` form.
 
     `msg_id` is validated by the receiver against a UUID pattern, and an id of
     another shape is dropped from the `origin` record it writes — which would
@@ -186,7 +265,7 @@ def user_frame(text: str, *, msg_id: str, reply_to: str) -> dict[str, Any]:
     return {
         "type": USER_TYPE,
         "msgV": MESSAGE_VERSION,
-        "message": {"role": "user", "content": text},
+        "message": {"role": "user", "content": enveloped(text, sender=reply_to)},
         "from": reply_to,
         "msg_id": msg_id,
     }

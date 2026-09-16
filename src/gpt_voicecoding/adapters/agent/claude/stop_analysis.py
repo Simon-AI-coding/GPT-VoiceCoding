@@ -49,6 +49,7 @@ from gpt_voicecoding.adapters.agent.claude.inbox import (
     REPLY_SOCKET_PREFIX,
     WRAPPER_HEADERS,
     WRAPPER_TAIL_OPENINGS,
+    unenveloped,
 )
 from gpt_voicecoding.seams.agent import Option, WaitingFor, WaitingKind
 
@@ -617,6 +618,10 @@ def relay_payload(text: str) -> str:
     that changed — silently truncates or drops what the user said. Losing the
     user's words is the failure this ticket exists to end, so the doubt is spent
     on saying too much rather than too little.
+
+    Inside the wrapper, a Relay since #372 is an envelope holding the words and
+    the source hint (`inbox.enveloped`); both are ours and both are stripped. A
+    payload that is not an envelope — a Relay sent before #372 — is the words.
     """
     header, newline, remainder = text.partition("\n")
     if not newline or header not in WRAPPER_HEADERS:
@@ -624,7 +629,8 @@ def relay_payload(text: str) -> str:
     payload, separator, tail = remainder.rpartition("\n\n")
     if not separator or not tail.startswith(WRAPPER_TAIL_OPENINGS):
         return text
-    return payload
+    words = unenveloped(payload)
+    return payload if words is None else words
 
 
 def is_pipeline_noise(record: Mapping[str, Any], content: Any) -> bool:

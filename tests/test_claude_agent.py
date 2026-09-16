@@ -372,7 +372,7 @@ class TestCarryingTheUsersWords:
         receipt, relays = asyncio.run(scenario())
         assert receipt.outcome is Delivery.UNKNOWN
         assert "nothing proved the words arrived" in receipt.reason
-        assert [frame["message"]["content"] for frame in relays] == ["ship it"]
+        assert [inbox.unenveloped(frame["message"]["content"]) for frame in relays] == ["ship it"]
 
     def test_the_frame_carries_a_uuid_and_our_own_reply_address(self, socket_path: Path) -> None:
         """Both halves of the correlator, and the id's shape is load-bearing.
@@ -649,7 +649,10 @@ class TestCarryingTheUsersWords:
         first, second, relays = asyncio.run(scenario())
         assert first.outcome is Delivery.FAILED
         assert second.outcome is Delivery.FAILED
-        assert sorted(frame["message"]["content"] for frame in relays) == ["first", "second"]
+        assert sorted(inbox.unenveloped(frame["message"]["content"]) or "" for frame in relays) == [
+            "first",
+            "second",
+        ]
         assert (first.request_id, second.request_id) == ("r-1", "r-2")
         assert len({frame["msg_id"] for frame in relays}) == 2, "two Relays, two correlators"
 

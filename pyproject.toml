@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gpt-voicecoding"
-version = "1.0.2"
+version = "1.0.3"
 description = "Voice-controlling terminal coding agents through a realtime voice call."
 readme = "README.md"
 license = { file = "LICENSE" }

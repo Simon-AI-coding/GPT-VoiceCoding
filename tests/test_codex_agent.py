@@ -123,6 +123,14 @@ class Codex(FakeAppServer):
                 "thread": {
                     "id": params.get("threadId"),
                     "status": {"type": self.status},
+                    # Real codex answers a resume with the whole turn history.
+                    "turns": [
+                        {
+                            "id": TURN,
+                            "status": "inProgress" if self.status == "active" else "completed",
+                            "items": list(self.progress_items),
+                        }
+                    ],
                 },
                 "approvalPolicy": self.approval_policy,
                 "approvalsReviewer": self.reviewer,
@@ -261,8 +269,8 @@ async def _until_row_has_a_dialog(adapter, *, session_id: str = THREAD) -> None:
     await parked_dialog(adapter, session_id=session_id)
 
 
-def test_codex_exposes_no_question_hook_and_no_hold_ceiling() -> None:
-    """A Codex dialog stays answerable from the TUI, so it never needed one."""
+def test_codex_answers_no_question_it_does_not_watch_and_keeps_no_hold_ceiling() -> None:
+    """A Codex question is a reading of a watched thread, and nothing parks on a clock."""
     adapter = CodexAgentAdapter(
         progress_capture=PROGRESS_CAPTURE, sink=Sink(), settings=quick(), daemon=no_daemon()
     )
@@ -2399,3 +2407,435 @@ class TestWhenTheSharedDaemonLetsGo:
                     await adapter.aclose()
 
         assert [target.session_id for target in asyncio.run(scenario())] == [THREAD]
+
+
+# -- asynchronous questions (#379) ------------------------------------------
+
+COLOUR = "Which colour should the banner be?"
+TRANSPORT = "How should it ship?"
+
+
+def asked(item_id: str, *questions: tuple[str, list[str] | None]) -> dict[str, Any]:
+    """One `request_user_input_async` call, as codex 0.154.0 completes it."""
+    return {
+        "type": "agentMessage",
+        "id": item_id,
+        "text": "\n".join(title for title, _ in questions),
+        "phase": "final_answer",
+        "memoryCitation": None,
+        "delivery": "async",
+        "questions": [{"title": title, "options": options} for title, options in questions],
+    }
+
+
+def said(text: str, item_id: str = "user-1") -> dict[str, Any]:
+    """One user message, as codex 0.154.0 completes it."""
+    return {
+        "type": "userMessage",
+        "id": item_id,
+        "clientId": None,
+        "content": [{"type": "text", "text": text, "text_elements": []}],
+    }
+
+
+async def completed(server: Codex, item: dict[str, Any]) -> None:
+    await server.notify_all("item/completed", {"threadId": THREAD, "turnId": TURN, "item": item})
+    await _settled()
+
+
+async def turn_running(server: Codex) -> None:
+    await server.notify_all("turn/started", {"threadId": THREAD, "turn": {"id": TURN}})
+    await server.notify_all(
+        "thread/status/changed",
+        {"threadId": THREAD, "status": {"type": "active", "activeFlags": []}},
+    )
+    await _settled()
+
+
+async def turn_ended(server: Codex) -> None:
+    await server.notify_all("turn/completed", {"threadId": THREAD, "turn": {"id": TURN}})
+    await server.notify_all(
+        "thread/status/changed", {"threadId": THREAD, "status": {"type": "idle"}}
+    )
+    await _settled()
+
+
+def texts_sent(server: Codex, method: str) -> list[str]:
+    return [call["input"][0]["text"] for call in server.calls_to(method)]
+
+
+class TestAsyncQuestions:
+    def test_a_question_asked_mid_turn_stops_the_session_on_it(self, socket_path: Path) -> None:
+        """The Session keeps working, and the user is still asked now rather than at the end."""
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    before = adapter.question_answerable(TARGET)
+                    await completed(server, asked("call_1", (COLOUR, ["red", "green"])))
+                    return before, adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        before, after = asyncio.run(scenario())
+
+        assert (before, after) == (False, True)
+        (stopped,) = sink.of(SessionStopped)
+        assert stopped.waiting_for.kind is WaitingKind.QUESTION
+        assert stopped.waiting_for.prompt == COLOUR
+        assert [option.text for option in stopped.waiting_for.options] == ["red", "green"]
+        assert stopped.waiting_for.recommendation is None
+
+    def test_a_message_carrying_no_questions_changes_nothing(self, socket_path: Path) -> None:
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    await completed(
+                        server,
+                        {
+                            "type": "agentMessage",
+                            "id": "msg_1",
+                            "text": "Which file? I will look.",
+                            "phase": "commentary",
+                            "delivery": None,
+                            "questions": None,
+                        },
+                    )
+                    await completed(server, asked("call_empty"))
+                    return adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is False
+        assert sink.of(SessionStopped) == []
+
+    def test_each_new_question_stops_again_with_every_question_held(
+        self, socket_path: Path
+    ) -> None:
+        """Merged the way a Claude call with several questions is: titles joined, options flat."""
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red", "green"])))
+                    await completed(server, asked("call_2", (TRANSPORT, None)))
+                    # The same item delivered twice is still one question.
+                    await completed(server, asked("call_2", (TRANSPORT, None)))
+                finally:
+                    await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        first, second = sink.of(SessionStopped)
+        assert first.waiting_for.prompt == COLOUR
+        assert second.waiting_for.prompt == f"{COLOUR}\n{TRANSPORT}"
+        assert [option.text for option in second.waiting_for.options] == ["red", "green"]
+
+    def test_a_turn_ending_under_an_announced_question_asks_nothing_twice(
+        self, socket_path: Path
+    ) -> None:
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    await turn_ended(server)
+                    return adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is True, "a turn ending answers no question"
+        (stopped,) = sink.of(SessionStopped)
+        assert stopped.waiting_for.kind is WaitingKind.QUESTION
+
+    def test_a_question_read_from_history_rides_the_turn_end_stop(self, socket_path: Path) -> None:
+        """An engine restarted mid-turn was never told; the turn ending is where it is."""
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script(status="active") as server:
+                server.progress_items = [
+                    said("go"),
+                    asked("call_1", (COLOUR, ["red", "green"])),
+                    {"type": "agentMessage", "id": "msg_2", "text": "I asked about the colour."},
+                ]
+                adapter = await watching(server, sink)
+                try:
+                    answerable = adapter.question_answerable(TARGET)
+                    await turn_ended(server)
+                    return answerable
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is True
+        (stopped,) = sink.of(SessionStopped)
+        assert stopped.waiting_for.kind is WaitingKind.QUESTION
+        assert stopped.waiting_for.prompt == COLOUR
+
+    def test_questions_answered_in_history_are_not_held(self, socket_path: Path) -> None:
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                server.progress_items = [
+                    asked("call_1", (COLOUR, ["red"])),
+                    said(f"> {COLOUR}\n\nred", item_id="user-2"),
+                ]
+                adapter = await watching(server, Sink())
+                try:
+                    return adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is False
+
+    def test_an_answer_ends_only_the_questions_it_quotes(self, socket_path: Path) -> None:
+        """Answered in the TUI: nothing is raised, and the Session is no longer asking that."""
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"]), (TRANSPORT, None)))
+                    await completed(server, said(f"> {COLOUR}\n\nred"))
+                    held = adapter.question_answerable(TARGET)
+                    await adapter.answer_relay(TARGET, "by train", request_id=rid())
+                    return held, server
+                finally:
+                    await adapter.aclose()
+
+        held, server = asyncio.run(scenario())
+
+        assert held is True
+        assert texts_sent(server, "turn/steer") == [f"> {TRANSPORT}\n\nby train"]
+        assert len(sink.of(SessionStopped)) == 1, "a question leaving raises nothing"
+
+    def test_anything_else_the_user_sends_ends_every_question(self, socket_path: Path) -> None:
+        """Codex 0.155's own rule: a new prompt clears the questions still pending."""
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"]), (TRANSPORT, None)))
+                    await completed(server, said("> a quote of my own\nstop and use blue"))
+                    held = adapter.question_answerable(TARGET)
+                    await turn_ended(server)
+                    return held
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is False
+        _, at_turn_end = sink.of(SessionStopped)
+        assert at_turn_end.waiting_for.kind is WaitingKind.NONE
+
+    def test_an_answer_naming_an_option_sends_it_as_codex_wrote_it(self, socket_path: Path) -> None:
+        """Idle: the answer starts the next turn, framed as the TUI frames one."""
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, Sink())
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["Sea Green", "red"])))
+                    await turn_ended(server)
+                    receipt = await adapter.answer_relay(TARGET, "  sea   green ", request_id=rid())
+                    return receipt, server, adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        receipt, server, still_held = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        assert texts_sent(server, "turn/start") == [f"> {COLOUR}\n\nSea Green"]
+        assert server.calls_to("turn/steer") == []
+        assert still_held is False
+
+    def test_an_answer_mid_turn_is_steered_in_now_verbatim(self, socket_path: Path) -> None:
+        """Running: the words go into the turn at work, even when Core asked to deliver."""
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, Sink())
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    receipt = await adapter.answer_relay(
+                        TARGET, "whatever matches the logo", request_id=rid()
+                    )
+                    return receipt, server, adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        receipt, server, still_held = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.DELIVERED
+        (steer,) = server.calls_to("turn/steer")
+        assert steer["expectedTurnId"] == TURN
+        assert steer["clientUserMessageId"] == "r-1"
+        assert texts_sent(server, "turn/steer") == [f"> {COLOUR}\n\nwhatever matches the logo"]
+        assert server.calls_to("turn/start") == []
+        assert still_held is False
+
+    def test_several_questions_get_the_words_whole_under_every_title(
+        self, socket_path: Path
+    ) -> None:
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, Sink())
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    await completed(server, asked("call_2", (TRANSPORT, ["train"])))
+                    await adapter.answer_relay(TARGET, "red", request_id=rid())
+                    return server, adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        server, still_held = asyncio.run(scenario())
+
+        assert texts_sent(server, "turn/steer") == [f"> {COLOUR}\n> {TRANSPORT}\n\nred"]
+        assert still_held is False
+
+    def test_an_answer_that_did_not_land_leaves_the_question_held(self, socket_path: Path) -> None:
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                server.readback_shows_words = False
+                adapter = await watching(server, Sink())
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    receipt = await adapter.answer_relay(TARGET, "red", request_id=rid())
+                    return receipt, adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        receipt, still_held = asyncio.run(scenario())
+
+        assert receipt.outcome is Delivery.UNKNOWN
+        assert still_held is True
+
+    def test_words_with_no_question_held_go_as_they_were(self, socket_path: Path) -> None:
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, Sink())
+                try:
+                    await adapter.answer_relay(TARGET, "ship it", request_id=rid())
+                    return server
+                finally:
+                    await adapter.aclose()
+
+        assert texts_sent(asyncio.run(scenario()), "turn/start") == ["ship it"]
+
+    def test_a_session_ending_ends_its_questions(self, socket_path: Path) -> None:
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, Sink())
+                try:
+                    await turn_running(server)
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    await server.notify_all("thread/closed", {"threadId": THREAD})
+                    await _settled()
+                    return adapter.question_answerable(TARGET)
+                finally:
+                    await adapter.aclose()
+
+        assert asyncio.run(scenario()) is False
+
+    def test_a_question_asked_behind_a_dialog_is_told_once_the_dialog_is_gone(
+        self, socket_path: Path
+    ) -> None:
+        sink = Sink()
+
+        async def scenario():
+            async with Codex(socket_path).script() as server:
+                adapter = await watching(server, sink)
+                try:
+                    await turn_running(server)
+                    wire_id = await server.ask_all(
+                        APPROVAL, {"threadId": THREAD, "command": "make"}
+                    )
+                    await _settled()
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    behind = [stop.waiting_for.kind for stop in sink.of(SessionStopped)]
+                    await server.notify_all(
+                        "serverRequest/resolved", {"threadId": THREAD, "requestId": wire_id}
+                    )
+                    await _settled()
+                    return behind
+                finally:
+                    await adapter.aclose()
+
+        behind = asyncio.run(scenario())
+
+        assert behind == [WaitingKind.PERMISSION]
+        assert [stop.waiting_for.kind for stop in sink.of(SessionStopped)] == [
+            WaitingKind.PERMISSION,
+            WaitingKind.QUESTION,
+        ]
+
+
+class TestAsyncQuestionsOnTheRoster:
+    def row(self, lane) -> Any:
+        return next(row for row in lane.rows if row.target.session_id == THREAD)
+
+    def test_the_row_waits_on_the_question_and_runs_again_once_it_is_answered(
+        self, socket_path: Path
+    ) -> None:
+        async def scenario():
+            async with Codex(socket_path).script(status="active") as server:
+                sink = Sink()
+                adapter = await joined(server, sink)
+                try:
+                    await adapter.discover()
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    asking = self.row(await adapter.discover())
+                    answerable = adapter.question_answerable(asking.target)
+                    await completed(server, said(f"> {COLOUR}\n\nred"))
+                    answered = self.row(await adapter.discover())
+                    return asking, answerable, answered, sink.of(SessionStopped)
+                finally:
+                    await adapter.aclose()
+
+        asking, answerable, answered, stops = asyncio.run(scenario())
+
+        assert asking.state is SessionState.WAITING
+        assert asking.waiting_for == stops[0].waiting_for
+        assert answerable is True
+        assert answered.state is SessionState.RUNNING
+        assert answered.waiting_for.kind is WaitingKind.NONE
+        assert len(stops) == 1, "a question leaving raises nothing"
+
+    def test_a_dialog_is_what_the_row_shows_while_both_are_up(self, socket_path: Path) -> None:
+        async def scenario():
+            async with Codex(socket_path).script(status="active") as server:
+                sink = Sink()
+                adapter = await joined(server, sink)
+                try:
+                    await adapter.discover()
+                    await completed(server, asked("call_1", (COLOUR, ["red"])))
+                    await server.ask_all(APPROVAL, {"threadId": THREAD, "command": "make"})
+                    await _until_row_has_a_dialog(adapter)
+                    return self.row(await adapter.discover())
+                finally:
+                    await adapter.aclose()
+
+        row = asyncio.run(scenario())
+
+        assert row.state is SessionState.WAITING
+        assert row.waiting_for.kind is WaitingKind.PERMISSION

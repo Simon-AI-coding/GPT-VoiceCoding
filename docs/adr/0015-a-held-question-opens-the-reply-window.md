@@ -150,3 +150,43 @@ Not changed here: until its timeout, a hook whose question was answered on scree
 between that answer and the Session's next question it remains the Session's newest held question.
 The Answer Relay also requires the Roster Brief to show the Session waiting on a question, which it
 stops doing once the Session moves on.
+
+## Amendment — Codex asks too (2026-09-17)
+
+Source: [#379](https://github.com/Simon-AI-coding/GPT-VoiceCoding/issues/379).
+
+"Codex has no question hook and returns false" no longer holds. Codex 0.154 lets a model ask with
+`request_user_input_async` and keep working: the question reaches every subscribed client as a
+completed `agentMessage` carrying `questions` (`[{title, options}]`), and its answer is an ordinary
+user message framed the way the TUI frames one, `> {title}\n\n{answer}`. There is no hook to hold
+and no verb to answer with, so the Codex lane's route is that message itself.
+
+`question_answerable` is true while a watched thread holds such a question. A question is held from
+the item that asked it until a user message quotes its title in that frame, a user message that is
+not an answer arrives (codex 0.155's own rule for the TUI panel), or the Session ends. A turn ending
+does not end it. The lane rebuilds what is held from the history `thread/resume` returns, so a
+restart loses nothing.
+
+Everything else is the existing structure. Each new question raises one `SessionStopped` with
+`WaitingFor(kind=QUESTION)` — the permission dialog's shape (#191) — and a turn ending under
+questions already announced raises nothing new; the roster row and the Stop read one projection,
+and a pending dialog wins it. Several held questions merge as a Claude call with several does:
+titles joined, options flattened, no recommendation. An Answer Relay into such a thread is the
+answer whatever route Core chose. One question: words naming an offered option (ignoring case and
+spacing) become that option as written, anything else is sent verbatim. Several: the words go
+whole under one quoted line per title, and the Session splits them (measured twice, #379). The
+words go into the running turn with `turn/steer` when there is one, and start the next turn
+otherwise. Delivery proof is still the `clientUserMessageId` readback, and a delivered answer ends
+the questions it framed.
+
+A question that arrives while a permission dialog is up is announced once the dialog is gone.
+Questions rebuilt from history after a restart are shown on the row at once and announced when the
+turn ends, not at the restart itself: a question skipped in the TUI leaves no trace, so announcing
+history on every restart would ring again for questions the user already dismissed.
+
+No legacy behaviour to port (ADR 0010): legacy never read a Codex thread's items and never answered
+a Codex question remotely, so this route is **new**.
+
+Accepted limits: the TUI's own question panel is not cleared by an answer from here (codex offers
+no way to; openai/codex#46169), a question skipped in the TUI leaves no trace, and two questions
+with the same title cannot be told apart.

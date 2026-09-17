@@ -13,7 +13,7 @@ I usually have several Claude Code and Codex sessions running, and when one stop
 out which one and what it stopped on, then keep it going in plain language: by talking it through
 with GPT-Live, or by replying on Telegram.
 
-https://github.com/user-attachments/assets/a0ea108c-8c5b-45a1-b966-877a05650c65
+https://github.com/user-attachments/assets/9872344a-6f28-41c1-a818-b218610a90b9
 
 One voice call covers every Claude Code and Codex session on your Mac, and each answer goes back
 to the session it was meant for. The call uses OpenAI's GPT-Live voice model through

@@ -340,8 +340,15 @@ class CodexAgentAdapter:
         return watched.reply_window
 
     def question_answerable(self, target: SessionTarget) -> bool:
-        """Codex exposes no held question-answer route."""
-        return False
+        """Whether this Session has an asynchronous question still waiting (#379).
+
+        The route is an ordinary user message framed as the TUI frames an
+        answer, so it stays open for as long as the question is held — a turn
+        ending does not close it. Read the way `reply_window` is: a target this
+        adapter does not watch has nothing it could answer.
+        """
+        watched = self._threads.get(target)
+        return watched is not None and bool(watched.questions)
 
     async def forget_session(self, target: SessionTarget) -> None:
         """Stop watching one Session. The Session itself is left running.
@@ -640,7 +647,7 @@ class CodexAgentAdapter:
         `20260905T092046Z` held that shape for 92 consecutive polls. One rule in
         one place: wherever the dialog is read, it decides the state.
         """
-        waiting = _dialog_waiting(self._threads.get(row.target))
+        waiting = _waiting_on(self._threads.get(row.target))
         if waiting is None:
             return row
         return replace(row, waiting_for=waiting, state=waiting.stopped_state)
@@ -823,6 +830,7 @@ class CodexAgentAdapter:
             return _failed(request_id, f"the verdict could not be sent: {unreachable}")
 
         watched.pending.pop(request.approval_id, None)
+        self._asked_async(watched)
         if await self._resolution_seen(pending.wire_id):
             return DeliveryReceipt(request_id=request_id, outcome=Delivery.DELIVERED)
         return DeliveryReceipt(
@@ -883,9 +891,30 @@ class CodexAgentAdapter:
                 f"{watched.subscribe_blocked}",
             )
 
+        if watched.questions:
+            return await self._answer(watched, text, request_id=request_id)
         if route is RelayRoute.SUPPLEMENT:
             return await self._steer(watched, text, request_id=request_id)
         return await self._start_turn(watched, text, request_id=request_id)
+
+    async def _answer(
+        self, watched: WatchedThread, text: str, *, request_id: RequestId
+    ) -> DeliveryReceipt:
+        """The user's words as the answer to what this thread is asking (#379).
+
+        Every Relay into a thread holding a question is its answer, whichever
+        route Core chose — the same rule a held Claude question has. The words
+        go now: into the running turn if there is one, which is the point of a
+        question that did not stop the work, and as the next turn otherwise.
+        """
+        message, answering = watched.questions.answer(text)
+        if watched.reply_window is ReplyWindow.CLOSED and watched.active_turn_id is not None:
+            receipt = await self._steer(watched, message, request_id=request_id)
+        else:
+            receipt = await self._start_turn(watched, message, request_id=request_id)
+        if receipt.is_delivered:
+            watched.questions.settle(answering)
+        return receipt
 
     async def _start_turn(
         self, watched: WatchedThread, text: str, *, request_id: RequestId
@@ -1030,6 +1059,11 @@ class CodexAgentAdapter:
         watched.subscribed = True
         watched.subscribe_blocked = ""
         watched.read_routing(echo)
+        # The notifications before this subscription never reached us, and the
+        # history that came back is what they said (#379).
+        watched.questions.replay(thread)
+        if watched.active_turn_id is None:
+            watched.active_turn_id = _running_turn(thread)
         self._note_status(watched, thread.get("status"))
 
     async def _read_routing_back(self, watched: WatchedThread) -> None:
@@ -1104,6 +1138,9 @@ class CodexAgentAdapter:
                 watched.active_turn_id = turn.get("id") if isinstance(turn, dict) else None
             case "turn/completed":
                 watched.active_turn_id = None
+            case "item/completed":
+                if watched.questions.heard(params.get("item")):
+                    self._asked_async(watched)
             case "thread/settings/updated":
                 settings = params.get("threadSettings")
                 if isinstance(settings, dict):
@@ -1153,6 +1190,28 @@ class CodexAgentAdapter:
         watched.stopped_on_dialog = request.approval_id
         self._spawn(self._emit_stopped(watched, waiting_for, turn_revision=watched.turn_revision))
 
+    def _asked_async(self, watched: WatchedThread) -> None:
+        """A new asynchronous question: the Session stops on it, and keeps working (#379).
+
+        The Codex lane's second fold into the Stop's wait, and the permission
+        dialog's shape (#191): the question arriving is the event, because the
+        thread stays `active` and no status change will ever say it. Each new
+        question raises one Stop carrying every question held. A question
+        *leaving* — answered here, in the TUI, or overtaken by other words —
+        raises nothing; the next reading of the row says it.
+
+        A dialog already up has stopped this Session on something the user must
+        answer first, so the question waits behind it: the row shows the dialog
+        (`_waiting_on`), and the question is announced once the dialog is gone.
+        """
+        if _dialog_waiting(watched) is not None:
+            return
+        waiting_for = watched.questions.to_announce()
+        if waiting_for is not None:
+            self._spawn(
+                self._emit_stopped(watched, waiting_for, turn_revision=watched.turn_revision)
+            )
+
     def _retire_resolved(self, watched: WatchedThread, wire_id: Any) -> None:
         """Drop a prompt somebody else answered, so no verdict lands on a closed one."""
         for approval_id, pending in list(watched.pending.items()):
@@ -1165,6 +1224,8 @@ class CodexAgentAdapter:
                     # the Stop this thread takes when its turn ends is free to
                     # be its own again.
                     watched.stopped_on_dialog = None
+        # A question that arrived behind the dialog is told now (#379).
+        self._asked_async(watched)
 
     def _note_status(self, watched: WatchedThread, status: Any) -> None:
         """Map a thread status onto the Reply Window, and onto having stopped.
@@ -1204,10 +1265,20 @@ class CodexAgentAdapter:
                 # turn ending under it changes nothing the user has not been
                 # told, and a second Stop is the same decision asked twice.
                 return
-            waiting_for = dialog or (
-                WaitingFor(kind=WaitingKind.UNKNOWN, caught_up=False)
-                if kind == "systemError"
-                else WaitingFor()
+            asking = None if dialog is not None else watched.questions.to_announce()
+            if dialog is None and asking is None and watched.questions:
+                # One question, one event (#379), for the dialog's reason: the
+                # user was told when it was asked, and the turn ending under it
+                # asks nothing new.
+                return
+            waiting_for = (
+                dialog
+                or asking
+                or (
+                    WaitingFor(kind=WaitingKind.UNKNOWN, caught_up=False)
+                    if kind == "systemError"
+                    else WaitingFor()
+                )
             )
             self._spawn(
                 self._emit_stopped(
@@ -1281,6 +1352,7 @@ class CodexAgentAdapter:
         self._threads.pop(watched.target, None)
         watched.subscribed = False
         watched.pending.clear()
+        watched.questions.clear()
         self._emit(SessionEnded(target=watched.target, detail=detail))
 
     async def _resubscribe(self, watched: WatchedThread) -> None:
@@ -1375,6 +1447,32 @@ def _dialog_waiting(watched: WatchedThread | None) -> WaitingFor | None:
         approval_id=request.approval_id,
         options=tuple(Option(text=one) for one in request.options),
     )
+
+
+def _waiting_on(watched: WatchedThread | None) -> WaitingFor | None:
+    """What one thread is waiting on the user for: its dialog first, then its questions.
+
+    The one projection the roster row and the Stop both read (#379), so they
+    cannot describe one thread differently. A dialog wins because the turn
+    cannot go on until it is answered.
+    """
+    if watched is None:
+        return None
+    return _dialog_waiting(watched) or watched.questions.waiting()
+
+
+def _running_turn(thread: Any) -> str | None:
+    """The turn a resumed thread is in the middle of, by its own history.
+
+    `turn/started` names it for a turn begun after the subscription; this is
+    the one begun before, which an answer steered into it has to name.
+    """
+    turns = thread.get("turns") if isinstance(thread, dict) else None
+    last = turns[-1] if isinstance(turns, list) and turns else None
+    if not isinstance(last, dict) or last.get("status") != "inProgress":
+        return None
+    turn_id = last.get("id")
+    return turn_id if isinstance(turn_id, str) else None
 
 
 def _failed(request_id: RequestId, reason: str) -> DeliveryReceipt:

@@ -195,7 +195,7 @@ def _entry(item: Any, *, ordinal: int, turn_id: str | None) -> ProgressEntry | N
             turn_id=turn_id,
         )
     if kind == USER_ITEM:
-        return _said(ordinal, ProgressRole.USER, _user_text(item.get("content")), turn_id=turn_id)
+        return _said(ordinal, ProgressRole.USER, user_text(item.get("content")), turn_id=turn_id)
     return None
 
 
@@ -223,7 +223,7 @@ def _turn_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _user_text(content: Any) -> str:
+def user_text(content: Any) -> str:
     """The words in one `userMessage`, and nothing else it carried."""
     if not isinstance(content, list):
         return ""

@@ -23,6 +23,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from gpt_voicecoding.adapters.agent.codex.async_questions import HeldQuestions
 from gpt_voicecoding.adapters.codex_app_server.wire import AppServerConnection
 from gpt_voicecoding.seams.agent import ApprovalRequest, ReplyWindow
 from gpt_voicecoding.seams.identity import SessionTarget
@@ -104,6 +105,9 @@ class WatchedThread:
     #: fact said twice — which is the user asked twice for one decision. A
     #: different dialog, or none, is not this handle and stops as usual.
     stopped_on_dialog: str | None = None
+    #: The asynchronous questions this thread asked and has not had answered
+    #: (#379), read off its items and its history.
+    questions: HeldQuestions = field(default_factory=HeldQuestions)
     #: Whether the terminal that vouched for this thread is a controlling one
     #: (#319). Carried rather than read here: the fact belongs to the process
     #: table and the composition rule is what joined it to this thread

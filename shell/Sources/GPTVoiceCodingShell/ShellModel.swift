@@ -649,7 +649,9 @@ final class ShellModel {
 
     private func synchronizePolling() {
         if !cardVisible { updateLamp() }
-        guard !stopping, windowOpen || cardVisible else {
+        // Duty can change through the engine while both desktop surfaces are hidden.
+        // Keep status reads alive so an external Duty-on can show the Lamp again.
+        guard !stopping else {
             poller?.cancel()
             poller = nil
             readInFlight?.cancel()
@@ -688,7 +690,9 @@ final class ShellModel {
                 lastStatusRead = time
                 group.addTask { await self.refreshStatus() }
             }
-            if lastBriefRead.map({ time - $0 >= Self.briefInterval }) ?? true {
+            if windowOpen || cardVisible,
+                lastBriefRead.map({ time - $0 >= Self.briefInterval }) ?? true
+            {
                 lastBriefRead = time
                 group.addTask { await self.panel.refreshRoster() }
             }

@@ -1329,7 +1329,7 @@ import Testing
         await shell.model.stopEngine()
     }
 
-    @Test func onePollerFollowsVisibilityAndSharesTheTwoSecondBriefRead() async throws {
+    @Test func onePollerFollowsVisibilityButStillDetectsExternalDutyOn() async throws {
         let fixture = try TelegramCredentialFixture()
         let engine = DesktopControlPlane()
         let clock = DesktopClock()
@@ -1371,12 +1371,41 @@ import Testing
         clock.advance()
         #expect(await waitUntil { !model.cardVisible && engine.requests.count == 9 })
         await model.readInFlight?.value
-        // Cancellation does not resume the test clock's parked continuation.
+        clock.advance()
+        #expect(await waitUntil { clock.waiting })
+        await model.readInFlight?.value
+        #expect(engine.requests.count == 9)
+        clock.advance()
+        #expect(await waitUntil { clock.waiting && engine.requests.count == 10 })
+        await model.readInFlight?.value
+        #expect(engine.requests.last == "status")
+        #expect(!model.cardVisible)
+        #expect(!model.windowOpen)
+        let briefsWhileHidden = engine.requests.filter { $0 == "brief" }.count
+
+        // The engine changes independently, as with bridgectl or another surface.
+        engine.duty = true
+        clock.advance()
+        #expect(await waitUntil { clock.waiting })
+        await model.readInFlight?.value
+        clock.advance()
+        #expect(await waitUntil { clock.waiting && model.cardVisible })
+        await model.readInFlight?.value
+        #expect(!model.windowOpen)
+        #expect(engine.requests.filter { $0 == "brief" }.count == briefsWhileHidden)
+        clock.advance()
+        #expect(
+            await waitUntil {
+                clock.waiting
+                    && engine.requests.filter { $0 == "brief" }.count == briefsWhileHidden + 1
+            })
+        await model.readInFlight?.value
+
+        await model.stopEngine()
+        let requestsAtShutdown = engine.requests.count
         clock.advance()
         await Task.yield()
-        #expect(engine.requests.count == 9)
-        #expect(clock.delays == Array(repeating: .seconds(1), count: 7))
-        await model.stopEngine()
+        #expect(engine.requests.count == requestsAtShutdown)
     }
 
     @Test func appKitInitializerIsAnObjectiveCEntryPoint() {

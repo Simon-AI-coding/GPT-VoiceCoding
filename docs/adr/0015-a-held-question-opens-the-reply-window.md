@@ -127,3 +127,26 @@ Unchanged: an answer is still not a fourth `ApprovalVerdict` kind at the seam (#
 `approval_ack` is still the only positive delivery proof, and a late answer is still refused rather
 than falling through to the inbox. `PROVEN_AGAINST_VERSION` stays where it is; this was a measurement
 of the answer shape, not a re-measurement of the whole route.
+
+## Amendment — one key per held hook (2026-09-17)
+
+The listener keyed a held question by Claude's `prompt_id` when one was supplied. That id names the
+user's turn, not the question: three `AskUserQuestion` calls asked in one turn on 2026-09-17 all
+arrived as `bce91fde…`. Each hook also stays parked until its installed 600-second timeout even
+after its question is answered on screen — the log shows every held hook ending exactly 600 s after
+it was parked. So the first question's hook ended at 12:26:34 while the third was still held, its
+cleanup removed the shared key's entry — which by then was the third question's — and closed the
+Reply Window, and two Telegram answers at 12:27 and 12:28 were refused as no longer answerable
+although the third hook stayed parked until 12:34:43.
+
+The listener now mints its own key for every held connection, whatever the wire carries.
+`WaitingFor.approval_id` still reports the `prompt_id` exactly as supplied, and the logs name it
+beside the key. A hook that ends without a verdict closes the Session's question route only when no
+other question of that Session is still held; hooks end in the order they were parked, so the one
+still held is the newer. This supersedes the rule above that a minted correlator is used only when
+`prompt_id` is absent.
+
+Not changed here: until its timeout, a hook whose question was answered on screen is still held, so
+between that answer and the Session's next question it remains the Session's newest held question.
+The Answer Relay also requires the Roster Brief to show the Session waiting on a question, which it
+stops doing once the Session moves on.

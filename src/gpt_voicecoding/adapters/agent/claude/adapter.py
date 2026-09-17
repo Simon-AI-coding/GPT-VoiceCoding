@@ -1026,8 +1026,8 @@ class ClaudeAgentAdapter:
            usually answered it. The hook's question is the thing itself and the
            record's is a reconstruction of it, so the hook wins whether the two
            name the same prompt or different ones. #128 addresses the held writer
-           through the Answer Relay, with Claude's `prompt_id` when supplied or
-           a listener-private correlator otherwise.
+           through the Answer Relay, by a listener-private key per held
+           connection; Claude's `prompt_id` is shared by a turn's questions.
         1. **A readable question wins outright.** The reference implementation's
            precedence — a decision only the user can supply outranks a permission
            call beside it (`legacy@1d32845:bridge/transcript.py:1691-1692`) — and

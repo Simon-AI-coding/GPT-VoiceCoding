@@ -89,7 +89,7 @@ struct DutyCardView: View {
             shell.text(.waitingCount, shell.panel.counts.waiting) + ", "
                 + shell.text(.finishedCount, shell.panel.counts.finished)
         )
-        .accessibilityAction { shell.toggleLampActions() }
+        .accessibilityAction { shell.toggleControlPanel() }
     }
 
     private var phaseCopy: Copy {
@@ -220,12 +220,12 @@ struct LampActionsView: View {
                             || !shell.panel.engineReachable)
                 divider
                 action(.home) {
-                    shell.open(.home, fromLamp: true)
+                    shell.open(.home)
                     shell.dismissLampActions()
                 }
                 divider
                 action(.settings) {
-                    shell.open(.settings(.voice), fromLamp: true)
+                    shell.open(.settings(.voice))
                     shell.dismissLampActions()
                 }
             }
@@ -312,7 +312,7 @@ struct LampBubbleView: View {
                     Text(shell.text(.lampEngineDown)).font(Phosphor.prose).foregroundStyle(
                         Phosphor.secondary)
                     Button(shell.text(.diagnostics)) {
-                        shell.open(.settings(.diagnostics), fromLamp: true)
+                        shell.open(.settings(.diagnostics))
                     }
                     .font(Phosphor.small).buttonStyle(PlainHandButton()).foregroundStyle(
                         Phosphor.accent

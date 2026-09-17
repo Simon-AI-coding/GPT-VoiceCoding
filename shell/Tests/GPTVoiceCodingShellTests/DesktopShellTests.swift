@@ -38,18 +38,15 @@ import Testing
         #expect(oversized.height == screen.height)
     }
 
-    @Test func controlWindowLeavesItsMeasuredContentBelowTheTitleBar() {
-        let style: NSWindow.StyleMask = [
-            .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
-        ]
-        let contentHeight: CGFloat = 350
-        let frameHeight = ControlWindow.frameHeight(
-            contentHeight: contentHeight, styleMask: style)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: frameHeight),
-            styleMask: style, backing: .buffered, defer: true)
-
-        #expect(window.contentLayoutRect.height == contentHeight)
+    @Test func controlWindowContentCoversTheWholeWindowFromItsTopEdge() throws {
+        let content = GrowingContent()
+        let control = ControlWindow(content: GrowingView(content: content))
+        defer { control.dismiss() }
+        control.present(anchor: nil, screen: nil)
+        let scroll = try #require(control.window.contentView as? NSScrollView)
+        #expect(scroll.contentInsets.top == 0)
+        #expect(scroll.frame.height == control.window.frame.height)
+        #expect(scroll.documentView?.frame.height == control.window.frame.height)
     }
 
     @Test func controlWindowFollowsContentThatGrowsAndShrinksWhileShown() async {
@@ -57,11 +54,11 @@ import Testing
         let control = ControlWindow(content: GrowingView(content: content))
         defer { control.dismiss() }
         control.present(anchor: nil, screen: nil)
-        #expect(control.window.contentLayoutRect.height == 100)
+        #expect(control.window.frame.height == 100)
         content.rows = 6
-        #expect(await waitUntil { control.window.contentLayoutRect.height == 300 })
+        #expect(await waitUntil { control.window.frame.height == 300 })
         content.rows = 3
-        #expect(await waitUntil { control.window.contentLayoutRect.height == 150 })
+        #expect(await waitUntil { control.window.frame.height == 150 })
     }
 
     @Test func controlWindowOpensAtTheHeightItsContentReachedWhileHidden() {
@@ -70,7 +67,7 @@ import Testing
         defer { control.dismiss() }
         content.rows = 5
         control.present(anchor: nil, screen: nil)
-        #expect(control.window.contentLayoutRect.height == 250)
+        #expect(control.window.frame.height == 250)
     }
 
     @Test func aStaleLoginItemIsPresentedAsPlacedInsteadOfFailed() {
@@ -116,6 +113,22 @@ import Testing
         )
         #expect(
             !DesktopWindows.containsReadingPoint(NSPoint(x: 224, y: 396), lamp: lamp, bubble: nil))
+    }
+
+    @Test func theReadingRegionKeepsTravelOntoTheStripAndAcrossItsGap() {
+        let lamp = NSRect(x: 228, y: 400, width: 72, height: 26)
+        let actions = NSRect(x: 20, y: 400, width: 200, height: 26)
+        for point in [NSPoint(x: 21, y: 410), NSPoint(x: 224, y: 413), NSPoint(x: 219, y: 401)] {
+            #expect(
+                DesktopWindows.containsReadingPoint(
+                    point, lamp: lamp, actions: actions, bubble: nil))
+            #expect(!DesktopWindows.containsReadingPoint(point, lamp: lamp, bubble: nil))
+        }
+        for point in [NSPoint(x: 19, y: 410), NSPoint(x: 100, y: 427), NSPoint(x: 100, y: 399)] {
+            #expect(
+                !DesktopWindows.containsReadingPoint(
+                    point, lamp: lamp, actions: actions, bubble: nil))
+        }
     }
 
     @Test func missingNamesAreLocalisedButCoreStateWordsAreNot() {

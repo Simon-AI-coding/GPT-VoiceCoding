@@ -73,6 +73,7 @@ from gpt_voicecoding.seams.connection import Connectable
 from gpt_voicecoding.seams.control_plane import Action
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import AgentKind, new_request_id
+from gpt_voicecoding.usage_ledger import UsageLedger
 
 _log = logging.getLogger(__name__)
 
@@ -506,6 +507,9 @@ def _adapters(
         configuration — so it travels like `progress_capture` does: known before
         construction, and therefore an argument to it. A second key under
         `[adapters.settings.call]` would be the same number written twice.
+
+        The usage ledger (#377) is handed over the same way: it is written beside
+        the state file, in the engine's own directory, and always on.
         """
         factory = factory_of(reference)
         settings = config.adapters.settings_for(seam)
@@ -515,6 +519,7 @@ def _adapters(
         if seam == "call":
             arguments["delegated_turn_model"] = config.delegated_turn_model
             arguments["delegated_turn_effort"] = config.delegated_turn_effort
+            arguments["usage_ledger"] = UsageLedger(config.state_path.parent)
         if settings is not None:
             arguments["settings"] = settings
         try:

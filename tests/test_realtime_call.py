@@ -32,6 +32,7 @@ import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,7 @@ from gpt_voicecoding.seams.control_plane import Action, Request
 from gpt_voicecoding.seams.delivery import Delivery
 from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyOutcome
+from gpt_voicecoding.usage_ledger import UsageLedger
 from realtime_fake import (
     ANSWER_SDP,
     OFFER_SDP,
@@ -207,6 +209,7 @@ async def riding(
     cue_player: FakeCueOutput | None = None,
     delegated_turn_model: str = DELEGATED_MODEL,
     delegated_turn_effort: str | None = None,
+    usage_ledger: UsageLedger | None = None,
 ) -> tuple[RealtimeCallAdapter, FakeTransport]:
     """An adapter wired to a scripted app-server, exactly as the root wires it."""
     audio = transport or FakeTransport()
@@ -217,6 +220,7 @@ async def riding(
         settings=settings or quick(),
         transport_factory=lambda: audio,
         cue_player=cue_player or FakeCueOutput(),
+        usage_ledger=usage_ledger,
     )
     shared = SharedAppServer(connection=None)
     connection = await attach(
@@ -3402,6 +3406,7 @@ class _PlayoutSeam:
         made = object.__new__(webrtc._WebRtcTransport)
         made._speaker = speaker
         made._events_seen = set()
+        made._on_event = None
         return made
 
     def line(self, caplog: Any) -> str:
@@ -3795,6 +3800,54 @@ class TestWhatClosesTheVoicesSpan(_PlayoutSeam):
 
         said = [line.getMessage() for line in caplog.records]
         assert [line for line in said if "carried" in line] == []
+
+    def test_every_server_event_on_the_channel_is_handed_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#377: the Voice's usage arrives here and nowhere else, so it has to go up."""
+        speaker, clock = self.speaker(monkeypatch)
+        self.heard(speaker, [0.02] * 3, clock)
+        transport = self.transport(speaker)
+        handed: list[dict[str, Any]] = []
+        transport.on_event(handed.append)
+
+        usage = '{"type": "session.usage.updated", "usage": {"audio_duration_ms": 14400}}'
+        transport._read_channel_event(usage)
+        transport._read_channel_event(usage.encode())
+
+        assert handed == [json.loads(usage)] * 2
+
+    def test_what_is_not_an_event_on_the_channel_is_not_handed_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        speaker, clock = self.speaker(monkeypatch)
+        self.heard(speaker, [0.02] * 3, clock)
+        transport = self.transport(speaker)
+        handed: list[dict[str, Any]] = []
+        transport.on_event(handed.append)
+
+        for message in ("not json", "[1, 2]", '{"event_id": "e1"}', '{"type": 7}', 42):
+            transport._read_channel_event(message)
+
+        assert handed == []
+
+    def test_a_handler_that_raises_does_not_stop_the_channel(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        speaker, clock = self.speaker(monkeypatch)
+        self.heard(speaker, [0.02] * 3, clock)
+        transport = self.transport(speaker)
+
+        def refuse(_event: dict[str, Any]) -> None:
+            raise RuntimeError("the handler broke")
+
+        transport.on_event(refuse)
+        with caplog.at_level(logging.INFO):
+            transport._read_channel_event('{"type": "turn.created"}')
+
+        said = [record.getMessage() for record in caplog.records]
+        assert any("carried turn.created" in line for line in said)
+        assert any("event handler raised" in line for line in said)
 
 
 #: Three real Live Calls' inbound arrival timing, recorded 2026-09-15 (#365).
@@ -4314,3 +4367,284 @@ class TestWhatTheVoiceHearsOfTheUser:
             asyncio.run(scenario())
 
         assert any("dropped 10 captured frames" in record.getMessage() for record in caplog.records)
+
+
+#: New Zealand standard time, the offset the ledger's first reader lives in.
+NZST = timezone(timedelta(hours=12))
+
+#: Codex's own shape for one `thread/tokenUsage/updated` reading.
+TOKENS = {
+    "totalTokens": 36000,
+    "inputTokens": 30000,
+    "outputTokens": 6000,
+    "reasoningOutputTokens": 2000,
+    "cachedInputTokens": 12000,
+}
+TOKEN_USAGE = {"total": TOKENS, "last": TOKENS, "modelContextWindow": 60000}
+
+#: A realtime usage event exactly as codex logged one on 2026-09-17.
+REALTIME_USAGE = {
+    "type": "session.usage.updated",
+    "usage": {"audio_duration_ms": 329400, "backend_model_usage": []},
+    "usage_limit": {"status": None, "reset_seconds": None},
+}
+
+RATE_LIMITS = {
+    "rateLimits": {
+        "primary": {"usedPercent": 75.0, "windowDurationMins": 10080, "resetsAt": 1789000000}
+    }
+}
+
+
+class _WallClock:
+    """The ledger's clock, moved by hand."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def _lines(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class TestUsageLedger:
+    """#377: what Codex work this product itself started, appended as it is reported."""
+
+    SEPTEMBER = datetime(2026, 9, 17, 9, 40, tzinfo=NZST)
+
+    def ledger(self, directory: Path, clock: _WallClock | None = None) -> UsageLedger:
+        return UsageLedger(directory, now=clock or _WallClock(self.SEPTEMBER))
+
+    def file(self, directory: Path, month: str = "2026-09") -> Path:
+        return directory / f"usage-{month}.jsonl"
+
+    def test_the_call_agents_usage_is_recorded_with_the_call(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await adapter.ensure_call(dial())
+                await server.notify_all(
+                    "thread/tokenUsage/updated",
+                    {"threadId": "thread-1", "turnId": "turn-7", "tokenUsage": TOKEN_USAGE},
+                )
+                await adapter.end_call()
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert _lines(self.file(tmp_path)) == [
+            {
+                "at": "2026-09-17T09:40:00+12:00",
+                "kind": "codex_thread",
+                "role": "call_agent",
+                "call_id": "thread-1",
+                "realtime_session_id": "rt-1",
+                "thread_id": "thread-1",
+                "turn_id": "turn-7",
+                "payload": TOKEN_USAGE,
+            }
+        ]
+
+    def test_the_voices_own_usage_is_recorded_with_the_call(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, audio = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await adapter.ensure_call(dial())
+                audio.emit(REALTIME_USAGE)
+                audio.emit({"type": "turn.done", "response_id": "r1"})
+                await adapter.end_call()
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert _lines(self.file(tmp_path)) == [
+            {
+                "at": "2026-09-17T09:40:00+12:00",
+                "kind": "realtime",
+                "call_id": "thread-1",
+                "realtime_session_id": "rt-1",
+                "thread_id": "thread-1",
+                "payload": REALTIME_USAGE,
+            }
+        ]
+
+    def test_a_fresh_delegated_turns_usage_is_recorded(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                _delegated_with_usage(server, thread_id="delegated-1")
+                adapter, _ = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await adapter.delegate(
+                    "check it", model="gpt-5", instructions=DELEGATED_RULES, request_id=rid()
+                )
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert _lines(self.file(tmp_path)) == [
+            {
+                "at": "2026-09-17T09:40:00+12:00",
+                "kind": "codex_thread",
+                "role": "delegated_turn",
+                "thread_id": "delegated-1",
+                "turn_id": "turn-1",
+                "payload": TOKEN_USAGE,
+            }
+        ]
+
+    def test_a_resumed_assistant_conversation_turns_usage_is_recorded(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                _delegated_with_usage(server, thread_id="assistant-1")
+                adapter, _ = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await adapter.delegate(
+                    "and again",
+                    model="gpt-5",
+                    instructions=DELEGATED_RULES,
+                    request_id=rid(),
+                    resume="assistant-1",
+                )
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        [line] = _lines(self.file(tmp_path))
+        assert line["role"] == "delegated_turn"
+        assert line["thread_id"] == "assistant-1"
+
+    def test_a_thread_this_adapter_is_not_running_is_not_recorded(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await adapter.ensure_call(dial())
+                await server.notify_all(
+                    "thread/tokenUsage/updated",
+                    {"threadId": "somebody-elses", "tokenUsage": TOKEN_USAGE},
+                )
+                await server.notify_all(
+                    "thread/tokenUsage/updated",
+                    {"threadId": "thread-1", "tokenUsage": TOKEN_USAGE},
+                )
+                await adapter.end_call()
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert [line["thread_id"] for line in _lines(self.file(tmp_path))] == ["thread-1"]
+
+    def test_the_accounts_rate_limits_are_recorded_as_codex_reports_them(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, _ = await riding(server, Sink(), usage_ledger=self.ledger(tmp_path))
+                await server.notify_all("account/rateLimits/updated", RATE_LIMITS)
+                await adapter.ensure_call(dial())
+                await adapter.end_call()
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert _lines(self.file(tmp_path)) == [
+            {"at": "2026-09-17T09:40:00+12:00", "kind": "rate_limits", "payload": RATE_LIMITS}
+        ]
+
+    def test_a_new_month_starts_a_new_file_and_leaves_the_old_one(
+        self, socket_path: Path, tmp_path: Path
+    ) -> None:
+        clock = _WallClock(datetime(2026, 9, 30, 23, 59, tzinfo=NZST))
+
+        async def scenario() -> None:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, audio = await riding(
+                    server, Sink(), usage_ledger=self.ledger(tmp_path, clock)
+                )
+                await adapter.ensure_call(dial())
+                audio.emit(REALTIME_USAGE)
+                clock.now = datetime(2026, 10, 1, 0, 0, 15, tzinfo=NZST)
+                audio.emit(REALTIME_USAGE)
+                await adapter.end_call()
+                await adapter.aclose()
+
+        asyncio.run(scenario())
+
+        assert [line["at"] for line in _lines(self.file(tmp_path, "2026-09"))] == [
+            "2026-09-30T23:59:00+12:00"
+        ]
+        assert [line["at"] for line in _lines(self.file(tmp_path, "2026-10"))] == [
+            "2026-10-01T00:00:15+12:00"
+        ]
+
+    def test_a_ledger_that_cannot_be_written_costs_one_warning_and_nothing_else(
+        self, socket_path: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        blocked = tmp_path / "not-a-directory"
+        blocked.write_text("a file where the directory should be", encoding="utf-8")
+
+        async def scenario() -> CallState:
+            async with FakeAppServer(socket_path) as server:
+                realtime_script(server)
+                adapter, audio = await riding(server, Sink(), usage_ledger=self.ledger(blocked))
+                snapshot = await adapter.ensure_call(dial())
+                audio.emit(REALTIME_USAGE)
+                audio.emit(REALTIME_USAGE)
+                await adapter.end_call()
+                await adapter.aclose()
+                return snapshot.state
+
+        with caplog.at_level(logging.WARNING):
+            assert asyncio.run(scenario()) is CallState.UP
+
+        warnings = [r for r in caplog.records if "usage ledger" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == logging.WARNING
+
+
+def _delegated_with_usage(server: Any, *, thread_id: str) -> None:
+    """One Delegated Turn whose usage is reported before it completes, as codex does."""
+    server.answers("thread/start", {"thread": {"id": thread_id}, "model": "gpt-5"})
+    server.answers("thread/resume", {"thread": {"id": thread_id}, "model": "gpt-5"})
+    server.answers("thread/unsubscribe", {})
+
+    def start_turn(_params: dict[str, Any]) -> dict[str, Any]:
+        async def finish() -> None:
+            await server.notify_all(
+                "item/completed",
+                {
+                    "threadId": thread_id,
+                    "turnId": "turn-1",
+                    "item": {"type": "agentMessage", "id": "item-1", "text": "done"},
+                },
+            )
+            await server.notify_all(
+                "thread/tokenUsage/updated",
+                {"threadId": thread_id, "turnId": "turn-1", "tokenUsage": TOKEN_USAGE},
+            )
+            await server.notify_all(
+                "turn/completed",
+                {"threadId": thread_id, "turn": {"id": "turn-1", "status": "completed"}},
+            )
+
+        asyncio.ensure_future(finish())
+        return {"turn": {"id": "turn-1"}}
+
+    server.answers("turn/start", start_turn)

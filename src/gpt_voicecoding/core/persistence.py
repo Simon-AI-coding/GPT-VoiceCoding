@@ -20,7 +20,7 @@ precisely how the reference implementation grew two live ledgers. Crash safety
 comes from writing a temporary file and renaming it over the target, so a reader
 sees either the whole previous state or the whole new one, never half of either.
 If a durable *history* is ever needed, that is a different store and a different
-decision.
+decision — the usage ledger is one such (ADR 0032), and it is not this file.
 
 **Location.** `~/Library/Application Support/GPT-VoiceCoding/engine/state.json` by
 default, and the base directory is a parameter so tests point it somewhere else

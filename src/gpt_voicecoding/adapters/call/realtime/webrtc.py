@@ -45,6 +45,7 @@ from typing import Any
 from gpt_voicecoding.adapters.call.realtime.transport import (
     CallTransport,
     CueOutput,
+    EventHandler,
     LostHandler,
     TransportError,
     TransportFactory,
@@ -312,6 +313,8 @@ class _WebRtcTransport:
         # all. Event types seen here are named in the log once each, so a run
         # shows what this backend actually sends.
         self._events_seen: set[str] = set()
+        #: Who is handed each of those events (#377). None until the adapter asks.
+        self._on_event: EventHandler | None = None
         channel = self._pc.createDataChannel(EVENTS_CHANNEL)
 
         @channel.on("message")
@@ -434,8 +437,11 @@ class _WebRtcTransport:
         census stays: it is how the next codex protocol change gets noticed
         rather than silently absorbed.
 
+        Since #377 each event is also handed to whoever asked with `on_event`:
+        the Voice's own usage arrives on this channel and nowhere else.
+
         Anything that is not a JSON object with a string `type` is not a server
-        event and is not named.
+        event, and is neither named nor handed up.
         """
         if isinstance(message, bytes | bytearray):
             message = message.decode("utf-8", errors="replace")
@@ -453,9 +459,19 @@ class _WebRtcTransport:
         if kind not in self._events_seen:
             self._events_seen.add(kind)
             _log.info("the realtime events channel carried %s", kind)
+        handler = self._on_event
+        if handler is None:
+            return
+        try:
+            handler(event)
+        except Exception:
+            _log.exception("a realtime events channel event handler raised")
 
     def on_lost(self, handler: LostHandler) -> None:
         self._on_lost = handler
+
+    def on_event(self, handler: EventHandler) -> None:
+        self._on_event = handler
 
     async def aclose(self) -> None:
         if self._closing:

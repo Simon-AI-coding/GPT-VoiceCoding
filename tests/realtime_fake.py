@@ -16,7 +16,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from gpt_voicecoding.adapters.call.realtime.transport import LostHandler, TransportError
+from gpt_voicecoding.adapters.call.realtime.transport import (
+    EventHandler,
+    LostHandler,
+    TransportError,
+)
 
 #: What a real offer looks like, near enough. Nothing parses it.
 OFFER_SDP = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
@@ -65,6 +69,7 @@ class FakeTransport:
         self.closed = False
         self._connected = False
         self._on_lost: LostHandler | None = None
+        self._on_event: EventHandler | None = None
         #: Whether the speaker has finished playing what it was sent. A test
         #: that wants to hold the Voice's stop edge open sets it False, which is
         #: what a real transport reports while audio is still going out (#195).
@@ -102,6 +107,9 @@ class FakeTransport:
     def on_lost(self, handler: LostHandler) -> None:
         self._on_lost = handler
 
+    def on_event(self, handler: EventHandler) -> None:
+        self._on_event = handler
+
     async def aclose(self) -> None:
         self.closed = True
         self._connected = False
@@ -114,6 +122,11 @@ class FakeTransport:
         handler, self._on_lost = self._on_lost, None
         if handler is not None:
             handler(reason)
+
+    def emit(self, event: dict[str, Any]) -> None:
+        """The realtime events channel carries one server event."""
+        if self._on_event is not None:
+            self._on_event(event)
 
     def go_quiet(self) -> None:
         """Audio stops without anything announcing it — a `speak` grades UNKNOWN."""

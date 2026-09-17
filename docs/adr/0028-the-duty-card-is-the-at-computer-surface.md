@@ -156,3 +156,43 @@ Restart now reloads Shell text directly for language-only changes; combined
 changes reload that text after the replacement engine is reachable. Calling,
 On a call and Ending disable the action without scheduling a later restart.
 Appearance remains immediate and independent.
+
+## Amendment — the Control Panel floats with the Lamp (2026-09-17)
+
+Opened over a full-screen app, the Control Panel switched the user to another
+Space: it was a normal window, and opening it made the app a regular one and
+activated it, which macOS answers by moving to a Space where that window can
+live. The Panel is now a floating panel that joins every Space and full-screen
+app, as the Lamp does, and the app stays a menu-bar application while it is
+open: opening it activates the app without making it a regular one, so it no
+longer joins the Dock and the app switcher — a panel that floats cannot be
+covered. It floats one level under the Lamp, so the Lamp, its strip and its
+bubbles stay above it. A non-activating Panel was tried first and rejected:
+with the app activated by the Lamp click, a click on that Panel handed
+activation back to the front app, so the click reached the monitor for other
+applications' clicks, in the Panel's own coordinates, and closed the Panel
+under the user's hand (logged 2026-09-17). ADR 0029's interface and height
+rule are unchanged; its title bar stays for the width resize, without buttons,
+and the content runs under it from the top edge, so the window is exactly as
+tall as its content.
+
+Every door opens the same panel, anchored below and right-aligned to the
+Lamp's place — its saved place while Duty is off. Once shown it is the user's
+to drag by any part that is not a control (by its top edge alone before macOS
+15), apart from the Lamp: dragging either leaves the other where it is, and
+navigating inside it keeps its place. It closes on a second Lamp click, on
+Escape (after any confirmation Escape cancels first), or when the app stops
+being active — the user clicked another application. No click monitor decides
+it; clicks inside this app, its menus included, never close it. Closing it
+from outside cancels a Telegram binding in progress, as any close does.
+
+Hover over any part of the Lamp expands Call / Hang up, Control and Settings
+to its left; the strip and the gap before it belong to the reading region, so
+travelling onto the strip keeps it open. While the Lamp is dragged, the strip
+and every bubble are withdrawn — carried along they made the drag stutter —
+and they return beside the Lamp where it lands. A click on the right slot
+opens or closes the Control Panel; the left cell and the secondary click are
+unchanged. While the Panel is open the Lamp shows no Session bubble — neither
+the hover row, nor a reminder, nor a failed dial's notice; a reminder that
+arrives then is not replayed later. The hang-up and quit asks and the engine
+notice still show, above the Panel.

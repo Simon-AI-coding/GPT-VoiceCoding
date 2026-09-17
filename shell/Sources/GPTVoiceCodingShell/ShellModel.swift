@@ -85,7 +85,6 @@ final class ShellModel {
     private static let briefInterval: TimeInterval = 2
     private(set) var page: ShellPage?
     private(set) var windowRequest = 0
-    private(set) var windowRequestedFromLamp = false
     var confirmation: ShellConfirmation?
     private var quitRequestedFromLamp = false
     var confirmationOnLamp: Bool {
@@ -93,7 +92,8 @@ final class ShellModel {
             && (confirmation == .hangUp
                 || (confirmation == .quit && (quitRequestedFromLamp || !windowOpen)))
     }
-    var cardActionsVisible = false
+    /// The strip follows the reading region; the Quit strip takes its place.
+    var cardActionsVisible: Bool { cardVisible && lampPointerInside && !cardQuitVisible }
     var cardQuitVisible = false
     var lampCellHovered = false
     var lampCellPressed = false
@@ -144,6 +144,8 @@ final class ShellModel {
         guard cardVisible else { return nil }
         if confirmationOnLamp { return .confirmation }
         if !panel.engineReachable { return .engine }
+        // The open Control Panel holds the Session list; no bubble covers it.
+        if windowOpen { return nil }
         if let lampNotice { return lampNotice }
         if lampPointerInside, let row = panel.firstCountedRow { return .session(row) }
         return nil
@@ -204,23 +206,18 @@ final class ShellModel {
         }
     }
 
-    func toggleLampActions(secondary: Bool = false) {
-        if secondary {
-            cardQuitVisible.toggle()
-            cardActionsVisible = false
-        } else {
-            cardActionsVisible.toggle()
-            cardQuitVisible = false
-        }
-    }
+    func toggleLampQuit() { cardQuitVisible.toggle() }
 
-    func dismissLampActions() {
-        cardActionsVisible = false
+    func dismissLampActions() { cardQuitVisible = false }
+
+    /// The Lamp's right slot: a second click closes what the first opened.
+    func toggleControlPanel() {
+        if windowOpen { closeWindow() } else { open(.home) }
         cardQuitVisible = false
     }
 
     func openLampBrief(_ target: SessionAddress) {
-        open(.session(target), fromLamp: true)
+        open(.session(target))
         setLampPointer(inside: false)
     }
     private(set) var text: ShellText
@@ -611,8 +608,7 @@ final class ShellModel {
         credentialFileObserver = nil
     }
 
-    func open(_ page: ShellPage, fromLamp: Bool = false) {
-        windowRequestedFromLamp = fromLamp
+    func open(_ page: ShellPage) {
         if self.page == .settings(.telegram) || self.page == .onboarding(.telegram),
             page != self.page
         {
@@ -625,7 +621,7 @@ final class ShellModel {
         }
         self.page = page
         windowRequest += 1
-        cardActionsVisible = false
+        cardQuitVisible = false
         synchronizePolling()
         if page == .settings(.diagnostics) {
             Task {

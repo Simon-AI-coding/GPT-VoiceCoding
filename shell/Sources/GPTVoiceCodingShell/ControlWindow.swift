@@ -1,18 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// The Control Panel's one normal window, and the only place that knows its height (ADR 0029).
+/// The Control Panel's one window, and the only place that knows its height (ADR 0029).
+///
+/// It floats just under the Lamp over every Space and full-screen app, so opening it never moves
+/// the user to another Space, and any part of it that is not a control drags it (ADR 0028).
 ///
 /// Invariant: the content area is as tall as the content's natural height, up to the screen's
 /// visible height, and only beyond that does it scroll. The user resizes the width, never the
 /// height. Callers decide whether the window is shown and where it anchors; they never measure.
 @MainActor
 final class ControlWindow: NSObject, NSWindowDelegate {
-    let window = NSWindow(
+    private let panel = ControlPanelWindow(
         contentRect: NSRect(x: 0, y: 0, width: Phosphor.windowWidth, height: 1),
-        styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        styleMask: [.titled, .resizable, .fullSizeContentView],
         backing: .buffered, defer: true)
-    /// Called when the user closes the window from its title bar.
+    var window: NSWindow { panel }
+    /// Called when the user dismisses the window with Escape.
     var onClose: () -> Void = {}
     private var host: NSHostingView<MeasuredContent>!
     private let scroll = NSScrollView()
@@ -25,9 +29,16 @@ final class ControlWindow: NSObject, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
+        // Above every normal window, one step under the Lamp so its bubbles stay on top.
+        window.level = NSWindow.Level(DutyPanel.lampLevel.rawValue - 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
         window.delegate = self
         window.contentMinSize.width = Phosphor.windowWidth
-        window.standardWindowButton(.zoomButton)?.isEnabled = false
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = true
+        }
+        panel.cancel = { [weak self] in self?.onClose() }
         let host = NSHostingView(
             rootView: MeasuredContent(content: AnyView(content)) { [weak self] height in
                 self?.fit(contentHeight: height)
@@ -37,6 +48,7 @@ final class ControlWindow: NSObject, NSWindowDelegate {
         host.autoresizingMask = [.width]
         self.host = host
         scroll.drawsBackground = false
+        scroll.automaticallyAdjustsContentInsets = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
@@ -59,7 +71,6 @@ final class ControlWindow: NSObject, NSWindowDelegate {
                 Self.frame(window.frame, height: window.frame.height, anchor: lamp, screen: screen),
                 display: true)
         }
-        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -76,10 +87,9 @@ final class ControlWindow: NSObject, NSWindowDelegate {
         let contentHeight = ceil(height)
         host.frame.size.height = contentHeight
         guard let screen = window.screen ?? NSScreen.main else { return }
+        // The content runs under the hidden title bar and leaves room for it itself.
         let frame = Self.frame(
-            window.frame,
-            height: Self.frameHeight(contentHeight: contentHeight, styleMask: window.styleMask),
-            anchor: nil, screen: screen.visibleFrame)
+            window.frame, height: contentHeight, anchor: nil, screen: screen.visibleFrame)
         if frame != window.frame { window.setFrame(frame, display: true) }
     }
 
@@ -105,13 +115,6 @@ final class ControlWindow: NSObject, NSWindowDelegate {
             width: size.width, height: size.height)
     }
 
-    static func frameHeight(contentHeight: CGFloat, styleMask: NSWindow.StyleMask) -> CGFloat {
-        let contentRect = NSRect(x: 0, y: 0, width: 1, height: ceil(contentHeight))
-        return NSWindow.frameRect(
-            forContentRect: contentRect, styleMask: styleMask.subtracting(.fullSizeContentView)
-        ).height
-    }
-
     func windowDidResize(_ notification: Notification) {
         let width = scroll.bounds.width
         guard host.rootView.width != width else { return }
@@ -121,8 +124,11 @@ final class ControlWindow: NSObject, NSWindowDelegate {
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         NSSize(width: frameSize.width, height: sender.frame.height)
     }
+}
 
-    func windowWillClose(_ notification: Notification) { onClose() }
+private final class ControlPanelWindow: NSPanel {
+    var cancel: () -> Void = {}
+    override func cancelOperation(_ sender: Any?) { cancel() }
 }
 
 private struct MeasuredContent: View {
@@ -136,6 +142,19 @@ private struct MeasuredContent: View {
     var body: some View {
         // Not a preference: in this host it stopped arriving after the first layouts (ADR 0029).
         content.frame(width: width).fixedSize(horizontal: false, vertical: true)
+            .contentShape(Rectangle()).modifier(DragsWindow())
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }, action: changed)
+    }
+}
+
+/// Controls keep their own clicks; everything else moves the window. Before macOS 15 only the
+/// title bar does.
+private struct DragsWindow: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.gesture(WindowDragGesture())
+        } else {
+            content
+        }
     }
 }

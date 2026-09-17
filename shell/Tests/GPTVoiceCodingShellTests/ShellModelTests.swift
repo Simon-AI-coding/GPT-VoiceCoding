@@ -304,8 +304,8 @@ import Testing
                 await panel.refresh()
                 model.updateLamp()
             case "hover": model.setLampPointer(inside: true)
-            case "actions": model.toggleLampActions()
-            case "quit": model.toggleLampActions(secondary: true)
+            case "actions": model.setLampPointer(inside: true)
+            case "quit": model.toggleLampQuit()
             case "confirm": model.quit()
             case "hangup-hover": model.lampCellHovered = true
             case "hangup-confirm": await model.activateLampCell()
@@ -376,10 +376,19 @@ import Testing
         let lampHost = try #require(lamp.contentView as? LampHostingView)
         #expect(lampHost.cursor(at: NSPoint(x: 60, y: 13)) === NSCursor.pointingHand)
         #expect(lampHost.cursor(at: NSPoint(x: 10, y: 13)) === NSCursor.pointingHand)
-        model.toggleLampActions()
+        model.toggleLampQuit()
         #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 2 })
-        let actions = try #require(
+        let quitStrip = try #require(
             surfaces.first { $0 !== lamp && $0 is DutyPanel && $0.isVisible })
+        #expect(quitStrip.frame.maxX == anchor.minX - Phosphor.actionGap)
+        model.toggleLampQuit()
+        model.setLampPointer(inside: true)
+        #expect(model.cardActionsVisible)
+        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 3 })
+        let actions = try #require(
+            surfaces.first {
+                $0 !== lamp && $0 is DutyPanel && $0.isVisible && $0.frame.height == 26
+            })
         let actionWidth = actions.frame.width
         #expect(actions.frame.maxX == anchor.minX - Phosphor.actionGap)
         #expect(actions.frame.height == 26)
@@ -387,13 +396,27 @@ import Testing
         try #require(await waitUntil { model.panel.phase == .onCall })
         await Task.yield()
         #expect(actions.frame.width == actionWidth)
-        model.setLampPointer(inside: true)
-        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 3 })
         let bubble = try #require(
             surfaces.first { $0 !== lamp && $0 !== actions && $0 is DutyPanel && $0.isVisible })
         #expect(bubble.frame.width == 280)
         #expect(bubble.frame.maxX == anchor.maxX)
         #expect(bubble.frame.maxY == anchor.minY - Phosphor.bubbleGap)
+        // A drag withdraws the strip and the bubble, and they return where the Lamp lands.
+        lampHost.onDrag(true)
+        #expect(!actions.isVisible && !bubble.isVisible)
+        let landed = NSPoint(x: anchor.minX - 50, y: anchor.minY - 40)
+        lamp.setFrameOrigin(landed)
+        model.setLampPointer(inside: false)
+        model.setLampPointer(inside: true)
+        for _ in 0..<5 { await Task.yield() }
+        #expect(!actions.isVisible && !bubble.isVisible)
+        lampHost.onDrag(false)
+        model.setLampPointer(inside: true)
+        #expect(await waitUntil { actions.isVisible && bubble.isVisible })
+        #expect(actions.frame.maxX == landed.x - Phosphor.actionGap)
+        #expect(bubble.frame.maxY == landed.y - Phosphor.bubbleGap)
+        lamp.setFrameOrigin(anchor.origin)
+        #expect(await waitUntil { bubble.frame.maxY == anchor.minY - Phosphor.bubbleGap })
         for appearance in [ShellAppearance.dark, .light, .system] {
             model.setAppearance(appearance)
             #expect(
@@ -422,9 +445,22 @@ import Testing
         model.dismissLampActions()
         #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 1 })
         #expect(lamp.frame == anchor)
-        model.open(.settings(.general), fromLamp: true)
+        let policy = NSApp.activationPolicy()
+        model.open(.settings(.general))
         let control = try #require(surfaces.first { !($0 is DutyPanel) })
         #expect(await waitUntil { control.isVisible && control.frame.height > 100 })
+        #expect(NSApp.activationPolicy() == policy)
+        #expect(control is NSPanel && !control.styleMask.contains(.nonactivatingPanel))
+        #expect(control.collectionBehavior.contains([.canJoinAllSpaces, .fullScreenAuxiliary]))
+        #expect(control.level > .normal && control.level < lamp.level)
+        #expect(control.canBecomeKey)
+        #expect(control.standardWindowButton(.closeButton)?.isHidden == true)
+        // Hovering while the panel is open expands the strip but shows no Session bubble.
+        model.setLampPointer(inside: true)
+        #expect(model.cardActionsVisible)
+        #expect(model.lampBubble == nil)
+        #expect(await waitUntil { surfaces.filter { $0 is DutyPanel && $0.isVisible }.count == 2 })
+        model.setLampPointer(inside: false)
         let top = control.frame.maxY
         #expect(control.frame.maxX == anchor.maxX)
         #expect(top == anchor.minY - Phosphor.bubbleGap)
@@ -436,9 +472,81 @@ import Testing
             #expect(control.frame.maxX == anchor.maxX)
             #expect(control.frame.width == Phosphor.windowWidth)
         }
-        model.closeWindow()
+        // The open panel moves on its own; the Lamp and it never drag each other.
+        #expect(control.isMovable)
+        let placed = control.frame
+        lamp.setFrameOrigin(NSPoint(x: anchor.minX - 40, y: anchor.minY - 30))
+        for _ in 0..<5 { await Task.yield() }
+        #expect(control.frame == placed)
+        control.setFrameOrigin(NSPoint(x: placed.minX - 60, y: placed.minY - 20))
+        model.open(.settings(.voice))
+        for _ in 0..<5 { await Task.yield() }
+        #expect(control.frame.origin == NSPoint(x: placed.minX - 60, y: control.frame.minY))
+        #expect(control.frame.maxY == placed.maxY - 20)
+        #expect(lamp.frame.origin == NSPoint(x: anchor.minX - 40, y: anchor.minY - 30))
+        lamp.setFrameOrigin(anchor.origin)
+        // Escape closes the panel; a second open lands under the Lamp again.
+        #expect(control.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil))
+        #expect(await waitUntil { !model.windowOpen && !control.isVisible })
+        model.toggleControlPanel()
+        #expect(await waitUntil { control.isVisible })
+        #expect(control.frame.maxY == top)
+        model.toggleControlPanel()
+        #expect(await waitUntil { !control.isVisible })
         await model.setDuty(false)
         #expect(await waitUntil { !surfaces.contains(where: \.isVisible) })
+        // With Duty off, every door still opens the panel at the Lamp's place.
+        model.open(.home)
+        #expect(await waitUntil { control.isVisible })
+        #expect(!lamp.isVisible)
+        #expect(control.frame.maxX == anchor.maxX)
+        #expect(control.frame.maxY == top)
+        model.closeWindow()
+        #expect(await waitUntil { !surfaces.contains(where: \.isVisible) })
+    }
+
+    @Test func theLampClickTogglesTheControlPanelAndItsOpenPanelHidesSessionBubbles()
+        async throws
+    {
+        let fixture = try TelegramCredentialFixture()
+        let engine = LampControlPlane()
+        let (_, model) = makeShell(
+            fixture: fixture, launcher: RecordingEngineLauncher(),
+            panel: ControlPanel(client: engine))
+        await model.panel.refresh()
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(!model.cardActionsVisible)
+        model.setLampPointer(inside: true)
+        #expect(model.cardActionsVisible)
+        #expect(model.lampBubble?.row != nil)
+        model.toggleLampQuit()
+        #expect(model.cardQuitVisible && !model.cardActionsVisible)
+        model.toggleControlPanel()
+        #expect(model.page == .home)
+        #expect(!model.cardQuitVisible && model.cardActionsVisible)
+        #expect(model.lampBubble == nil)
+        // A reminder that arrives while the panel is open is not replayed after it closes.
+        engine.reminder = "while open"
+        await model.panel.refreshRoster()
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        model.setLampPointer(inside: false)
+        model.toggleControlPanel()
+        #expect(model.page == nil)
+        model.updateLamp()
+        #expect(model.lampBubble == nil)
+        // The asks the user must answer still show over the panel.
+        model.open(.home)
+        model.confirmation = .hangUp
+        #expect(model.lampBubble == .confirmation)
+        model.confirmation = nil
+        engine.reachable = false
+        await model.panel.refresh()
+        model.updateLamp()
+        #expect(model.lampBubble == .engine)
+        model.closeWindow()
+        await model.stopEngine()
     }
 
     @Test func generalAppearanceChoicesRenderInBothLanguagesAndThemes() async throws {

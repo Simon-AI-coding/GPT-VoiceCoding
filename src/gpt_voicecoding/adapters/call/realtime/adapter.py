@@ -122,6 +122,7 @@ from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.events import EventSink
 from gpt_voicecoding.seams.identity import RequestId, SessionName
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
+from gpt_voicecoding.usage_ledger import UsageKind, UsageLedger, UsageRole
 
 _log = logging.getLogger(__name__)
 
@@ -221,6 +222,12 @@ VOICE_SAID_LINE = "the Voice said: %s"
 #: wake-ups a pause rather than forty.
 USER_QUIET_POLL_FRACTION = 0.25
 
+#: The realtime events-channel event that carries the Voice's own usage (#377).
+#: Its shape was read off codex's own log of a real call on 2026-09-17 —
+#: `usage.audio_duration_ms`, `usage.backend_model_usage`, `usage_limit` — and it
+#: carries no transcript, so it is recorded as it arrives.
+REALTIME_USAGE_EVENT = "session.usage.updated"
+
 
 class _Abandoned(Exception):
     """This call attempt was hung up or dropped while the handshake was running."""
@@ -242,6 +249,10 @@ class _LiveCall:
     started: asyncio.Future[None]
     #: What codex called the thread, once it has said. None until then.
     thread_id: str | None = None
+    #: What codex called this call's realtime session, if it said. The thread
+    #: outlives a call (#270), so this is what tells two calls on it apart in
+    #: the usage ledger (#377).
+    realtime_session_id: str | None = None
     #: Set when *this side* asked for the end, so the far side going quiet
     #: afterwards is not reported as a loss.
     ending: bool = False
@@ -316,8 +327,13 @@ class RealtimeCallAdapter:
         settings: RealtimeCallSettings | None = None,
         transport_factory: TransportFactory,
         cue_player: CueOutput | None = None,
+        usage_ledger: UsageLedger | None = None,
     ) -> None:
         self._sink = sink
+        #: Where the usage of the Codex work this adapter starts is written down
+        #: (#377). The composition root always hands one in; None is for tests
+        #: that are about something else.
+        self._usage = usage_ledger
         self._settings = settings or RealtimeCallSettings()
         #: The model the Call Agent runs on, and the same value every Delegated
         #: Turn is given (#270). Constructor-shaped and not a settings key,
@@ -349,6 +365,10 @@ class RealtimeCallAdapter:
         #: The current Call Agent's thread, retained between system calls and
         #: for late completions (#270). User dials, forget, and restart clear it.
         self._last_call_thread: str | None = None
+        #: The realtime session of the last call that came up on that thread,
+        #: so a Call Agent reading that lands after the hang-up still names the
+        #: call it belongs to in the usage ledger (#377). Cleared with the thread.
+        self._last_realtime_session: str | None = None
         self._state = CallState.DOWN
         self._delegating: dict[str, _DelegatedTurn] = {}
         #: Work started from a notification callback, so none of it outlives
@@ -471,6 +491,7 @@ class RealtimeCallAdapter:
 
     def forget_call_agent(self) -> None:
         self._last_call_thread = None
+        self._last_realtime_session = None
         self._call_agent = None
 
     async def models(self) -> tuple[ModelChoice, ...]:
@@ -793,6 +814,7 @@ class RealtimeCallAdapter:
             transport=self._new_transport(), sdp=loop.create_future(), started=loop.create_future()
         )
         live.transport.on_lost(lambda reason, held=live: self._lost(held, reason))
+        live.transport.on_event(lambda event, held=live: self._channel_event(held, event))
         self._call = live
         self._state = CallState.CONNECTING
         return live
@@ -999,6 +1021,7 @@ class RealtimeCallAdapter:
         if not isinstance(params, dict):
             return
         thread_id = params.get("threadId")
+        self._record_usage(str(method), thread_id, params)
 
         if method == "thread/tokenUsage/updated" and thread_id == self._last_call_thread:
             agent = self._call_agent
@@ -1036,6 +1059,61 @@ class RealtimeCallAdapter:
             # line is a separate question and not this one's to answer.
             _log.info("a Call Agent turn ended after its call was over: %s", thread_id)
 
+    def _record_usage(self, method: str, thread_id: object, params: Message) -> None:
+        """Write down what Codex says this product's own work cost (#377).
+
+        **Only threads this adapter is running.** The Call Agent's thread — for
+        as long as it is the current one, so a turn that outlives its call still
+        counts — and a Delegated Turn's thread while that turn is in flight. The
+        user's own Sessions ride the shared daemon, not this server; the filter
+        is what keeps that true if they ever do not, and it keeps no list of
+        conversations beyond the turn that is running (ADR 0021 §7).
+
+        **Every rate-limit reading.** It names no thread, and everything on this
+        server is this product's own work — codex sends one beside each token
+        reading.
+        """
+        if self._usage is None:
+            return
+        if method == "account/rateLimits/updated":
+            self._usage.record(UsageKind.RATE_LIMITS, payload=params)
+            return
+        if method != "thread/tokenUsage/updated" or not isinstance(thread_id, str):
+            return
+        usage = params.get("tokenUsage")
+        turn_id = params.get("turnId")
+        if thread_id == self._last_call_thread:
+            self._usage.record(
+                UsageKind.CODEX_THREAD,
+                role=UsageRole.CALL_AGENT.value,
+                # A Call Agent's thread is the call id this system uses (`CallStarted`).
+                call_id=thread_id,
+                realtime_session_id=self._last_realtime_session,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                payload=usage,
+            )
+        elif thread_id in self._delegating:
+            self._usage.record(
+                UsageKind.CODEX_THREAD,
+                role=UsageRole.DELEGATED_TURN.value,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                payload=usage,
+            )
+
+    def _channel_event(self, live: _LiveCall, event: dict[str, Any]) -> None:
+        """One server event off this call's realtime channel. Only usage is kept."""
+        if self._usage is None or event.get("type") != REALTIME_USAGE_EVENT:
+            return
+        self._usage.record(
+            UsageKind.REALTIME,
+            call_id=live.thread_id,
+            realtime_session_id=live.realtime_session_id,
+            thread_id=live.thread_id,
+            payload=event,
+        )
+
     def _call_heard(self, live: _LiveCall, method: str, params: Message) -> None:
         match method:
             case "thread/realtime/sdp":
@@ -1043,6 +1121,9 @@ class RealtimeCallAdapter:
                 if isinstance(sdp, str) and not live.sdp.done():
                     live.sdp.set_result(sdp)
             case "thread/realtime/started":
+                session = params.get("realtimeSessionId")
+                live.realtime_session_id = session if isinstance(session, str) else None
+                self._last_realtime_session = live.realtime_session_id
                 if not live.started.done():
                     live.started.set_result(None)
             case "thread/realtime/transcript/delta":

@@ -39,6 +39,7 @@ from gpt_voicecoding.adapters.call.realtime.transport import (
     TransportError,
     TransportFactory,
 )
+from gpt_voicecoding.usage_ledger import UsageLedger
 
 __all__ = [
     "APPROVAL_POLICY",
@@ -70,6 +71,7 @@ def realtime_call(
     sink: Any = None,
     settings: dict[str, Any] | None = None,
     transport_factory: TransportFactory | None = None,
+    usage_ledger: UsageLedger | None = None,
 ) -> RealtimeCallAdapter:
     """Build the adapter from an opaque settings table, refusing keys it lacks.
 
@@ -79,6 +81,9 @@ def realtime_call(
     is given. A key in `[adapters.settings.call]` would be that one value stated
     twice, free to drift; it has no default here for the same reason it has none
     in `config.py`.
+
+    `usage_ledger` arrives the same way (#377): where it lives is the engine's
+    own directory, which the root knows and this table does not.
     """
     read = RealtimeCallSettings.of(settings)
     audio, cues = (transport_factory, None) if transport_factory else _audio_from(read)
@@ -89,6 +94,7 @@ def realtime_call(
         settings=read,
         transport_factory=audio,
         cue_player=cues,
+        usage_ledger=usage_ledger,
     )
 
 

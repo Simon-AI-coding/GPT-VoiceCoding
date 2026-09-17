@@ -54,6 +54,7 @@ from gpt_voicecoding.seams.delivery import Delivery, DeliveryReceipt
 from gpt_voicecoding.seams.events import Event, EventSink
 from gpt_voicecoding.seams.identity import RequestId, SessionTarget
 from gpt_voicecoding.seams.verify import VerifyOutcome, VerifyResult
+from gpt_voicecoding.usage_ledger import UsageLedger
 
 PROGRESS_CAPTURE = ProgressPublication().capture
 
@@ -260,7 +261,10 @@ class FakeCall:
         reachable: bool = True,
         verify_result: VerifyResult | None = None,
         sink: EventSink | None = None,
+        usage_ledger: UsageLedger | None = None,
     ) -> None:
+        #: Where the root says usage is written (#377). Kept to be read back.
+        self.usage_ledger = usage_ledger
         #: What the composition root hands every Call adapter (#270): one value
         #: for the Call Agent and every Delegated Turn. Kept so a test can read
         #: back that the root passed it; nothing in this fake acts on it.

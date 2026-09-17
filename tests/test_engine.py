@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,11 @@ class ServerOwningAgent(FakeAgent):
 
 
 def call_that_rides(
-    *, delegated_turn_model: str, delegated_turn_effort: str | None = None, sink: object = None
+    *,
+    delegated_turn_model: str,
+    delegated_turn_effort: str | None = None,
+    sink: object = None,
+    usage_ledger: object = None,
 ) -> RidingCall:
     return RidingCall(
         sink=sink,
@@ -234,6 +239,14 @@ class TestAssembly:
         # The same string `[delegate] model` states, and the one the Delegated
         # Turn is run on: read from the file, not from a default in the adapter.
         assert engine.adapters.call.delegated_turn_model == "the-model-the-user-chose"
+
+    def test_the_call_seam_is_handed_a_usage_ledger_beside_the_state_file(self, home: Path) -> None:
+        """#377: always on, and written where the engine keeps its own state."""
+        engine = assembled(home)
+
+        ledger = engine.adapters.call.usage_ledger
+        september = datetime(2026, 9, 17, tzinfo=UTC)
+        assert ledger.path_for(september) == home / "usage-2026-09.jsonl"
 
     def test_a_factory_that_is_not_there_is_a_named_refusal(self, home: Path) -> None:
         text = CONFIG.replace("fakes:FakeCall", "fakes:NoSuchCall")
@@ -799,7 +812,11 @@ class HangingCall(FakeCall):
 
 
 def call_that_hangs(
-    *, delegated_turn_model: str, delegated_turn_effort: str | None = None, sink: object = None
+    *,
+    delegated_turn_model: str,
+    delegated_turn_effort: str | None = None,
+    sink: object = None,
+    usage_ledger: object = None,
 ) -> HangingCall:
     return HangingCall(
         sink=sink,

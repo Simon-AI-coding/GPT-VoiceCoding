@@ -10,9 +10,9 @@ interface that a test can stand in for, and everything else stays testable.
 
 The interface is the minimum the signalling conversation actually needs, in the
 order it needs it: an offer to send, an answer to apply, a connection to wait
-for, a state to grade a `speak` against, one fact about playout, and a way to be
-told the far side went away. Anything larger would be inventing a lifecycle
-framework for one caller.
+for, a state to grade a `speak` against, one fact about playout, a way to be
+told the far side went away, and the server events only this side can see.
+Anything larger would be inventing a lifecycle framework for one caller.
 
 **Why playout is here and not above the Call seam.** `VoiceSpeech(speaking=False)`
 means the Voice's audio has *finished playing* (#195). Only this side knows when
@@ -26,7 +26,7 @@ from numbers it could not see — the shallow shape #184 shipped and #195 closed
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class TransportError(Exception):
@@ -36,6 +36,10 @@ class TransportError(Exception):
 #: Called with the reason when the peer connection ends by itself. Never called
 #: for a close this side asked for: the adapter already knows about those.
 LostHandler = Callable[[str], None]
+
+#: Called with each server event the realtime events channel carries, already
+#: parsed: a JSON object with a string `type`. On the event loop, and must not block.
+EventHandler = Callable[[dict[str, Any]], None]
 
 
 @runtime_checkable
@@ -87,6 +91,15 @@ class CallTransport(Protocol):
 
     def on_lost(self, handler: LostHandler) -> None:
         """Be told, once, if the connection ends without being asked to."""
+        ...
+
+    def on_event(self, handler: EventHandler) -> None:
+        """Be handed every server event the realtime events channel carries (#377).
+
+        The Voice's own usage (`session.usage.updated`) arrives there and on no
+        app-server notification, so the adapter that records it has to be told.
+        A handler that raises is logged and does not stop the channel.
+        """
         ...
 
     async def aclose(self) -> None:

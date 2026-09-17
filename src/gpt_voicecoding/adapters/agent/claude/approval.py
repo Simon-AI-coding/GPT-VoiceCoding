@@ -541,9 +541,9 @@ class ApprovalListener:
     def held_question_for(self, target: SessionTarget) -> tuple[str, WaitingFor] | None:
         """The listener-private key and question for one target's newest held writer.
 
-        The key is Claude's `prompt_id` when the wire supplied one, otherwise an
-        opaque UUID minted by this listener. The generated value never replaces
-        `WaitingFor.approval_id`, whose value remains exactly what Claude sent.
+        The key is an opaque UUID this listener mints per held connection. It
+        never replaces `WaitingFor.approval_id`, whose value remains exactly the
+        `prompt_id` Claude sent — shared by every question of one user turn.
         """
         for question_id, waiting in reversed(self._waiting.items()):
             if waiting.target != target:
@@ -798,13 +798,16 @@ class ApprovalListener:
                 await self._refuse(writer, "no Session this engine holds reported that dialog")
                 return
 
+            # One key per held connection. Claude's `prompt_id` names the user's
+            # turn, and every question asked in that turn carries it, so it
+            # cannot tell two held hooks apart; it stays on the question.
+            approval_id = str(uuid.uuid4())
             question = question_from(payload)
-            if question is not None:
-                approval_id = question.approval_id or str(uuid.uuid4())
-                request = None
-            else:
-                approval_id = str(uuid.uuid4())
-                request = request_from(payload, target=target, approval_id=approval_id)
+            request = (
+                None
+                if question is not None
+                else request_from(payload, target=target, approval_id=approval_id)
+            )
             waiting = _Waiting(
                 target,
                 writer,
@@ -832,10 +835,8 @@ class ApprovalListener:
                 )
             elif question is not None:
                 _log.info(
-                    "a question is parked for %s without a prompt_id; "
-                    "engine-private correlator=%s; Reply Window opened",
+                    "a question is parked for %s without a prompt_id; Reply Window opened",
                     target,
-                    approval_id,
                 )
 
             # From here this task does exactly one thing: watch for the hook's
@@ -854,11 +855,20 @@ class ApprovalListener:
             waiting.gone.set()
             if not waiting.answered.is_set():
                 self._answered_elsewhere.add(approval_id)
-                self._question_released(
-                    waiting,
-                    reason="that question was answered elsewhere at the on-screen dialog",
+                self._waiting.pop(approval_id, None)
+                # Hooks end in the order they were parked, so an older one can
+                # end while a newer question of the same Session is still held;
+                # that newer route stays open.
+                if self.held_question_for(waiting.target) is None:
+                    self._question_released(
+                        waiting,
+                        reason="that question was answered elsewhere at the on-screen dialog",
+                    )
+                _log.info(
+                    "approval %s (prompt_id=%s) left with its dialog before a verdict arrived",
+                    approval_id,
+                    waiting.question.approval_id if waiting.question is not None else None,
                 )
-                _log.info("approval %s left with its dialog before a verdict arrived", approval_id)
         except (OSError, ConnectionError, ValueError) as broken:
             _log.info("an approval hook connection failed: %s", broken)
         finally:

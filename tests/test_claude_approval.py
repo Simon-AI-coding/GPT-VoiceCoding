@@ -39,7 +39,9 @@ import pytest
 from fakes import PROGRESS_CAPTURE
 from gpt_voicecoding.adapters.agent.claude import ClaudeAgentAdapter
 from gpt_voicecoding.adapters.agent.claude.approval import (
+    ACK_TYPE,
     ALLOW_BEHAVIOR,
+    ANSWER_FIELD,
     DENY_BEHAVIOR,
     HOOK_EVENT,
     MAX_HOOK_REQUEST_BYTES,
@@ -220,6 +222,13 @@ async def park_from_claude_code(
         lambda: bool(listener.pending()) or listener.newest_question_for(TARGET) is not None
     )
     return writer
+
+
+def held_key(listener: ApprovalListener) -> str:
+    """The listener-private key of the question it holds for `TARGET`."""
+    held = listener.held_question_for(TARGET)
+    assert held is not None, "no question is held for the test's Session"
+    return held[0]
 
 
 async def end_the_hook(listener: ApprovalListener, writer: asyncio.StreamWriter) -> None:
@@ -997,9 +1006,10 @@ class TestAQuestionRidesTheHeldHook:
     Measured on 2.1.246 (#77): the tool raises a `PermissionRequest`. Measured
     on 2.1.273 (#371): a hook `allow` whose `updatedInput` carries `answers` is
     consumed by the Session *as the user's answer*, with no error styling. #128
-    parks it under Claude's `prompt_id` when present, or a listener-private key
-    otherwise, so the next Answer Relay can use the held hook as its private
-    transport and never the permission route.
+    parks it under a listener-private key per held connection — never Claude's
+    `prompt_id`, which every question of one user turn shares — so the next
+    Answer Relay can use the held hook as its private transport and never the
+    permission route.
     """
 
     def test_a_question_payload_projects_the_whole_question(self) -> None:
@@ -1011,7 +1021,7 @@ class TestAQuestionRidesTheHeldHook:
         assert [option.text for option in waiting.options] == ["Spaces", "Tabs"]
         assert waiting.approval_id == "p-1", "the dialog's own correlator, for #128"
 
-    def test_an_answer_crosses_the_real_hook_socket_under_its_prompt_id(
+    def test_an_answer_crosses_the_real_hook_socket_under_its_held_key(
         self, socket_root: Path
     ) -> None:
         async def scenario():
@@ -1029,7 +1039,9 @@ class TestAQuestionRidesTheHeldHook:
                     socket_root,
                     question_dialog(group("Tabs or spaces?", "spaces", "tabs")),
                 )
-                receipt = await listener.answer_question("p-1", "TABS", request_id=RequestId("r-1"))
+                receipt = await listener.answer_question(
+                    held_key(listener), "TABS", request_id=RequestId("r-1")
+                )
             finally:
                 await listener.aclose()
             return receipt, await hook
@@ -1073,7 +1085,7 @@ class TestAQuestionRidesTheHeldHook:
                 await writer.drain()
                 await _until(lambda: listener.question_answerable(TARGET))
                 receipt = await listener.answer_question(
-                    "p-1", "tabs", request_id=RequestId("r-unknown")
+                    held_key(listener), "tabs", request_id=RequestId("r-unknown")
                 )
                 writer.close()
                 return receipt, sink.of(ReplyWindowChanged)
@@ -1144,7 +1156,7 @@ class TestAQuestionRidesTheHeldHook:
                     question_dialog(group("Tabs or spaces?", "spaces", "tabs")),
                 )
                 await listener.answer_question(
-                    "p-1", "  use a hybrid  ", request_id=RequestId("r-free")
+                    held_key(listener), "  use a hybrid  ", request_id=RequestId("r-free")
                 )
                 return await hook
             finally:
@@ -1189,7 +1201,9 @@ class TestAQuestionRidesTheHeldHook:
                     ),
                 )
                 receipt = await listener.answer_question(
-                    "p-1", "tabs for the first, main for the second", request_id=RequestId("r-m")
+                    held_key(listener),
+                    "tabs for the first, main for the second",
+                    request_id=RequestId("r-m"),
                 )
                 return receipt, await hook
             finally:
@@ -1231,7 +1245,9 @@ class TestAQuestionRidesTheHeldHook:
                     socket_root,
                     question_dialog(group("Which base?", "main (Recommended)", "develop")),
                 )
-                await listener.answer_question("p-1", " Main ", request_id=RequestId("r-rec"))
+                await listener.answer_question(
+                    held_key(listener), " Main ", request_id=RequestId("r-rec")
+                )
                 return await hook
             finally:
                 await listener.aclose()
@@ -1266,7 +1282,9 @@ class TestAQuestionRidesTheHeldHook:
                     socket_root,
                     question_dialog(group("", "spaces", "tabs")),
                 )
-                receipt = await listener.answer_question("p-1", "tabs", request_id=RequestId("r-0"))
+                receipt = await listener.answer_question(
+                    held_key(listener), "tabs", request_id=RequestId("r-0")
+                )
                 return receipt, listener.question_answerable(TARGET)
             finally:
                 await listener.aclose()
@@ -1484,6 +1502,71 @@ class TestAQuestionRidesTheHeldHook:
         # The one release wording a hook that ended without a verdict earns: the
         # dialog left with it, and the person is the only one who can resolve it.
         assert reason == "that question was answered elsewhere at the on-screen dialog"
+
+    def test_an_older_hook_of_the_same_prompt_leaving_keeps_the_newer_question_answerable(
+        self, socket_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Every question asked in one user turn carries that turn's `prompt_id`.
+
+        Measured on 2026-09-17: three `AskUserQuestion` calls in one turn all
+        arrived as `bce91fde…`, and each hook stayed parked until its 600-second
+        timeout even after its question was answered on screen. The first one's
+        timeout then released the third, still-held question, and two Telegram
+        answers to it were refused as no longer answerable.
+        """
+
+        async def scenario():
+            sink = Sink()
+            adapter = ClaudeAgentAdapter(
+                progress_capture=PROGRESS_CAPTURE,
+                sink=sink,
+                settings=settings_for(socket_root),
+            )
+            adapter.register_session(TARGET, socket_root / "unused-inbox.sock")
+            await adapter.connect()
+            try:
+                listener = adapter._approvals  # noqa: SLF001 - drive the real hook socket
+                answered_on_screen = await park_from_claude_code(
+                    listener, question_dialog(group("Close how?", "lamp", "outside"))
+                )
+                reader, newer = await asyncio.open_unix_connection(str(listener.path))
+                request = request_for(question_dialog(group("Tabs or spaces?", "spaces", "tabs")))
+                newer.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+                await newer.drain()
+                await _until(lambda: len(sink.of(ReplyWindowChanged)) == 2)
+                with caplog.at_level(logging.INFO):
+                    answered_on_screen.close()
+                    with contextlib.suppress(OSError, ConnectionError):
+                        await answered_on_screen.wait_closed()
+                    await _until(lambda: "left with its dialog" in caplog.text)
+                answerable = adapter.question_answerable(TARGET)
+                asked = listener.newest_question_for(TARGET)
+                windows = [event.window for event in sink.of(ReplyWindowChanged)]
+
+                async def the_hook_reads_and_acknowledges() -> dict[str, Any]:
+                    frame = json.loads(await reader.readline())
+                    newer.write(json.dumps({TYPE_FIELD: ACK_TYPE}).encode() + b"\n")
+                    await newer.drain()
+                    return frame
+
+                hook = asyncio.create_task(the_hook_reads_and_acknowledges())
+                receipt = await adapter.answer_relay(
+                    TARGET, "tabs", request_id=RequestId("r-newer")
+                )
+                frame = hook.result() if hook.done() else None
+                hook.cancel()
+                newer.close()
+            finally:
+                await adapter.aclose()
+            return answerable, asked, windows, receipt, frame
+
+        answerable, asked, windows, receipt, frame = asyncio.run(scenario())
+
+        assert answerable is True
+        assert asked is not None and asked.prompt == "Tabs or spaces?"
+        assert windows == [ReplyWindow.OPEN, ReplyWindow.OPEN], "the newer route stayed open"
+        assert receipt.outcome is Delivery.DELIVERED
+        assert frame is not None and frame[ANSWER_FIELD] == "tabs"
 
     def test_a_held_question_is_never_released_by_this_engine(self, socket_root: Path) -> None:
         """No timer, no ceiling, nothing to configure: only the wire can end it."""

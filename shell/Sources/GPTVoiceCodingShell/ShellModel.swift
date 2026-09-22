@@ -240,6 +240,8 @@ final class ShellModel {
     private var telegramRequest: Task<TelegramBindingReading?, Never>?
     private var telegramCancellation: Task<Void, Never>?
     private let runCommand: @Sendable (EngineCommand) async -> InstallationReport
+    private let runCodexUpdate: CodexUpdate.Check
+    private var codexUpdate: CodexUpdate?
     private(set) var codexCheck: CodexCheck = .checking
     private(set) var codexCheckFailure: String?
     private(set) var installationReport: InstallationReport?
@@ -378,6 +380,17 @@ final class ShellModel {
             runCommand ?? { command in
                 await InstallationRunner(report: { pathOutcomes.record($0) }).run(command)
             }
+        self.runCodexUpdate = { attempted in
+            do {
+                let command = try EngineCommand.resolveCodexUpdate(
+                    resources: Bundle.main.resourceURL, attempted: attempted)
+                if let runCommand { return await runCommand(command) }
+                return await InstallationRunner(report: { pathOutcomes.record($0) }).run(
+                    command, deadline: CodexUpdate.deadline, separateOutput: true)
+            } catch {
+                return InstallationReport(ok: false, lines: ["\(error)"])
+            }
+        }
         self.wallNow = wallNow
         self.messageNow = wallNow()
         self.now = now
@@ -507,6 +520,13 @@ final class ShellModel {
         // launchd hands an app opened from Finder (#272, ADR 0022).
         installationReport = await runCommand(command)
         installationFailure = installationReport?.failure
+        guard !Task.isCancelled && !stopping else { return }
+        if codexUpdate == nil {
+            codexUpdate = CodexUpdate(
+                check: runCodexUpdate,
+                report: { [weak self] failure in self?.installationFailure = failure })
+        }
+        codexUpdate?.checkForUpdate()
     }
 
     func checkCodex() async {
@@ -883,6 +903,7 @@ final class ShellModel {
         preparation?.cancel()
         credentialStartRecovery.cancel()
         stopCredentialObservation()
+        await codexUpdate?.stop()
         await supervisor.shutDown()
     }
 

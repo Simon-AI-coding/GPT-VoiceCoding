@@ -245,6 +245,8 @@ class HeldJob:
     program: str
     login_asid: int | None
     boot_session: str | None
+    pid: int | None = None
+    arguments: tuple[str, ...] = ()
 
     @property
     def login(self) -> tuple[int, str] | None:
@@ -313,10 +315,16 @@ class Launchd:
             return None
         found_program = re.search(r"^\s*program\s*=\s*(.+?)\s*$", said, re.MULTILINE)
         found_asid = re.search(r"^\s*asid\s*=\s*(\d+)\s*$", said, re.MULTILINE)
+        found_pid = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", said, re.MULTILINE)
+        arguments = re.search(r"\n\s*arguments = \{\n(.*?)\n\s*\}", said, re.DOTALL)
         return HeldJob(
             program=found_program.group(1) if found_program else "",
             login_asid=int(found_asid.group(1)) if found_asid else None,
             boot_session=self.ask_boot_session(),
+            pid=int(found_pid[1]) if found_pid else None,
+            arguments=tuple(line.strip() for line in arguments[1].splitlines())
+            if arguments
+            else (),
         )
 
     def bootstrap(self, path: Path) -> tuple[HeldJob | None, str]:

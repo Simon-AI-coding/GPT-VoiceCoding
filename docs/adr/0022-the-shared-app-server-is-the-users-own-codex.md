@@ -117,3 +117,33 @@ Stated rather than implied, because this ADR is written on measurements and thes
 3. **Homebrew.** The `PATH` rule is argued for a native binary, not measured against one.
 
 And one for whoever re-runs the acceptance harness's codex lane: **`approvalPolicy: "on-request"` with a `readOnly` sandbox no longer forces an approval request** on 0.153.4. #82's gate prompt produced none twice (90 s and 120 s waits) — the model answered in prose and never called the shell. `"untrusted"` produces the request immediately. A gate written on the old assumption **hangs rather than fails**.
+
+
+## Upgrade exception — #383 (2026-09-22)
+
+The app checks for a user-installed Codex upgrade at startup and on filesystem
+notifications. It validates the candidate on an isolated socket, then directly
+switches only its identified shared login job. Active turns may be interrupted;
+neither task completion nor approval/input waits delay the switch. The socket
+peer must belong to the launchd job's process group. That group is stopped,
+launchd's old definition is removed, and the group must be gone before loading
+the replacement. `bootout` returning zero alone does not prove process exit.
+
+The app-owned update module composes installation and existing Codex discovery;
+installation still imports no adapter or Bridge Core. Reconcile and uninstall
+retain their previous non-stopping behavior. The updater reuses terminal and
+VoiceCoding reconnect, reads the original live Session identities back, and
+never resumes historical Sessions or replays commands. Connection recovery does
+not mean an interrupted task continued. Closed terminals cease to be required.
+
+Using one executable path does not imply one running version: npm replaces
+files underneath a still-running process. The server's initialize userAgent
+contains its build version (the originator prefix can vary by client). The
+update check compares that version with the runnable candidate, without adding
+a version pin to the agent adapter.
+
+Only an old executable that remains present and passes validation can be used
+for recovery. No version is copied, cached, or downloaded. Failed attempts are
+remembered only for the app's lifetime to prevent repeated interruption from
+duplicate file events. Shutdown stops listening and discards queued checks;
+an already-started bounded switch finishes before the app exits.

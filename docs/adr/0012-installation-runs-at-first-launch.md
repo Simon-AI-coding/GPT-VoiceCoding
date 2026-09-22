@@ -47,3 +47,12 @@ At the time of writing there is one item, `claude_hooks.py`. The Codex login `La
 **There is no uninstall in the menu bar**, because the panel is view-only in v1.0. Uninstall is `bridge-install uninstall`, a console script that lands in the bundle's `engine/bin/` beside `bridgectl` by the same pipeline rule that needs no list of script names.
 
 **A test may not reach the machine it is running on, and one line of design was not enough to hold that (#83).** Two drafts of the Codex item loaded a real login job into the author's own launchd — the second started the real shared Codex daemon — because `Launchd` and `home` had defaults that resolved to the real ones and a test that omitted them passed. Defaults were removed and `bridge-install`'s test-only keyword arguments grew to five, but the guard that actually holds is in `tests/conftest.py`: the real `launchctl` runner is taken away from the whole suite, so a test that forgets fails loudly instead of silently changing the machine. Every item added to this boundary that runs a subprocess belongs behind that same fixture.
+
+
+## Upgrade exception — #383 (2026-09-22)
+
+The app-owned upgrade module may stop the identified shared login job after
+validating a user-installed newer candidate. Reconcile and uninstall keep their
+non-stopping behavior, and installation still imports no adapter or Bridge Core.
+The direct-switch, recovery, and storage rules live in
+[ADR 0022's upgrade amendment](0022-the-shared-app-server-is-the-users-own-codex.md#upgrade-exception--383-2026-09-22).

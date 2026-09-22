@@ -80,6 +80,16 @@ public struct EngineCommand: Equatable, Sendable {
             searchPath: searchPath)
     }
 
+    public static func resolveCodexUpdate(
+        resources: URL?, attempted: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> EngineCommand {
+        try resolve(
+            resources: resources,
+            arguments: ["-m", "gpt_voicecoding.codex_update", "--attempted", attempted],
+            environment: environment, searchPath: nil)
+    }
+
     private static func resolve(
         resources: URL?,
         arguments: [String],
